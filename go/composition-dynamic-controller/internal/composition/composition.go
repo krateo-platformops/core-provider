@@ -625,7 +625,9 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		releaseStatus:   string(rel.Status),
 		releaseRevision: rel.Revision,
 		releaseName:     rel.Name,
-		conditionType:   ConditionTypeAvailable,
+		// Creating, not Available: children cannot be healthy the instant Install returns; the first
+		// post-install Observe runs the child-health rollup and promotes to Available (or Unavailable).
+		conditionType: ConditionTypeCreating,
 	})
 	if err != nil {
 		return fmt.Errorf("setting status: %w", err)
