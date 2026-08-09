@@ -18,6 +18,10 @@ type Resource struct {
 	Resource  string `json:"resource"`
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	// Verbs to grant on this resource. Set by chart-inspector's tracer: [get,list,watch] for a
+	// collection read (Helm `lookup` of a set), ["*"] for a named observation. Absent (older
+	// inspector) is treated as ["*"] by rbacgen — backward-compatible.
+	Verbs []string `json:"verbs,omitempty"`
 }
 
 type Parameters struct {

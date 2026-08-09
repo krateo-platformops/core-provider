@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,7 @@ func TestTracerMultiplePaths(t *testing.T) {
 				Resource:  "deployments",
 				Namespace: "default",
 				Name:      "my-dep",
+				Verbs:     []string{"*"}, // named observation
 			},
 		},
 		{
@@ -74,6 +76,7 @@ func TestTracerMultiplePaths(t *testing.T) {
 				Resource:  "services",
 				Namespace: "kube-system",
 				Name:      "kube-dns",
+				Verbs:     []string{"*"},
 			},
 		},
 		{
@@ -84,6 +87,7 @@ func TestTracerMultiplePaths(t *testing.T) {
 				Resource:  "jobs",
 				Namespace: "",
 				Name:      "my-job",
+				Verbs:     []string{"*"},
 			},
 		},
 	}
@@ -102,7 +106,7 @@ func TestTracerMultiplePaths(t *testing.T) {
 	}
 
 	for i, p := range paths {
-		if resources[i] != p.expected {
+		if !reflect.DeepEqual(resources[i], p.expected) {
 			t.Errorf("resource %d: expected %+v, got %+v", i, p.expected, resources[i])
 		}
 	}
@@ -216,7 +220,7 @@ func TestTracerGetResourcesReturnsDeepCopy(t *testing.T) {
 		t.Fatalf("expected same resource count, got %d vs %d", len(resources1), len(resources2))
 	}
 
-	if resources1[0] != resources2[0] {
+	if !reflect.DeepEqual(resources1[0], resources2[0]) {
 		t.Errorf("expected equal resources: %+v vs %+v", resources1[0], resources2[0])
 	}
 

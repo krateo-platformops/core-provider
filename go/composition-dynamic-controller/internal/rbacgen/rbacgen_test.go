@@ -251,8 +251,8 @@ func TestRBACGen_Generate(t *testing.T) {
 
 		assert.NoError(t, err)
 		assert.NotNil(t, policy)
-		assert.Len(t, policy.ClusterRole.Rules, 2) // Both namespace resources should be in cluster role
-		assert.Len(t, policy.Namespaces, 2)        // Both namespaces should be created
+		assert.Len(t, policy.ClusterRole.Rules, 1) // both namespace observations dedupe to one namespaces rule
+		assert.Len(t, policy.Namespaces, 2)        // both named namespaces are still created
 
 		mockInspector.AssertExpectations(t)
 	})
