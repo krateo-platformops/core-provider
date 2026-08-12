@@ -15,6 +15,7 @@ import (
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicclient "k8s.io/client-go/dynamic"
 )
@@ -292,13 +293,23 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 			return prefix + suffix
 		}
 
-		managed = append(managed, ManagedResource{
+		// Store the managed ref as a JSON-native map, NOT the typed ManagedResource struct.
+		// mg.Object["status"] is deep-copied by runtime.DeepCopyJSONValue on other reconcile
+		// paths (e.g. the observe/converter path), which panics on any non-JSON type with
+		// "cannot deep copy composition.ManagedResource". ToUnstructured honours the struct's
+		// json tags, so the serialized status shape is identical. (status_update.go worked
+		// around the symptom on the update path only; this fixes the source.)
+		u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&ManagedResource{
 			APIVersion: ref.GetAPIVersion(),
 			Resource:   gvr.Resource,
 			Name:       ref.GetName(),
 			Namespace:  ref.GetNamespace(),
 			Path:       buildpath(),
 		})
+		if err != nil {
+			return nil, fmt.Errorf("converting managed resource %s to unstructured: %w", ref.GetName(), err)
+		}
+		managed = append(managed, u)
 	}
 
 	return managed, nil

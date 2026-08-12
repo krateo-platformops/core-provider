@@ -6,6 +6,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -207,7 +208,17 @@ func TestPopulateManagedResources(t *testing.T) {
 
 			for i, expected := range tt.expected {
 				expectedRes := expected.(ManagedResource)
-				actualRes := result[i].(ManagedResource)
+				// populateManagedResources now stores JSON-native maps (so status.managed is
+				// DeepCopyJSONValue-safe); the assertion below also guards that shape. Convert
+				// back to compare field-by-field.
+				actualMap, ok := result[i].(map[string]interface{})
+				if !ok {
+					t.Fatalf("managed[%d] must be a JSON-native map for DeepCopy safety, got %T", i, result[i])
+				}
+				var actualRes ManagedResource
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actualMap, &actualRes); err != nil {
+					t.Fatalf("converting managed[%d] back: %v", i, err)
+				}
 
 				if expectedRes.APIVersion != actualRes.APIVersion {
 					t.Errorf("APIVersion mismatch at index %d: expected %s, got %s", i, expectedRes.APIVersion, actualRes.APIVersion)
