@@ -156,6 +156,32 @@ func TestPopulateManagedResources(t *testing.T) {
 			},
 		},
 		{
+			// A namespaced child whose rendered manifest omits metadata.namespace (it inherits the
+			// helm release namespace) MUST be recorded in the composition namespace, not left empty.
+			// An empty namespace makes the #74 child-health rollup do a cluster-scoped GET that 404s,
+			// falsely counting the child not-ready and wedging the parent Ready=False (the
+			// krateo-observability regression this fixes).
+			name: "namespaced resource with empty namespace defaults to composition namespace",
+			pluralizer: &mockPluralizer{
+				gvrMap: map[schema.GroupVersionKind]schema.GroupVersionResource{
+					{Group: "", Version: "v1", Kind: "Pod"}: {Group: "", Version: "v1", Resource: "pods"},
+				},
+				errMap: make(map[schema.GroupVersionKind]error),
+			},
+			resources: []processor.MinimalMetadata{
+				{APIVersion: "v1", Kind: "Pod", Metadata: processor.Metadata{Name: "inherits-release-ns", Namespace: ""}},
+			},
+			expected: []interface{}{
+				ManagedResource{
+					APIVersion: "v1",
+					Resource:   "pods",
+					Name:       "inherits-release-ns",
+					Namespace:  "krateo-system",
+					Path:       "/api/v1/namespaces/krateo-system/pods/inherits-release-ns",
+				},
+			},
+		},
+		{
 			name: "multiple resources",
 			pluralizer: &mockPluralizer{
 				gvrMap: map[schema.GroupVersionKind]schema.GroupVersionResource{
@@ -193,7 +219,7 @@ func TestPopulateManagedResources(t *testing.T) {
 				pluralizer: tt.pluralizer,
 				mapper:     newTestMapper(),
 			}
-			result, err := h.populateManagedResources(tt.resources)
+			result, err := h.populateManagedResources(tt.resources, "krateo-system")
 
 			if tt.expectError && err == nil {
 				t.Fatal("expected error but got none")
