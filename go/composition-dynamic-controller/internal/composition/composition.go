@@ -763,7 +763,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("decoding release: %w", err)
 	}
 
-	managed, err := h.populateManagedResources(all)
+	managed, err := h.populateManagedResources(all, mg.GetNamespace())
 	if err != nil {
 		return fmt.Errorf("populating managed resources: %w", err)
 	}

@@ -123,7 +123,7 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 	}
 
 	if len(opts.resources) > 0 {
-		managed, err := h.populateManagedResources(opts.resources)
+		managed, err := h.populateManagedResources(opts.resources, mg.GetNamespace())
 		if err != nil {
 			return fmt.Errorf("populating managed resources: %w", err)
 		}
@@ -258,7 +258,7 @@ func setManagedResources(mg *unstructured.Unstructured, managed []any) {
 	mg.Object["status"] = mapstatus
 }
 
-func (h *handler) populateManagedResources(resources []processor.MinimalMetadata) ([]any, error) {
+func (h *handler) populateManagedResources(resources []processor.MinimalMetadata, defaultNamespace string) ([]any, error) {
 	var managed []interface{}
 	for _, ref := range resources {
 		gvr, err := h.pluralizer.GVKtoGVR(schema.FromAPIVersionAndKind(ref.GetAPIVersion(), ref.GetKind()))
@@ -273,6 +273,16 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 		}
 		if !isNamespaced {
 			ref.SetNamespace("")
+		} else if ref.GetNamespace() == "" {
+			// A namespaced child rendered without an explicit metadata.namespace inherits the
+			// composition's (helm release) namespace. Persist that here so the #74 child-health
+			// rollup can GET it namespaced: childHealth (childhealth.go) issues a CLUSTER-SCOPED
+			// GET when the stored namespace is empty, which 404s for a namespaced resource -> the
+			// child is counted childConverging -> the parent wedges Ready=False forever even though
+			// the child is healthy. Observed on krateo-observability, whose chart omits
+			// metadata.namespace on its secrets/configmaps/services/deployment, so it never went
+			// Ready and its dependent (clickhouse-mcp-server) was never emitted by the umbrella.
+			ref.SetNamespace(defaultNamespace)
 		}
 
 		buildpath := func() string {
