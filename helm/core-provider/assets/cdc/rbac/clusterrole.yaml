@@ -39,3 +39,19 @@ rules:
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch", "update"]
+# Read-only child-resource reads for the composition child-health rollup (krateo-core-provider#72):
+# each reconcile the CDC GETs a composition's managed children to reflect their health on the parent's
+# Ready. These are the native workload kinds the rollup MODELS (Krateo composition children —
+# composition.krateo.io/* and core.krateo.io/compositiondefinitions — are already granted above, so the
+# flagship umbrella-of-CompositionDefinitions case needs nothing new). Children of un-granted kinds
+# degrade to "healthy" (the rollup is fail-safe: a Forbidden read is never a failure), so this stays
+# bounded and read-only rather than a blanket get on "*".
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps", "pods", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]

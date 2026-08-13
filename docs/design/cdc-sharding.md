@@ -1,9 +1,25 @@
+---
+type: Decision
+title: "Design: horizontal sharding for the composition-dynamic-controller"
+description: The plan of record for sharding one high-cardinality composition Kind across CDC replicas — and the recorded decision NOT to build it yet.
+resource: ghcr.io/krateo-platformops/composition-dynamic-controller
+tags: [design, scaling, cdc]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): the recorded decision is implemented — i.e.
+> sharding is deliberately NOT built.** No sharding code exists in
+> `go/composition-dynamic-controller/`; the doc itself recommends not building it
+> for the motivating case (§2). If cardinality pressure returns, this remains the
+> plan of record.
+
 # Design: Horizontal sharding for the composition-dynamic-controller (CDC)
 
 > Status: **Draft for discussion** · Audience: core-provider + composition-dynamic-controller +
 > unstructured-runtime maintainers · Scope: split the reconciliation of a single high-cardinality
 > composition Kind across multiple CDC replicas, safely, when one process can no longer keep up.
-> All work on the **`braghettos`** forks (origin); `krateoplatformops` = upstream.
+> Written pre-migration: the forks it references are now the canonical `krateo-platformops` repos (the historical upstream org is dead).
 >
 > Goal: define the *plan of record* for CDC sharding — the design, the concrete code touchpoints, the
 > correctness-critical migration, and the residual risk — so the team can review the approach before

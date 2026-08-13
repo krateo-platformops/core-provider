@@ -1,10 +1,25 @@
+---
+type: Decision
+title: "Roadmap: composition status projection implementation"
+description: The two-track sequencing plan (projection vs intra-service auth) for the composition status projection design.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, roadmap, archive]
+status: superseded-by:composition-status-projection.md
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): superseded — both tracks shipped.** Track A
+> (`statusDataTemplate`) and Track B (authn serviceaccount strategy + `apiRef`)
+> are live; the sequencing this doc plans is done. Kept as the record of how the
+> work was cut.
+
 # Implementation roadmap — Composition status projection
 
 > Sequencing for the two design docs:
 > - [`composition-status-projection.md`](./composition-status-projection.md) (core-provider)
-> - [`authn/docs/design/kubernetes-intra-service-auth.md`](https://github.com/braghettos/krateo-authn) (authn)
+> - [`authn/docs/design/kubernetes-intra-service-auth.md`](https://github.com/krateo-platformops/authn) (authn)
 >
-> All work on the **`braghettos`** forks (origin), `krateoplatformops` = upstream.
+> Written pre-migration: the forks it references are now the canonical `krateo-platformops` repos (the historical upstream org is dead).
 
 ---
 

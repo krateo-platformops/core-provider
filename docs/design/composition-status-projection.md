@@ -1,3 +1,21 @@
+---
+type: Decision
+title: "Design: composition status projection"
+description: Declarative Composition status from inputs and APIs — statusDataTemplate ${ jq } mappings plus the apiRef RESTAction source, snowplow-convention aligned.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, status-projection, apiref]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): implemented.** `spec.statusDataTemplate` +
+> `spec.apiRef` shipped in 2.3.0: schema injection in
+> `go/core-provider/internal/tools/crd/generation/statusfields.go`, CDC-side
+> evaluation over the `self`/`spec`/`status`/`helm`/`api` root in
+> `go/composition-dynamic-controller/`, the authn handshake per the
+> [how-to](../how-to/apiref-status-projection-authn.md). The repo/tag pins in §9 are
+> pre-migration history. Current truth: [internals/behavior.md](../internals/behavior.md).
+
 # Design: Composition status projection (declarative status from inputs + APIs)
 
 > Status: **Draft for discussion** · Author: design exploration · Date: 2026-06-18
@@ -12,7 +30,7 @@
 > instance's own inputs (spec/helm, in-hand) and from **API calls resolved at runtime**
 > (Kubernetes objects or external systems) — using the **snowplow/frontend convention**
 > (`apiRef` + `${ jq }` templates via `plumbing/jqutil`) so composition status and frontend
-> widgets speak one language. All repos are pinned to the **`braghettos`** forks (§9).
+> widgets speak one language. All repos were pinned to the pre-migration forks — now the canonical `krateo-platformops` repos (§9).
 
 ---
 
@@ -77,7 +95,7 @@ does **not** generate CRD schemas and has **no** field-projection engine or
 - `RestDefinition.spec.resource` has `Identifiers []string` and `AdditionalStatusFields
   []string`; `oas2jsonschema` builds the status schema from the OpenAPI response schema.
 - At runtime RDC's `populateStatusFields` copies response fields into `status.<field>`.
-- Two in-flight `braghettos/rest-dynamic-controller` branches overlap this design:
+- Two in-flight `krateo-platformops/rest-dynamic-controller` branches overlap this design:
   **#40** plumbs `AdditionalStatusFields` into the populate loop; **#42** adds type-safe
   conversion (int/float/bool). Both are **bespoke and limited** — top-level only,
   copy-only, response-only. The shared jq engine here **subsumes** them (jq gives nested
@@ -138,7 +156,7 @@ construction (§4.2). Example roots: `.self.spec.…`, `.helm.…`, `.api.<callN
 jq is **already the Krateo platform language** (snowplow, RestActions, platform-wide value
 mapping), `plumbing/jqutil` is **already a core-provider dependency**, and it **preserves
 types natively** (`jqutil.InferType`) — which also makes RDC #42's hand-rolled conversion
-unnecessary. The `braghettos/plumbing v1.7.6` `jqutil` even carries the int/int32
+unnecessary. The `krateo-platformops/plumbing v1.7.6` `jqutil` even carries the int/int32
 gojq-panic fix (commit `28c9297`).
 
 ```
@@ -295,7 +313,7 @@ Rules: **`forPath` addresses object locations only** (build arrays by *returning
 **one value per mapping** (wrap streams in `[ … ]`); and **output is normalized** to
 `DeepCopyJSONValue`-safe types before `SetNestedField` (which accepts only
 `map`/`slice`/`string`/`int64`/`float64`/`bool`/`nil` and **panics** on plain `int`). That
-normalization is exactly what `jqutil.InferType` already does (and `braghettos/plumbing
+normalization is exactly what `jqutil.InferType` already does (and `krateo-platformops/plumbing
 v1.7.6` carries the gojq int-panic fix) — so the engine inherits it from `jqutil`.
 
 ### 4.3 `apiRef` → RESTAction, resolved synchronously via snowplow (authn service identity)
@@ -437,7 +455,7 @@ declarations:
 
 ## 6. Runtime engine (shared, `unstructured-runtime`)
 
-New package `pkg/tools/statusprojection` in `braghettos/unstructured-runtime`:
+New package `pkg/tools/statusprojection` in `krateo-platformops/unstructured-runtime`:
 
 ```go
 // Mapping mirrors the snowplow widgetDataTemplate item (decoupled from any provider CRD).
@@ -526,7 +544,7 @@ own SA token, authn (`TokenReview`) returns a JWT bound to a scoped per-service
 ## 8. Phased plan
 
 1. **Phase 0 — engine.** `pkg/tools/statusprojection` (+ `SetObservedGeneration`) in
-   `braghettos/unstructured-runtime` over `plumbing/jqutil`; unit tests; tag.
+   `krateo-platformops/unstructured-runtime` over `plumbing/jqutil`; unit tests; tag.
 2. **Phase 1a — core-provider API + schema.** Add `statusDataTemplate` (+ `Schema`/
    `PreserveUnknownFields`) to `CompositionDefinition`; generate status properties; validate;
    ship mappings to the CDC via the ConfigMap. (`apiRef` accepted but inert until 1c.)
@@ -549,8 +567,8 @@ RESTAction mechanism.
 
 ## 9. Repository / fork impact
 
-All work on the **`braghettos`** forks (origin), `krateoplatformops` = upstream; plumbing is
-synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignment audit
+Written pre-migration (the forks are now the canonical `krateo-platformops` repos); plumbing is
+synced with upstream and all forks pin `krateo-platformops/plumbing v1.7.6` (§ alignment audit
 2026-06-18).
 
 | Repo | Role |

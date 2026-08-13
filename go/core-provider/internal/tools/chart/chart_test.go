@@ -14,7 +14,7 @@ import (
 	"github.com/krateo-platformops/plumbing/crdgen"
 	"github.com/krateo-platformops/plumbing/e2e"
 	xenv "github.com/krateo-platformops/plumbing/env"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/e2e-framework/klient/decoder"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/pkg/env"
@@ -104,12 +104,12 @@ func TestJsonSchemaFromOCI(t *testing.T) {
 			Version: "18.0.1",
 		}
 
-		cli, err := client.New(cfg.Client().RESTConfig(), client.Options{})
+		dyn, err := dynamic.NewForConfig(cfg.Client().RESTConfig())
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		pkg, rootdir, err := ChartInfoFromSpec(context.TODO(), cli, &nfo)
+		pkg, rootdir, err := ChartInfoFromSpec(context.TODO(), dyn, &nfo)
 		if err != nil {
 			t.Fatal(err)
 		}

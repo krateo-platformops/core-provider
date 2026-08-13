@@ -1,3 +1,18 @@
+---
+type: Decision
+title: "Composition version management & upgrade"
+description: How one CompositionDefinition maps to a multi-version CRD and per-version controllers, how instances migrate on version bumps, and the upgradePolicy contract.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, versioning, migration]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): implemented**, including the later
+> `spec.upgradePolicy` (`Automatic`/`Manual`/`Paused` + the
+> `krateo.io/upgrade-to-version` annotation gate, `MigrationApproved` in
+> `types.go`) layered on the owner-scoped migration described here.
+
 # Composition version management & upgrade
 
 **Status:** **implemented** — the #102 version-bump orphan fix has landed in the fork: owner-scoped

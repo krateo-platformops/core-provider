@@ -49,7 +49,8 @@ spec:
 
     # --- complex output (array of objects) built with jq ---
     - forPath: endpoints
-      expression: ${ [ .api.svc.items[] | { name: .metadata.name, ip: (.status.loadBalancer.ingress[0].ip // null) } ] }
+      # NB: quoted — a jq object body inside an unquoted YAML scalar is invalid YAML.
+      expression: '${ [ .api.svc.items[] | { name: .metadata.name, ip: (.status.loadBalancer.ingress[0].ip // null) } ] }'
       schema:
         type: array
         items:

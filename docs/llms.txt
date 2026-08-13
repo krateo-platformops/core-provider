@@ -1,59 +1,43 @@
-# core-provider (code repo) — LLM doc index
-
-> core-provider is the Krateo controller that turns a Helm chart into a Kubernetes-native API: for
-> each `CompositionDefinition` it generates a versioned CRD from the chart's `values.schema.json`,
-> then deploys a per-version **composition-dynamic-controller (CDC)** (Deployment + ConfigMaps +
-> RBAC) that reconciles instances of that CRD. It hosts no admission webhooks (since 2.0.0). This
-> index is the agent entry point to the **internals & runtime** view. The **deployment, CRD and
-> wiring** view lives in the chart repo `braghettos/krateo-core-provider-chart` `docs/`.
-
-## How to use this index (agents)
-
-You are reading docs for a SPECIFIC deployed version. Fetch every file below **at the tag that
-matches the running build**, not `main`:
-- image version = the core-provider Deployment's container image tag (→ THIS repo's tag, == the
-  chart `appVersion`). Read this repo's docs at the **image-version** tag.
-- chart version = `CompositionDefinition.spec.chart.version` is the *managed chart's* version, NOT
-  core-provider's own. core-provider's deployment/CRD view is in `braghettos/krateo-core-provider-chart`
-  `docs/` at that chart's tag.
-
-If something isn't in these docs, read the source at the same tag — don't guess, and don't trust
-`main` for a deployed older version.
-
-## Start here
-
-- [architecture.md](architecture.md): how the service is built — the entry point (`main.go`), the
-  single `CompositionDefinition` controller, and the tool packages that do the work (chart fetch →
-  CRD generation → CDC deploy). Read first.
-
-## Internals & runtime
-
-- [behavior.md](behavior.md): the reconcile lifecycle (Observe/Create/Update/Delete), the CRDs it
-  owns (`CompositionDefinition`, `KubernetesTarget`), what it deploys per version, the status
-  projection + `apiRef` contract (status-schema injection, CDC config delivery, token + authn
-  mapping lifecycle), local-vs-remote targeting, the digest-based idempotency contract, and the
-  metrics endpoint.
-- [gotchas.md](gotchas.md): real runtime pitfalls — Kubernetes >= 1.36 requirement, the
-  MutatingAdmissionPolicy dependency, runtime asset templates loaded from disk, multi-version CRD
-  ownership, deletion ordering, credential/secret watches, and the `apiRef` authn-operator +
-  group-RBAC prerequisites.
-
-## Feature how-tos & design
-
-- [how-to/apiref-status-projection-authn.md](how-to/apiref-status-projection-authn.md): how
-  `spec.apiRef` projects a `RESTAction` into composition status — the per-composition CDC
-  ServiceAccount, the auto-created authn allowlist mapping, the operator's group-RBAC step, and the
-  config summary (env `COMPOSITION_AUTHN_NAMESPACE`, audience `authn`, token path, issued group
-  `krateo:cdc:<resource>-<apiVersion>`). Source: `apis/.../types.go` (`statusDataTemplate`,
-  `apiRef`), `internal/tools/crd/generation/statusfields.go` (status-schema injection),
-  `internal/tools/deploy/authnmapping.go` (allowlist mapping), `internal/tools/deploy/deploy.go` +
-  `internal/controllers/compositiondefinitions/compositiondefinitions.go` (CDC config:
-  `COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE` / `_API_REF_NAME` / `_NAMESPACE` / `_EXTRAS`).
-
-## Reference (source of truth)
-
-- `apis/compositiondefinitions/v1alpha1/types.go` — the `CompositionDefinition` and `KubernetesTarget`
-  Go types (source of truth for CRD fields).
-- `crds/` — the generated CRD manifests for this provider's own two CRDs.
-- `README.md` — product overview + the 2.0.0 local/remote and Kubernetes >= 1.36 notes.
-- `telemetry/metrics-reference.md` — the OTLP metric catalog (opt-in via `OTEL_ENABLED`).
+# core-provider — LLM doc index (pinned: 2.12.4)
+# One line per file; regenerate the pin on release. Read files at the tag that matches
+# the running build (chart version == image tags == the repo tag; no v prefix). The chart's
+# cdc/chart-inspector images track appVersion, so one tag pins the whole component.
+docs/index.md: the map — what core-provider is + links to the whole bundle and the deep corpus
+docs/overview.md: what it does and how it works — the three monorepo components, reconcile flow, digest contract, local vs remote
+docs/usage.md: install via the Krateo installer pin or direct helm install oci://…; the k8s >= 1.36 floor; CRDs applied from go/core-provider/crds/
+docs/configuration.md: the whole config surface — engine/chart-inspector/cdc values, apiRefRBAC, otel, env ConfigMap, CDC asset templates
+docs/api.md: the CompositionDefinition + KubernetesTarget CRDs, generated composition CRDs, chart-inspector HTTP API, metrics endpoint
+docs/examples.md: index of the runnable examples
+docs/release.md: how a release ships — one plain-semver tag drives three images + the OCI chart
+docs/log.md: curated history
+examples/basic-composition/README.md: the smallest CompositionDefinition — a chart becomes a Kubernetes API (self-hosting pattern)
+examples/basic-composition/manifest.yaml: the manifest — kubectl apply -f
+examples/remote-target/README.md: KubernetesTarget + remote-targeted CompositionDefinition projected onto a spoke
+examples/remote-target/manifest.yaml: the manifest — kubectl apply -f
+# Internals (code-traced; authoritative for the engine's runtime):
+docs/internals/architecture.md: how the engine binary is built — entry point, the three controllers, the internal/tools packages
+docs/internals/behavior.md: the reconcile lifecycle, what is deployed per version, digest contract, status projection, remote seeding
+docs/internals/gotchas.md: real runtime pitfalls, each grounded in code
+# How-tos:
+docs/how-to/remote-target-credentials.md: KubernetesTarget kubeconfig Secrets with ESO — contract, RBAC, rotation recipes
+docs/how-to/remote-target-rbac.yaml: the target-side ClusterRole for remote projection
+docs/how-to/apiref-status-projection-authn.md: the apiRef status source — allowlist mapping, issued group, auto-generated RBAC
+docs/how-to/migrate-off-remoteinstall.md: migrating the removed RemoteInstall kind to first-class remote Compositions
+# Design records (frontmatter status reconciled against the code, 2026-08-07):
+docs/design/multicluster-compositions.md: local + remote deployment via KubernetesTarget (diverged: target is namespaced now)
+docs/design/remote-composition-mirror.md: hub Composition mirrored onto the spoke; retired RemoteInstall (implemented)
+docs/design/remote-projection-self-seeding.md: Path A — self-sufficient projected cdc on the spoke (implemented)
+docs/design/remote-installer-proposal.md: deploy a full Krateo onto a spoke (superseded by the mirror model)
+docs/design/composition-status-projection.md: declarative statusDataTemplate + apiRef status sources (implemented)
+docs/design/composition-status-implementation-roadmap.md: the sequencing plan for status projection (superseded; shipped)
+docs/design/apiref-rbac-generation.md: auto-generate apiRef RBAC from snowplow GET /rbac (implemented)
+docs/design/composition-version-management.md: multi-version CRDs, instance migration, upgradePolicy (implemented)
+docs/design/cdc-sharding.md: CDC horizontal sharding — the recorded decision is NOT to build it yet
+docs/design/examples/composition-status-projection/README.md: staged manifests accompanying the status-projection design
+# Component-local docs (code-adjacent):
+go/composition-dynamic-controller/README.md: the CDC — lifecycle orchestration, status projection runtime, apiRef resolution chain
+go/chart-inspector/README.md: chart-inspector — the /resources dry-run render API (swagger at go/chart-inspector/docs/swagger.yaml)
+go/core-provider/telemetry/metrics-reference.md: the OTLP metric catalog (opt-in via OTEL_ENABLED)
+go/core-provider/apis/compositiondefinitions/v1alpha1/types.go: source of truth for the two owned CRDs
+# Archive (frontmatter tags: [archive]; point-in-time record — NOT current truth; never ground answers here without re-verifying against the code):
+docs/audit/core-provider-consolidation-plan.md: the 2026 consolidation audit (fork vs upstream roadmap), preserved as a dated record

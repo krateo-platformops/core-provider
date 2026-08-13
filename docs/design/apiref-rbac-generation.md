@@ -1,9 +1,26 @@
+---
+type: Decision
+title: "Design: automatic RBAC generation for apiRef RESTActions"
+description: Auto-generate the Kubernetes RBAC that authorizes a CompositionDefinition's apiRef RESTAction reads, from snowplow's dispatch-free GET /rbac read-set.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, rbac, apiref, snowplow]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): implemented.** The engine consumes snowplow's
+> `GET /rbac` via `go/core-provider/internal/tools/restactionrbac/` and writes the
+> read-set RBAC in `internal/tools/deploy/restactionrbac.go` (422 → the
+> `ApiRefRBACIncomplete` condition, never partial RBAC); the chart gates it with
+> `apiRefRBAC.enabled` (default on) and provisions the engine's own identity
+> (`templates/apiref-selfrbac.yaml`, runtime self allowlist mapping).
+
 # Design: Automatic RBAC generation for `apiRef` RESTActions
 
 > Status: **Draft for discussion** · Audience: core-provider + snowplow maintainers ·
 > Scope: auto-generate the Kubernetes RBAC that authorizes a CompositionDefinition's `apiRef`
 > RESTAction reads, the same way chart-inspector + rbacgen already auto-generate the CDC's
-> chart RBAC. All work on the **`braghettos`** forks (origin); `krateoplatformops` = upstream.
+> chart RBAC. Written pre-migration: the forks it references are now the canonical `krateo-platformops` repos (the historical upstream org is dead).
 >
 > Goal: close the manual, silently-failing step where an operator must hand-author the RBAC for
 > the per-composition group `krateo:cdc:<resource>-<apiVersion>` so that the resolved RESTAction

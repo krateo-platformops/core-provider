@@ -1,3 +1,18 @@
+---
+type: Decision
+title: "Design: Path A — self-seeding remote projection"
+description: Make the projected cdc self-sufficient on the spoke — core-provider projects the CompositionDefinition CRD, chart-inspector and a shadow definition too.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, multicluster, seeding]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): implemented** — Path A Inc 1–3 landed (#32–#34):
+> `deploy.SeedRemoteTarget` (`go/core-provider/internal/tools/deploy/remoteseed.go`)
+> projects the embedded CRD + chart-inspector + shadow definition, with reachability
+> and ref-counted teardown (e2e-covered in `remoteseed_e2e_test.go`).
+
 # Design — Path A: self-seeding remote projection (make the projected cdc self-sufficient)
 
 **Status:** proposed (2026-07-02) · **Owner:** core-provider · **Basis:** Phase-0 PoC findings

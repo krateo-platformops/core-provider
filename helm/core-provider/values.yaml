@@ -90,16 +90,27 @@ resources:
     memory: 2Gi
 # Interim probes: the binary has no /healthz endpoint yet, so we TCP-probe the always-bound metrics
 # port (8080). Replace with httpGet /healthz + /readyz once the binary exposes a health endpoint.
+#
+# Tolerances are explicit because the Kubernetes defaults (timeoutSeconds:1, failureThreshold:3)
+# kill HEALTHY pods under CPU contention: a busy-but-alive process misses the 1s probe deadline
+# three times and gets restarted, and the restart storm worsens the contention. Liveness is
+# lenient (~120s of consecutive failures (periodSeconds 20 × failureThreshold 6) before a restart — only truly dead processes die);
+# readiness keeps failureThreshold:3 so a genuinely wedged pod is promptly removed from
+# endpoints, but load alone must not flap it (same tolerances as the chart-inspector block below).
 livenessProbe:
   tcpSocket:
     port: 8080
   initialDelaySeconds: 15
   periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 6
 readinessProbe:
   tcpSocket:
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
 # HA is opt-in: raising replicaCount>=2 REQUIRES leaderElection.enabled=true, or the replicas
 # double-reconcile (the binary defaults leader-election off). Enabling it also needs the
 # coordination.k8s.io/leases RBAC, which the chart grants when this is on.
@@ -158,23 +169,27 @@ chartInspector:
     registry: ghcr.io
     repository: krateo-platformops/chart-inspector
     pullPolicy: IfNotPresent
-    tag: "2.12.2"
-  # chart-inspector is stateless (renders manifests to compute RBAC) and is the highest-value HA
-  # win: its outage wedges installs on core-provider's ~30s /rbac timeout. It ships HA by default.
+    # Tracks the chart appVersion (empty tag → krateo.image defaultTag = .Chart.AppVersion, see
+    # templates/chart-inspector/deployment.yaml), so each release ships the matching chart-inspector
+    # build; set an explicit tag to pin a known-good build.
+    tag: ""
+  # chart-inspector is stateless (renders manifests to compute RBAC). Its outage wedges installs on
+  # core-provider's ~30s /rbac timeout, so HA is valuable — but the platform ships a SINGLE replica by
+  # default to keep the committed footprint small (see FOOTPRINT NOTE); opt into HA where you need it.
   #
-  # FOOTPRINT NOTE: this defaults to 2 replicas, and each requests cpu:"1"/memory:512Mi (below), so
-  # the default committed footprint is ~2 cores / 1Gi. On `helm upgrade` an existing single-replica
-  # install scales to 2 shortly after (HPA minReplicas:2). On small/resource-constrained clusters set
-  # chartInspector.replicaCount:1 + chartInspector.autoscaling.enabled:false (and/or lower resources).
-  replicaCount: 2
+  # FOOTPRINT NOTE: this defaults to 1 replica requesting cpu:"1"/memory:512Mi (below), so the default
+  # committed footprint is ~1 core / 512Mi. For HA on multi-node production clusters, set
+  # chartInspector.replicaCount:>=2 + chartInspector.autoscaling.enabled:true (and autoscaling.minReplicas:>=2).
+  replicaCount: 1
   imagePullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
-  # A real HPA now consumes these (chart/templates/chart-inspector/hpa.yaml). chart-inspector has
-  # CPU requests set, so CPU-utilization autoscaling is valid for it.
+  # A real HPA consumes these (chart/templates/chart-inspector/hpa.yaml) WHEN enabled. chart-inspector
+  # has CPU requests set, so CPU-utilization autoscaling is valid for it. Disabled by default to hold a
+  # fixed single-replica footprint; the deployment then pins replicas to chartInspector.replicaCount.
   autoscaling:
-    enabled: true
-    minReplicas: 2
+    enabled: false
+    minReplicas: 1
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
   # Probe port MUST be 8081 — the chart-inspector server (image 1.0.5) listens on 8081, and the
@@ -240,17 +255,17 @@ cdc:
     registry: ghcr.io
     repository: krateo-platformops/composition-dynamic-controller
     pullPolicy: IfNotPresent
-    # 1.3.14: Observe no longer reports Ready=True "Composition is up-to-date" while a helm
-    # operation is still pending — it sets Ready=False/PendingHelmOperation naming the release
-    # status and how long it has been pending. Previously a spec change queued behind the pending
-    # lock sat unapplied for up to pendingOperationGrace (5m) while the CR asserted convergence,
-    # so anything gating on Ready proceeded on a false premise. Reconcile behaviour is unchanged
-    # (the ExternalObservation is the same); recovery past the grace period still rolls the stale
-    # lock back and applies the change. Verified end-to-end on kind.
-    # 1.3.15: status writes retry on optimistic-concurrency conflict (updateStatusWithRetry) — a
-    # benign "object has been modified" 409 during a GVK-migration handover no longer wedges the
-    # composition Ready=False until a manual controller restart (krateo-core-provider#57, fix #1).
-    tag: "2.12.2"
+    # The cdc (composition-dynamic-controller) image tag TRACKS the chart appVersion: leave this
+    # empty so the asset's krateo.image defaultTag falls back to .Chart.AppVersion (see
+    # assets/cdc/deployment.yaml). Every core-provider release then ships the matching cdc build,
+    # and a cdc code fix goes live with the engine bump — no separate literal pin to remember.
+    # History: cdc was previously pinned to a known-good literal, decoupled from the engine
+    # (krateo-core-provider#57). That decoupling had a sharp edge: a cdc fix built by a release did
+    # NOT deploy with it, because the chart kept rendering the old pinned tag. That is exactly how
+    # the side-effect-free-Observe fix (#67, which self-heals the external-create wedge) was built
+    # into cdc 2.12.3 yet the 2.12.3 chart still deployed cdc 2.12.2. Version-locking closes the gap.
+    # To hold cdc back to a specific build (e.g. reverting a regression), set an explicit tag here.
+    tag: ""
   replicaCount: 1
   # workers / resyncInterval: OPTIONAL fleet-wide defaults for every CDC's reconcile concurrency and
   # resync interval. Leave unset (the default) for per-Kind opt-in only, via a CompositionDefinition's
@@ -298,7 +313,9 @@ cdc:
       memory: 256Mi
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
   # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
-  # (graceful drain), not readiness-gating — probes are intentionally left off for now.
+  # (graceful drain), not readiness-gating — probes are intentionally left off BY DESIGN: a
+  # liveness kill mid-helm-operation manufactures stale-lock states (see issue #57), so do NOT
+  # add a liveness probe here.
   # livenessProbe: {}
   # readinessProbe: {}
 

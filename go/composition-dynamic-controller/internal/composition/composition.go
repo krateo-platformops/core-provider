@@ -182,7 +182,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 
 	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
 	releaseName := compositionMeta.GetReleaseName(mg)
-	if _, p := compositionMeta.GetGracefullyPausedTime(mg); p && compositionMeta.IsGracefullyPaused(mg) {
+	_, paused := compositionMeta.GetGracefullyPausedTime(mg)
+	if paused && compositionMeta.IsGracefullyPaused(mg) {
 		log.Debug("Composition is gracefully paused, skipping observe.")
 		h.eventRecorder.Event(mg, event.Normal(reasonReconciliationGracefullyPaused, "Observe", "Reconciliation is paused via the gracefully paused annotation."))
 		return controller.ExternalObservation{
@@ -190,30 +191,30 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			ResourceUpToDate: true,
 		}, nil
 	}
-	// Immediately remove the gracefully paused time annotation if the composition is not gracefully paused.
-	meta.RemoveAnnotations(mg, compositionMeta.AnnotationKeyReconciliationGracefullyPausedTime)
-	mg, err = tools.Update(ctx, mg, updateOpts)
-	if err != nil {
-		return controller.ExternalObservation{}, fmt.Errorf("updating cr with values: %w", err)
+	// Observe MUST be a pure read of external state. It previously persisted metadata here (release
+	// name + CD def-ref labels via tools.Update), which bumped the CR's resourceVersion mid-observe.
+	// A concurrent writer (an umbrella re-applying the instance, a human kubectl edit, or the
+	// reconcile's own external-create annotation write) then made that write 409, so Observe returned
+	// an error — and the runtime's incomplete-create recovery treats an Observe error as "cannot
+	// determine creation result" and refuses, wedging the resource forever. Metadata is now persisted
+	// only in the mutating phases (Create/Update). The ONLY residual write is clearing a STALE
+	// gracefully-paused-time annotation (present but not actually paused), and only when present — so
+	// the steady-state Observe writes nothing.
+	if paused {
+		meta.RemoveAnnotations(mg, compositionMeta.AnnotationKeyReconciliationGracefullyPausedTime)
+		if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
+			return controller.ExternalObservation{}, fmt.Errorf("clearing stale paused annotation: %w", err)
+		}
 	}
 
 	if h.packageInfoGetter == nil {
 		return controller.ExternalObservation{}, fmt.Errorf("helm chart package info getter must be specified")
 	}
+	// pkg is resolved (and used below for the drift dry-run render); the CD def-ref labels it yields
+	// are stamped onto the instance in Create/Update, not here — Observe stays side-effect-free.
 	pkg, err := h.packageInfoGetter.WithLogger(log).Get(mg)
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("getting package info: %w", err)
-	}
-
-	compositionMeta.SetCompositionDefinitionLabels(mg, compositionMeta.CompositionDefinitionInfo{
-		Name:      pkg.CompositionDefinitionInfo.Name,
-		Namespace: pkg.CompositionDefinitionInfo.Namespace,
-		GVR:       pkg.CompositionDefinitionInfo.GVR,
-	})
-	// This sets the labels for the composition definition and release name
-	mg, err = tools.Update(ctx, mg, updateOpts)
-	if err != nil {
-		return controller.ExternalObservation{}, fmt.Errorf("updating cr with values: %w", err)
 	}
 
 	hc, err := helm.NewClient(h.kubeconfig,
@@ -499,6 +500,18 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
 	}
+	// Stamp the owning CompositionDefinition identity (name/namespace/GVR) onto the instance. Observe
+	// used to do this on every reconcile, but Observe is now a pure read; the archive getter reads
+	// these def-ref labels to disambiguate the owning CD across chart-version bumps, so they are
+	// persisted here in the create (mutating) phase instead.
+	compositionMeta.SetCompositionDefinitionLabels(mg, compositionMeta.CompositionDefinitionInfo{
+		Name:      pkg.CompositionDefinitionInfo.Name,
+		Namespace: pkg.CompositionDefinitionInfo.Namespace,
+		GVR:       pkg.CompositionDefinitionInfo.GVR,
+	})
+	if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
+		return fmt.Errorf("stamping composition-definition labels: %w", err)
+	}
 	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
 	if err != nil {
 		return fmt.Errorf("converting GVK to GVR: %w", err)
@@ -612,7 +625,9 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		releaseStatus:   string(rel.Status),
 		releaseRevision: rel.Revision,
 		releaseName:     rel.Name,
-		conditionType:   ConditionTypeAvailable,
+		// Creating, not Available: children cannot be healthy the instant Install returns; the first
+		// post-install Observe runs the child-health rollup and promotes to Available (or Unavailable).
+		conditionType: ConditionTypeCreating,
 	})
 	if err != nil {
 		return fmt.Errorf("setting status: %w", err)
@@ -672,6 +687,17 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	pkg, err := h.packageInfoGetter.WithLogger(log).Get(mg)
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
+	}
+
+	// Keep the CompositionDefinition def-ref labels current on the instance (mutating phase); Observe
+	// no longer persists them (same rationale as Create).
+	compositionMeta.SetCompositionDefinitionLabels(mg, compositionMeta.CompositionDefinitionInfo{
+		Name:      pkg.CompositionDefinitionInfo.Name,
+		Namespace: pkg.CompositionDefinitionInfo.Namespace,
+		GVR:       pkg.CompositionDefinitionInfo.GVR,
+	})
+	if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
+		return fmt.Errorf("stamping composition-definition labels: %w", err)
 	}
 
 	// Update the helm chart. Observe now renders as a dry-run (no revision written), so the live
@@ -737,7 +763,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("decoding release: %w", err)
 	}
 
-	managed, err := h.populateManagedResources(all)
+	managed, err := h.populateManagedResources(all, mg.GetNamespace())
 	if err != nil {
 		return fmt.Errorf("populating managed resources: %w", err)
 	}

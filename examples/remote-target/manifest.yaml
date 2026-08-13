@@ -1,0 +1,30 @@
+# A remote-targeted composition: the generated CRD, RBAC and CDC land on the spoke
+# cluster reached through the KubernetesTarget's kubeconfig Secret.
+#
+# Create the Secret first (see the example README / the ESO recipes in
+# docs/how-to/remote-target-credentials.md):
+#   kubectl -n demo-system create secret generic spoke-kubeconfig \
+#     --from-file=kubeconfig=./spoke.kubeconfig
+apiVersion: core.krateo.io/v1alpha1
+kind: KubernetesTarget
+metadata:
+  name: spoke
+  namespace: demo-system
+spec:
+  kubeconfigRef:
+    namespace: demo-system
+    name: spoke-kubeconfig
+    key: kubeconfig
+---
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: core-provider-remote
+  namespace: demo-system
+spec:
+  chart:
+    url: oci://ghcr.io/krateo-platformops/charts/core-provider
+    version: "2.12.4"
+  deploy:
+    targetRef:
+      name: spoke

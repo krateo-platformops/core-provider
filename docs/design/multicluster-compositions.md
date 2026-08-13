@@ -1,3 +1,21 @@
+---
+type: Decision
+title: "Design: multi-cluster compositions (local + remote deployment)"
+description: Evolve core-provider so a composition deploys locally or onto a remote cluster via KubernetesTarget — the controller-projection model.
+resource: kubernetestargets.core.krateo.io
+tags: [design, multicluster, kubernetestarget]
+status: diverged
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): diverged in one detail, otherwise implemented.**
+> The mechanism shipped as designed (`spec.deploy.targetRef` → `KubernetesTarget` →
+> kubeconfig Secret, per-reconcile client resolution, `None` conversion, k8s >= 1.36).
+> Since then: `KubernetesTarget` was **migrated cluster-scoped → namespaced**
+> (2026-07-14; resolved in the referencing object's own namespace) and grew its own
+> reachability controller + status — the doc below still says cluster-scoped.
+> Current truth: [internals/behavior.md](../internals/behavior.md).
+
 # Design: Multi-Cluster Compositions (local + remote deployment)
 
 > Status: **Draft for discussion** · Author: design exploration · Date: 2026-06-13

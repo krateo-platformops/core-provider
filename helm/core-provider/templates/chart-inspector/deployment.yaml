@@ -75,8 +75,8 @@ spec:
         {{- with .Values.chartInspector.topologySpreadConstraints }}
         {{- toYaml . | nindent 8 }}
         {{- else }}
-        # Default SOFT spread: chart-inspector ships at >=2 replicas, so prefer different nodes for
-        # real node-failure HA. ScheduleAnyway keeps single-node/dev clusters schedulable.
+        # Default SOFT spread: when scaled to >=2 replicas (HA opt-in), prefer different nodes for
+        # real node-failure HA. ScheduleAnyway keeps the single-replica default and dev clusters schedulable.
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway

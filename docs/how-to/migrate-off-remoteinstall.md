@@ -1,3 +1,12 @@
+---
+type: Usage
+title: "How-to: migrating off RemoteInstall"
+description: RemoteInstall is removed — detach the backing CompositionDefinition + Composition before upgrading, then author the two objects directly.
+resource: compositiondefinitions.core.krateo.io
+tags: [how-to, migration, multicluster]
+timestamp: 2026-08-07T00:00:00Z
+---
+
 # Migrating off `RemoteInstall`
 
 `RemoteInstall` has been **removed**. It was a deprecation shim over the remote-composition-mirror
@@ -47,7 +56,7 @@ metadata:
   namespace: team-a
 spec:
   chart:
-    url: oci://ghcr.io/braghettos/krateo/installer
+    url: oci://ghcr.io/krateo-platformops/charts/installer
     version: "0.2.180"
   deploy:
     targetRef:

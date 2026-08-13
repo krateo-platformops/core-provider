@@ -14,10 +14,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 
-	hasher "github.com/krateo-platformops/plumbing/kubeutil/hasher"
 	"github.com/krateo-platformops/plumbing/e2e"
 	xenv "github.com/krateo-platformops/plumbing/env"
+	hasher "github.com/krateo-platformops/plumbing/kubeutil/hasher"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -59,10 +61,11 @@ func TestApply(t *testing.T) {
 		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			return ctx
 		}).Assess("Apply", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-		kube, err := client.New(cfg.Client().RESTConfig(), client.Options{})
+		dyn, err := dynamic.NewForConfig(cfg.Client().RESTConfig())
 		if err != nil {
-			t.Fatalf("failed to create client: %v", err)
+			t.Fatalf("failed to create dynamic client: %v", err)
 		}
+		gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 		res := &appsv1.Deployment{
 			TypeMeta: metav1.TypeMeta{
@@ -102,7 +105,7 @@ func TestApply(t *testing.T) {
 
 		rescp := res.DeepCopy()
 
-		err = Apply(ctx, kube, res, ApplyOptions{})
+		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply clusterrole: %v", err)
 		}
@@ -113,7 +116,7 @@ func TestApply(t *testing.T) {
 			t.Fatalf("failed to hash clusterrole: %v", err)
 		}
 
-		err = Apply(ctx, kube, rescp, ApplyOptions{DryRun: []string{"All"}})
+		err = Apply(ctx, dyn, gvr, rescp, ApplyOptions{DryRun: []string{"All"}})
 		if err != nil {
 			t.Fatalf("failed to apply clusterrole: %v", err)
 		}
@@ -147,6 +150,11 @@ func TestUninstall(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create client: %v", err)
 		}
+		dyn, err := dynamic.NewForConfig(cfg.Client().RESTConfig())
+		if err != nil {
+			t.Fatalf("failed to create dynamic client: %v", err)
+		}
+		gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 		res := &appsv1.Deployment{
 			TypeMeta: metav1.TypeMeta{
@@ -185,13 +193,13 @@ func TestUninstall(t *testing.T) {
 		rescp := res.DeepCopy()
 
 		// Apply the resource first to ensure it exists
-		err = Apply(ctx, kube, res, ApplyOptions{})
+		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply deployment: %v", err)
 		}
 
 		// Uninstall the resource
-		err = Uninstall(ctx, kube, rescp, UninstallOptions{})
+		err = Uninstall(ctx, dyn, gvr, rescp, UninstallOptions{})
 		if err != nil {
 			t.Fatalf("failed to uninstall deployment: %v", err)
 		}
@@ -219,10 +227,11 @@ func TestGet(t *testing.T) {
 		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			return ctx
 		}).Assess("Get", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-		kube, err := client.New(cfg.Client().RESTConfig(), client.Options{})
+		dyn, err := dynamic.NewForConfig(cfg.Client().RESTConfig())
 		if err != nil {
-			t.Fatalf("failed to create client: %v", err)
+			t.Fatalf("failed to create dynamic client: %v", err)
 		}
+		gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 		res := &appsv1.Deployment{
 			TypeMeta: metav1.TypeMeta{
@@ -261,13 +270,13 @@ func TestGet(t *testing.T) {
 		rescp := res.DeepCopy()
 
 		// Apply the resource first to ensure it exists
-		err = Apply(ctx, kube, res, ApplyOptions{})
+		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply deployment: %v", err)
 		}
 
 		// Test the Get function
-		err = Get(ctx, kube, rescp)
+		err = Get(ctx, dyn, gvr, rescp)
 		if err != nil {
 			t.Fatalf("failed to get deployment: %v", err)
 		}

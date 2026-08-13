@@ -6,6 +6,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -155,6 +156,32 @@ func TestPopulateManagedResources(t *testing.T) {
 			},
 		},
 		{
+			// A namespaced child whose rendered manifest omits metadata.namespace (it inherits the
+			// helm release namespace) MUST be recorded in the composition namespace, not left empty.
+			// An empty namespace makes the #74 child-health rollup do a cluster-scoped GET that 404s,
+			// falsely counting the child not-ready and wedging the parent Ready=False (the
+			// krateo-observability regression this fixes).
+			name: "namespaced resource with empty namespace defaults to composition namespace",
+			pluralizer: &mockPluralizer{
+				gvrMap: map[schema.GroupVersionKind]schema.GroupVersionResource{
+					{Group: "", Version: "v1", Kind: "Pod"}: {Group: "", Version: "v1", Resource: "pods"},
+				},
+				errMap: make(map[schema.GroupVersionKind]error),
+			},
+			resources: []processor.MinimalMetadata{
+				{APIVersion: "v1", Kind: "Pod", Metadata: processor.Metadata{Name: "inherits-release-ns", Namespace: ""}},
+			},
+			expected: []interface{}{
+				ManagedResource{
+					APIVersion: "v1",
+					Resource:   "pods",
+					Name:       "inherits-release-ns",
+					Namespace:  "krateo-system",
+					Path:       "/api/v1/namespaces/krateo-system/pods/inherits-release-ns",
+				},
+			},
+		},
+		{
 			name: "multiple resources",
 			pluralizer: &mockPluralizer{
 				gvrMap: map[schema.GroupVersionKind]schema.GroupVersionResource{
@@ -192,7 +219,7 @@ func TestPopulateManagedResources(t *testing.T) {
 				pluralizer: tt.pluralizer,
 				mapper:     newTestMapper(),
 			}
-			result, err := h.populateManagedResources(tt.resources)
+			result, err := h.populateManagedResources(tt.resources, "krateo-system")
 
 			if tt.expectError && err == nil {
 				t.Fatal("expected error but got none")
@@ -207,7 +234,17 @@ func TestPopulateManagedResources(t *testing.T) {
 
 			for i, expected := range tt.expected {
 				expectedRes := expected.(ManagedResource)
-				actualRes := result[i].(ManagedResource)
+				// populateManagedResources now stores JSON-native maps (so status.managed is
+				// DeepCopyJSONValue-safe); the assertion below also guards that shape. Convert
+				// back to compare field-by-field.
+				actualMap, ok := result[i].(map[string]interface{})
+				if !ok {
+					t.Fatalf("managed[%d] must be a JSON-native map for DeepCopy safety, got %T", i, result[i])
+				}
+				var actualRes ManagedResource
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actualMap, &actualRes); err != nil {
+					t.Fatalf("converting managed[%d] back: %v", i, err)
+				}
 
 				if expectedRes.APIVersion != actualRes.APIVersion {
 					t.Errorf("APIVersion mismatch at index %d: expected %s, got %s", i, expectedRes.APIVersion, actualRes.APIVersion)

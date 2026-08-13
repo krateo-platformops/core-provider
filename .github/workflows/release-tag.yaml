@@ -3,8 +3,8 @@
 # byte-for-byte across ALL component repos (no per-repo config); everything is derived from
 # the repo itself.
 #
-#   • build  — ONE multi-platform image (linux/amd64 + linux/arm64) via docker/build-push-action@v7
-#              (QEMU + buildx), tagged from the pushed git tag. Image = ghcr.io/<this repo>.
+#   • build  — ONE multi-platform image (linux/amd64 + linux/arm64) via the shared reusable
+#              workflow, tagged from the pushed git tag. Image = ghcr.io/<owner>/<mod>.
 #   • crds   — only acts for CRD-owning repos: runs `make generate` (the single agnostic entry
 #              point each CRD repo exposes; repos without it skip cleanly), then opens a PR into
 #              the component's chart repo (krateo-platformops/<repo>-chart) refreshing crds-subchart/,
@@ -15,172 +15,11 @@ on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
-env:
-  GHCR_REPO: ghcr.io/${{ github.repository }}
-
 jobs:
   build:
-    name: Build & push image (multi-platform)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mod: core-provider
-            context: go/core-provider
-          - mod: composition-dynamic-controller
-            context: go/composition-dynamic-controller
-          - mod: chart-inspector
-            context: go
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
     permissions:
       contents: read
       packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      # ONE job, multi-platform manifest list built with buildx (arm64 via QEMU emulation).
-      - name: Build and push (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: go/${{ matrix.mod }}/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Inspect image
-        run: docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}:${{ steps.meta.outputs.version }}
-
-  crds:
-    name: Generate & publish crds-subchart
-    runs-on: ubuntu-latest
-    needs: [build]
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: 'stable'
-
-      # Agnostic CRD generation: each CRD-owning repo exposes a single `make generate` target
-      # that regenerates ./crds. A repo with no such target is not a CRD owner — skip cleanly.
-      - name: Generate CRDs (skip if not a CRD owner)
-        id: gen
-        run: |
-          set -euo pipefail
-          if [ -f Makefile ] && make -n generate >/dev/null 2>&1; then
-            make generate
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "No 'make generate' target — this component owns no CRDs; skipping CRD publish."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish crds-subchart to the chart repo via PR
-        if: steps.gen.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.PAT }}
-        run: |
-          set -eo pipefail
-          cd "$GITHUB_WORKSPACE"
-
-          # Convention: the component's chart repo is <this repo>-chart; the CRD short name
-          # and branch are derived from the repo name. No per-repo configuration.
-          NAME="${GITHUB_REPOSITORY##*/}"
-          TARGET_REPO="${GITHUB_REPOSITORY}-chart"
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "main")
-          BRANCH="${NAME}-crds-${LATEST_TAG}"
-          echo "Target repo: $TARGET_REPO | tag: $LATEST_TAG | branch: $BRANCH"
-
-          shopt -s nullglob
-          LOCAL_CRDS=("$GITHUB_WORKSPACE"/crds/*.yaml)
-          if [ "${#LOCAL_CRDS[@]}" -eq 0 ]; then
-            echo "make generate produced no CRDs in ./crds — nothing to publish."
-            exit 0
-          fi
-          echo "Generated ${#LOCAL_CRDS[@]} CRD file(s)."
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          gh repo clone "$TARGET_REPO" /tmp/chart
-          cd /tmp/chart
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
-          git fetch origin && git checkout main && git pull origin main
-
-          # One-time migration of any legacy crd-chart/ -> crds-subchart/ (Helm chart name unchanged).
-          if [ -d crd-chart ] && [ ! -d crds-subchart ]; then git mv crd-chart crds-subchart; fi
-          mkdir -p crds-subchart/templates
-
-          rm -f crds-subchart/templates/*.yaml
-          cp "$GITHUB_WORKSPACE"/crds/*.yaml crds-subchart/templates/
-
-          # Teardown-completeness: CRDs are published WITHOUT helm.sh/resource-policy: keep, so
-          # `helm uninstall` of the crds-subchart release deletes them and teardown reaches a clean
-          # slate (no orphan CRDs). Safe because each CRD has a single Helm owner — the dedicated
-          # crds-subchart; no parent chart templates it — and the cdc no longer empty-renders on a
-          # stale discovery cache (CRD-watch invalidation, cdc >= 1.0.3). Upgrades are unaffected:
-          # Helm only prunes resources that leave the chart, and the CRD never leaves it. Do NOT
-          # re-add keep — it silently orphans every component CRD on teardown.
-          if [ -d crd-chart ]; then git rm -r crd-chart; fi
-
-          # Patch-bump the independently-versioned crds-subchart Chart.yaml.
-          CHART_FILE="crds-subchart/Chart.yaml"
-          CUR=$(awk '/^version:/{print $2; exit}' "$CHART_FILE")
-          if echo "$CUR" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            NEXT=$(echo "$CUR" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
-          else
-            NEXT="0.0.1"
-          fi
-          sed -i "s/^version:.*/version: ${NEXT}/" "$CHART_FILE"
-          echo "crds-subchart version: ${CUR} -> ${NEXT}"
-
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "crds-subchart already matches the generated CRDs — nothing to push."
-            exit 0
-          fi
-
-          git checkout -b "$BRANCH" 2>/dev/null || { git push origin --delete "$BRANCH" 2>/dev/null || true; git checkout -b "$BRANCH"; }
-          git add -A
-          git commit -m "Update ${NAME} CRDs (crds-subchart) from tag ${LATEST_TAG}
-
-          Regenerated by the ${NAME} code-repo CI (make generate). Refreshes
-          crds-subchart/templates/ and bumps ${CUR} -> ${NEXT} (CRDs published without resource-policy: keep)."
-          git push origin "$BRANCH"
-
-          PR_TITLE="Update ${NAME} CRDs (crds-subchart) — ${LATEST_TAG}"
-          PR_BODY="Automated update of ${NAME} CRDs in \`crds-subchart/templates/\` from \`${GITHUB_REPOSITORY}\` @ \`${LATEST_TAG}\` (make generate); bumps crds-subchart \`${CUR}\` -> \`${NEXT}\` (CRDs published without \`resource-policy: keep\` so teardown deletes them)."
-          PR_STATE=$(gh pr view "$BRANCH" --repo "$TARGET_REPO" --json state -q .state 2>/dev/null || echo "NONE")
-          if [ "$PR_STATE" = "OPEN" ]; then
-            echo "PR already open for $BRANCH."
-          else
-            gh pr create --title "$PR_TITLE" --body "$PR_BODY" --head "$BRANCH" --base main --repo "$TARGET_REPO"
-          fi
+    with:
+      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'

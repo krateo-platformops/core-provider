@@ -1,10 +1,27 @@
+---
+type: Decision
+title: "Proposal: deploy a remote Krateo installer from the hub"
+description: Provision a full Krateo onto a spoke by deploying the installer umbrella as a remote-targeted composition.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, multicluster, installer, archive]
+status: superseded-by:remote-composition-mirror.md
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): superseded.** The projection mechanics this
+> proposal builds on shipped (Path A, [self-seeding](./remote-projection-self-seeding.md)),
+> but its `RemoteInstall` modeling was replaced by the
+> [remote composition mirror](./remote-composition-mirror.md) and `RemoteInstall`
+> was removed (#56). Point-in-time document pinned to pre-monorepo SHAs — read as
+> history, not current truth.
+
 # Proposal — Deploy a remote Krateo installer from the hub Krateo
 
 **Goal:** let an existing ("hub") Krateo provision a **full Krateo platform onto a remote ("spoke") cluster** — declaratively, through Krateo's own machinery — by deploying the **installer umbrella** (bootstrap mode) onto the spoke, which then self-bootstraps.
 
 **Source of truth:** latest `main` of
-- `braghettos/krateo-core-provider` @ `ad8129cb` (OTel telemetry commit)
-- `braghettos/krateo-composition-dynamic-controller` @ `44d84ca3` (OTel traceparent commit; helm via `braghettos/plumbing v1.7.7`)
+- `krateo-platformops/core-provider` @ `ad8129cb` (OTel telemetry commit)
+- `krateo-platformops/composition-dynamic-controller` (now `go/composition-dynamic-controller/` in the core-provider monorepo) @ `44d84ca3` (OTel traceparent commit; helm via `krateo-platformops/plumbing v1.7.7`)
 
 ---
 

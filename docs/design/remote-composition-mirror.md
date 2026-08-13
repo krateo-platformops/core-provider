@@ -1,10 +1,26 @@
+---
+type: Decision
+title: "Design: remote composition mirror — retire RemoteInstall"
+description: Make the spoke instance a first-class hub Composition mirrored onto the spoke; collapse RemoteInstall into CompositionDefinition + Composition.
+resource: compositiondefinitions.core.krateo.io
+tags: [design, multicluster, mirror]
+status: implemented
+timestamp: 2026-08-07T00:00:00Z
+---
+
+> **Status (re-verified 2026-08-07): implemented.** The mirror shipped as the
+> `compositionmirror` controller (#49–#55: spec down / status up, per-instance
+> fan-out via `krateo.io/target`, dynamic per-Kind watch, ordered cross-cluster
+> teardown) and `RemoteInstall` was retired in #56
+> ([migration how-to](../how-to/migrate-off-remoteinstall.md)).
+
 # Design: Remote composition mirror — retire `RemoteInstall`, make the spoke instance a first-class hub `Composition`
 
 > Status: **Draft for discussion** · Audience: core-provider maintainers · Scope: replace the
 > `RemoteInstall` kind (and the interim `CompositionDefinition.spec.instance` idea) with a
 > first-class **hub `Composition`** that core-provider **mirrors onto the spoke**, layered on the
-> shipped controller-projection model. All work on the **`braghettos`** forks (origin);
-> `krateoplatformops` = upstream.
+> shipped controller-projection model. Written pre-migration: the forks it references are now
+> the canonical `krateo-platformops` repos (the historical upstream org is dead).
 >
 > Goal: make a remote composition **look and behave exactly like a local one** — you author a normal
 > `Composition` CR on the hub; remoteness is a property of its *definition*, not of the instance —

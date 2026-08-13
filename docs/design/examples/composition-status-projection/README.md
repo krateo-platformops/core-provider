@@ -1,3 +1,12 @@
+---
+type: Example
+title: Status projection — staged design manifests
+description: The staged manifests accompanying the composition-status-projection design — minimal built-ins, full definition with apiRef, the RESTAction, and an instance.
+resource: compositiondefinitions.core.krateo.io
+tags: [example, status-projection, design]
+timestamp: 2026-08-07T00:00:00Z
+---
+
 # Composition status projection — example manifests
 
 Worked manifests for [`../../composition-status-projection.md`](../../composition-status-projection.md).

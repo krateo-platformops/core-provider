@@ -1,34 +1,66 @@
-# Krateo Core Provider
+# core-provider
 
-The **Krateo Core Provider** is the foundation of Krateo Composable Operations (KCO). It enables the management of Helm charts as Kubernetes-native resources by automating versioned CRD generation, strict JSON schema validation, and fine-grained RBAC isolation.
+The engine of Krateo Composable Operations: it turns any Helm chart with a
+`values.schema.json` into a Kubernetes-native API (a generated CRD) reconciled by a
+dedicated composition-dynamic-controller.
 
-## Key Features
+## What is this
 
-- **Dynamic CRD Generation**: Automatically creates and manages versioned CRDs from Helm chart schemas.
-- **Schema-Driven Validation**: Enforces strict input validation at the API level.
-- **Orchestration**: Manages the lifecycle of Composition Dynamic Controllers (CDCs).
-- **Local or remote deployment** (since 2.0.0): A `CompositionDefinition` deploys its Composition into the local management cluster by default, or into a remote cluster selected with `spec.deploy.targetRef` (a cluster-scoped `KubernetesTarget` pointing at a kubeconfig `Secret`). See [Remote deployment targets](docs/how-to/remote-target-credentials.md) and the [design doc](docs/design/multicluster-compositions.md).
-- **Composition status projection** (since 2.3.0): A `CompositionDefinition` may declare optional `spec.statusDataTemplate` (snowplow-style `${ jq }` mappings written under `.status` at a `forPath`) and `spec.apiRef` (a `RESTAction` reference whose resolved calls become a `.api` projection source). core-provider injects the declared fields into the generated CRD's status schema and ships the config to the composition-dynamic-controller (CDC); when `apiRef` is set it also projects an `authn`-audience ServiceAccount token onto the CDC and auto-provisions the authn allowlist mapping. See [apiRef status projection & authn](docs/how-to/apiref-status-projection-authn.md).
+A Go monorepo with three components that ship together from a single tag: the
+**core-provider engine** (`go/core-provider/` — reconciles `CompositionDefinition`s:
+fetches the chart, generates a versioned CRD from its schema, deploys a per-version
+CDC with least-privilege RBAC, locally or onto a remote cluster), the
+**composition-dynamic-controller** (`go/composition-dynamic-controller/` — the spawned
+per-Kind controller that drives one Helm release per composition instance), and the
+**chart-inspector** (`go/chart-inspector/` — the dry-run render service both use to
+compute chart RBAC). The Helm chart lives in `helm/core-provider/`.
+Full picture: [docs/index.md](docs/index.md).
 
-## Requirements
+## Install
 
-- **Kubernetes ≥ 1.36** on the management cluster and on every remote target. Since 2.0.0 core-provider hosts no admission webhooks: generated CRDs use `None` conversion and the `krateo.io/composition-version` label is stamped in-apiserver by a `MutatingAdmissionPolicy` (GA `admissionregistration.k8s.io/v1`), which requires 1.36. The policy is shipped declaratively by the Helm chart, not installed by core-provider.
-
-## Security by Design
-
-- **Least-Privilege Access**: Supports the generation of fine-grained RBAC policies for managed compositions.
-- **Validated Deployments**: Integrates with the Krateo Chart Inspector to perform dry-runs and validation before deployment.
-
-## Quick Start
+Normally installed by the **Krateo installer**, which pins the chart. Standalone
+(requires Kubernetes >= 1.36 — see [docs/usage.md](docs/usage.md)):
 
 ```sh
-helm repo add krateo https://charts.krateo.io
-helm repo update
-helm install krateo-core-provider krateo/core-provider --namespace krateo-system --create-namespace
+helm install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
+  --version 2.12.4 --namespace krateo-system --create-namespace
 ```
 
-## Documentation
+## Configure
 
-For detailed guides, architecture diagrams, and full reference, visit the official documentation:
+See [docs/configuration.md](docs/configuration.md). Most used:
 
-👉 **[https://docs.krateo.io](https://docs.krateo.io/key-concepts/kco/core-provider/overview)**
+| Setting | Default | Effect |
+|---|---|---|
+| `cdc.image.tag` | `""` (tracks `appVersion`) | The CDC image every composition controller runs; empty = version-locked to the release. |
+| `apiRefRBAC.enabled` | `true` | Auto-generate the RBAC that authorizes `apiRef` status-projection reads (needs authn's serviceaccount strategy). |
+| `global.imageRegistry` | `""` | One value relocates every image (engine, chart-inspector, CDC) for mirrored / air-gapped installs. |
+
+## Examples
+
+- [examples/basic-composition](examples/basic-composition) — the smallest
+  `CompositionDefinition`: one OCI chart becomes a namespaced Kubernetes API.
+- [examples/remote-target](examples/remote-target) — a `KubernetesTarget` +
+  remote-targeted `CompositionDefinition`: the composition deploys onto a spoke cluster.
+
+## Docs
+
+- [docs/index.md](docs/index.md) — the map (bundle + the code-adjacent deep corpus)
+- [docs/overview.md](docs/overview.md) — what it does and how it works
+- [docs/usage.md](docs/usage.md) — how to install / consume it
+- [docs/configuration.md](docs/configuration.md) — the whole config surface
+- [docs/api.md](docs/api.md) — the CRDs it owns, the CRDs it generates, the HTTP surfaces
+- [docs/examples.md](docs/examples.md) — examples index
+- [docs/release.md](docs/release.md) — how a release ships
+- [docs/log.md](docs/log.md) — curated history
+
+Internals (code-traced): [docs/internals/architecture.md](docs/internals/architecture.md),
+[docs/internals/behavior.md](docs/internals/behavior.md),
+[docs/internals/gotchas.md](docs/internals/gotchas.md), and the design corpus under
+[docs/design/](docs/design).
+
+## Develop & release
+
+`cd go/<module> && go test ./...` per module (three independent Go modules; the
+`integration`-tagged suites need a kind cluster). Tag `X.Y.Z` (no `v`) ships all three
+images + the chart — release runbook: [docs/release.md](docs/release.md).

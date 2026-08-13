@@ -1,3 +1,12 @@
+---
+type: Usage
+title: "How-to: credentials for remote deployment targets (ESO)"
+description: Wiring a KubernetesTarget's kubeconfig Secret with External Secrets Operator — the contract, target-side RBAC, and rotation recipes.
+resource: kubernetestargets.core.krateo.io
+tags: [how-to, multicluster, eso, credentials]
+timestamp: 2026-08-07T00:00:00Z
+---
+
 # How-to: credentials for remote deployment targets (with External Secrets Operator)
 
 When a `CompositionDefinition` references a remote cluster via
@@ -12,15 +21,17 @@ delegated to your secret manager via **External Secrets Operator (ESO)**.
 ## The contract
 
 ```yaml
-# Cluster-scoped: defines a remote cluster once; referenced by many CompositionDefinitions.
+# Namespaced: lives in the SAME namespace as every CompositionDefinition that
+# references it (targetRef is resolved in the referencing object's own namespace).
 apiVersion: core.krateo.io/v1alpha1
 kind: KubernetesTarget
 metadata:
   name: prod-eu
+  namespace: demo-system
 spec:
   kubeconfigRef:
     name: prod-eu-kubeconfig     # a native Secret in the management cluster
-    namespace: krateo-system
+    namespace: demo-system
     key: kubeconfig              # key holding a complete kubeconfig
 ---
 apiVersion: core.krateo.io/v1alpha1
@@ -33,11 +44,12 @@ spec:
     url: https://example.com/fireworks-app-0.1.0.tgz
   deploy:
     targetRef:
-      name: prod-eu             # the KubernetesTarget above
+      name: prod-eu             # the KubernetesTarget above, same namespace
 ```
 
 The Secret value under `key` must be a complete kubeconfig that authenticates to the
-target cluster. See **RBAC for the target identity** below for what it needs to be able
+target cluster (a token+`server`(+`ca.crt`) Secret shape — the form ESO mints for
+ServiceAccount tokens — is also accepted since #36). See **RBAC for the target identity** below for what it needs to be able
 to do.
 
 ## RBAC for the target identity
@@ -170,12 +182,13 @@ addition to CRDs, RBAC and Deployments.
 
 The projection is create-if-absent: if you prefer to manage the policy declaratively
 yourself (or already ship it via a chart), an existing policy in the target is left
-untouched. To install it explicitly, apply the `target-chart` from the core-provider chart
-repo into the target cluster:
+untouched. To install it explicitly, apply the `core-provider-target` chart (in this
+monorepo at [`helm/target-chart/`](../../helm/target-chart); published per release) into
+the target cluster:
 
 ```bash
-helm install krateo-core-provider-target oci://<registry>/krateo-core-provider-target \
-  --kube-context <target-cluster>
+helm install core-provider-target oci://ghcr.io/krateo-platformops/charts/core-provider-target \
+  --version <X.Y.Z> --kube-context <target-cluster>
 ```
 
 **Requirement:** the GA `MutatingAdmissionPolicy` API (`admissionregistration.k8s.io/v1`)

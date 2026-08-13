@@ -34,7 +34,7 @@ spec:
         {{- toYaml .Values.cdc.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
-          image: {{ include "krateo.image" (dict "img" .Values.cdc.image "global" .Values.global "defaultTag" "0.17.4") | quote }}
+          image: {{ include "krateo.image" (dict "img" .Values.cdc.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.cdc.image.pullPolicy }}
           envFrom:
             - configMapRef:

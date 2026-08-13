@@ -5,92 +5,54 @@ on:
     branches:
       - main
 
-env:
-  GHCR_REPO: ghcr.io/${{ github.repository }}
-
+# core-provider is a Go MONOREPO: three independent modules each with its own go.mod +
+# Dockerfile under go/<module>/. The previous inline jobs ran from the repo ROOT and failed on
+# every PR ("open Dockerfile: no such file or directory" / "go.mod not found"). This mirrors the
+# folded-aware reusables used by release-tag.yaml (and the same shape as the other krateo-* Go
+# repos, e.g. authn) so folded and monorepo repos share one CI shape — just one build job per
+# module list, and one component-go-checks per module.
 jobs:
   build:
-    name: Build and Push
-    strategy:
-      matrix:
-        runner: [ubuntu-22.04-arm, ubuntu-22.04]
-        include:
-          - runner: ubuntu-22.04-arm
-            platform: linux/arm64
-          - runner: ubuntu-22.04
-            platform: linux/amd64
-    runs-on: ${{ matrix.runner }}
-
+    # Validate all three images build multi-platform, WITHOUT pushing. chart-inspector builds from
+    # the shared `go` context (its Dockerfile does `COPY . .` then `WORKDIR /src/chart-inspector`),
+    # so its dockerfile path is explicit. permissions match authn's build job — the reusable
+    # requests packages:write, so the caller must grant it or the run fails at startup.
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
     permissions:
       contents: read
       packages: write
+    with:
+      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
+      push: false
 
-    steps:
-      - name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+  checks-core-provider:
+    # CRD-drift (make generate + git diff crds/) runs only here — core-provider is the sole module
+    # with committed crds/. Runs the UNIT suite: the `integration`-tagged tests spin up a real kind
+    # cluster / pull from Docker Hub (e2e-framework) and are unsuitable for a fast per-PR check —
+    # they belong in a dedicated integration workflow. (There are no `unit`-tagged files, so the old
+    # `-tags=unit,integration` only added the heavy integration build; dropping it runs all unit tests.)
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/core-provider
+      crd_drift: true
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.GHCR_REPO }}
+  checks-composition-dynamic-controller:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/composition-dynamic-controller
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
 
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  checks-chart-inspector:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/chart-inspector
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          # PR validation builds a single NATIVE platform per runner and never pushes, so use the
-          # daemon's built-in BuildKit (docker driver) instead of the docker-container driver. The
-          # container driver boots buildkit by pulling moby/buildkit from Docker Hub, which
-          # intermittently times out on hosted runners (anonymous Docker Hub rate limit) and was
-          # failing every release-pullrequest run. The docker driver needs no such pull.
-          driver: docker
-
-      - name: Build and NOT push
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          # native to the runner (driver: docker builds the host arch); no cross-build needed
-          push: false
-          labels: ${{ steps.meta.outputs.labels }}
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: 'stable'
-      - name: Gather dependencies
-        run: go mod download
-      - name: Run coverage
-        run: go test -race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  crds-drift:
-    name: CRD drift guard
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: 'stable'
-      - name: Regenerate CRDs
-        run: go generate ./...
-      - name: Fail if committed CRDs are out of date
-        run: |
-          # The release-tag crds job publishes ./crds to the chart repo's crds-subchart.
-          # Committed CRDs must match a fresh controller-gen run, or the chart would drift.
-          git diff --exit-code crds/ \
-            || { echo "::error::./crds is out of date. Run 'go generate ./...' and commit the result."; exit 1; }
+  lint-docs:
+    # THE canonical documentation-conformance check (the Krateo Documentation Standard):
+    # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.
+    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main

@@ -1,3 +1,12 @@
+---
+type: Usage
+title: "How-to: the apiRef status source (authn allowlist + RBAC)"
+description: How spec.apiRef projects a RESTAction into composition status — the per-composition identity, the auto-created allowlist mapping, and the issued group's RBAC.
+resource: compositiondefinitions.core.krateo.io
+tags: [how-to, apiref, authn, rbac]
+timestamp: 2026-08-07T00:00:00Z
+---
+
 # The `apiRef` status source (authn allowlist)
 
 When a `CompositionDefinition` declares `spec.apiRef`, the composition-dynamic-controller
@@ -10,14 +19,18 @@ only performs that exchange for ServiceAccounts that are on its **allowlist** �
 a `serviceaccount.authn.krateo.io/ServiceAccount` mapping exists **in the authn operator
 namespace** (e.g. `krateo-system`).
 
-Both pieces are **provisioned automatically by core-provider** when `apiRef` is set:
+All three pieces are **provisioned automatically by core-provider** when `apiRef` is set:
 
 1. the projected token volume on the CDC Deployment
-   (`/var/run/secrets/krateo.io/serviceaccount/token`); and
-2. the authn allowlist mapping (this document).
+   (`/var/run/secrets/krateo.io/serviceaccount/token`);
+2. the authn allowlist mapping (this document); and
+3. — when the chart's `apiRefRBAC.enabled` is on (the default) — the **RBAC for the
+   issued group**, generated from the RESTAction's read-set (snowplow `GET /rbac`;
+   [design](../design/apiref-rbac-generation.md)). authn itself never authors RBAC.
 
-The only step left to the platform operator is binding RBAC to the issued group (see below) —
-authn never authors RBAC.
+Manual RBAC authoring remains only for clusters with `apiRefRBAC` disabled, or when
+the read-set cannot be fully enumerated (the definition then carries the
+`ApiRefRBACIncomplete` condition and **no partial RBAC is written**) — see below.
 
 ## The per-composition ServiceAccount
 
@@ -54,12 +67,22 @@ This requires core-provider to have manage rights on
 `serviceaccounts.serviceaccount.authn.krateo.io` (granted by the core-provider chart
 ClusterRole) and to know the authn namespace (`COMPOSITION_AUTHN_NAMESPACE`).
 
-## Binding RBAC to the issued identity (operator step)
+## RBAC for the issued identity (auto-generated; manual fallback)
 
 `spec.groups` become the issued clientconfig certificate's `O=` (organization), so **standard
 Kubernetes RBAC bound to that group** scopes what the resolved RESTAction may read. The group
-is **per composition** — `krateo:cdc:<resource>-<apiVersion>` — so each composition type can be
-granted exactly the reads its RESTAction performs:
+is **per composition** — `krateo:cdc:<resource>-<apiVersion>` — so each composition type is
+granted exactly the reads its RESTAction performs.
+
+With `apiRefRBAC.enabled=true` (chart default) core-provider **generates this RBAC itself**:
+it asks snowplow's dispatch-free `GET /rbac` for the RESTAction's read-set (the
+group/version/resource/namespace/verb rows its in-cluster calls touch) and writes the
+ClusterRole/Binding (`internal/tools/deploy/restactionrbac.go`). If any stage is
+unresolvable, snowplow answers 422 and core-provider sets `ApiRefRBACIncomplete` instead of
+writing partial RBAC.
+
+With `apiRefRBAC` disabled (or while `ApiRefRBACIncomplete` stands), author the binding by
+hand:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1

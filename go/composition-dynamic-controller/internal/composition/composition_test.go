@@ -525,6 +525,58 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Regression: Observe Tolerates Stale ResourceVersion", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// Regression for the external-create wedge (unstructured-runtime incomplete-create recovery).
+		// The runtime re-Observes with the copy of the CR it began the reconcile with; a concurrent
+		// writer (an umbrella re-applying the instance, a kubectl edit, or the reconcile's own
+		// external-create annotation write) may have bumped its resourceVersion in the meantime.
+		// Observe previously did a NON-retrying tools.Update (release name + CD def-ref labels) that
+		// 409'd on such a stale version and returned an error; the recovery then treats an Observe
+		// error as "cannot determine creation result" and refuses forever, wedging the composition.
+		// Observe must now be a pure read that tolerates a stale resourceVersion.
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Error("Decoding composition manifests.", "error", err)
+			return ctx
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+
+		// Snapshot the CR — this is the (soon-to-be-stale) object a reconcile would hold.
+		stale, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Error("Getting composition.", "error", err)
+			return ctx
+		}
+
+		// A concurrent writer bumps the CR's resourceVersion out from under `stale`.
+		fresh, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Error("Getting composition.", "error", err)
+			return ctx
+		}
+		ann := fresh.GetAnnotations()
+		if ann == nil {
+			ann = map[string]string{}
+		}
+		ann["krateo.io/test-concurrent-write"] = "1"
+		fresh.SetAnnotations(ann)
+		if _, err := cli.Update(ctx, fresh, metav1.UpdateOptions{}); err != nil {
+			t.Error("Concurrent update failed.", "error", err)
+			return ctx
+		}
+
+		// Observe with the STALE object. A pure-read Observe must not 409 here; the pre-fix code did,
+		// which is exactly what wedged the external-create recovery.
+		if _, err := handler.Observe(ctx, stale); err != nil {
+			t.Errorf("Observe must tolerate a concurrently-bumped resourceVersion (pure read), got error: %v", err)
+		}
+		return ctx
 	}).Assess("SelfHeal: Recreate Deleted Child", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// (b) SELF-HEAL DELETE: delete a finops.krateo.io/datapresentationazures child
 		// out-of-band. The next reconcile (Observe -> Update) must recreate it, and the

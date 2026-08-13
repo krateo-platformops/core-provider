@@ -6,4 +6,4 @@ metadata:
 spec:
   chart:
     url: oci://ghcr.io/krateo-platformops/charts/core-provider
-    version: "0.35.4"
+    version: "2.12.4"
