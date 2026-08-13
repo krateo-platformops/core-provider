@@ -37,12 +37,30 @@ func TestClassifyChild_Krateo(t *testing.T) {
 		{"ready-true", krateoCR("True", "Available", true), childHealthy},
 		{"ready-false-unavailable", krateoCR("False", "Unavailable", true), childFailed},
 		{"ready-false-creating", krateoCR("False", "Creating", true), childConverging},
-		{"no-conditions", krateoCR("", "", false), childConverging},
+		// A leaf krateo.io CR with no conditions (e.g. authn's ServiceAccount) is healthy by
+		// existence — the absence of a Ready condition is not evidence of trouble. Treating it as
+		// converging permanently wedged the parent Ready=False (snowplow-seed).
+		{"no-conditions", krateoCR("", "", false), childHealthy},
 	}
 	for _, c := range cases {
 		if got := classifyChild("composition.krateo.io", c.obj); got != c.expect {
 			t.Errorf("%s: got %d want %d", c.name, got, c.expect)
 		}
+	}
+}
+
+func TestClassifyChild_KrateoConditionsWithoutReady(t *testing.T) {
+	// A krateo.io CR that carries conditions but none of type Ready is not a Ready-bearing
+	// resource; it is healthy by existence, not converging.
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "serviceaccount.authn.krateo.io/v1alpha1", "kind": "ServiceAccount",
+		"metadata": map[string]any{"name": "snowplow-seed", "namespace": "ns"},
+	}}
+	_ = unstructured.SetNestedSlice(u.Object, []any{
+		map[string]any{"type": "Synced", "status": "True"},
+	}, "status", "conditions")
+	if got := classifyChild("serviceaccount.authn.krateo.io", u); got != childHealthy {
+		t.Errorf("krateo CR with non-Ready conditions: got %d want healthy", got)
 	}
 }
 

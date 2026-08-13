@@ -125,11 +125,19 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 	}
 }
 
-// krateoReady reads a Krateo child's own Ready condition.
+// krateoReady reads a Krateo child's own Ready condition. Only a Ready condition that is PRESENT
+// and not-True is evidence the child is unhealthy. The absence of a Ready condition is NOT such
+// evidence: many *.krateo.io CRs are leaf declarative resources that never carry conditions (e.g.
+// authn's serviceaccount.authn.krateo.io ServiceAccount, a seed identity), and they are healthy by
+// existence like any other non-composition child. Treating "no Ready condition" as converging
+// wedged the parent Ready=False forever — snowplow never went Ready because its managed
+// snowplow-seed ServiceAccount CR has no conditions. Composition/CompositionDefinition children
+// always stamp a Ready condition (reason Creating/Available/Unavailable) the moment they first
+// reconcile, so genuinely-not-ready nested compositions are still caught by the not-True branch.
 func krateoReady(obj *unstructured.Unstructured) childState {
 	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !found {
-		return childConverging
+		return childHealthy
 	}
 	for _, c := range conds {
 		cm, ok := c.(map[string]any)
@@ -145,7 +153,8 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childConverging
 		}
 	}
-	return childConverging
+	// Has conditions but no Ready type: not a Ready-bearing resource; existence is health.
+	return childHealthy
 }
 
 // workloadReady handles Deployment/StatefulSet/ReplicaSet (spec.replicas) and DaemonSet
