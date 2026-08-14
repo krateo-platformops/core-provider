@@ -6,7 +6,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y ca-certificates openssl git tzdata && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl git tzdata && \
   update-ca-certificates && \
   rm -rf /var/lib/apt/lists/*
 
@@ -34,7 +34,13 @@ FROM golang:1.25.6-alpine
 ENV GOCACHE='/tmp/.cache'
 RUN mkdir -p "$GOCACHE/go-build" && chmod -R 1777 "$GOCACHE"
 
+# Run as a non-root user (DS-0002).
+RUN addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S nonroot -G nonroot
+
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /bin/manager /bin/manager
+
+USER 65532:65532
 
 ENTRYPOINT ["/bin/manager"]
