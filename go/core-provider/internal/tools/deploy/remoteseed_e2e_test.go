@@ -51,7 +51,7 @@ func TestE2E_RemoteSeedTeardown(t *testing.T) {
 	dyn := spokeDyn(t)
 
 	coords := ChartInspectorCoords{Name: "installer-core-provider-chart-inspector", Namespace: "krateo-system", Port: 8081}
-	chart := &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/braghettos/krateo/demo", Version: "1.0.0"}
+	chart := &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/example/krateo/demo", Version: "1.0.0"}
 
 	// --- setup: project chart-inspector + seed two shadow CDs in different namespaces ---
 	if err := ProjectChartInspector(ctx, hub, spoke, coords); err != nil {
@@ -60,7 +60,7 @@ func TestE2E_RemoteSeedTeardown(t *testing.T) {
 	seed := func(ns, name string) {
 		if err := SeedRemoteTarget(ctx, spoke, dyn, RemoteSeedOptions{
 			Namespace: ns, CDName: name, Chart: chart,
-			PackageURL: "oci://ghcr.io/braghettos/krateo/demo:1.0.0",
+			PackageURL: "oci://ghcr.io/example/krateo/demo:1.0.0",
 			APIVersion: "composition.krateo.io/v1-0-0", Kind: "Demo", Resource: "demos",
 		}); err != nil {
 			t.Fatalf("SeedRemoteTarget %s/%s: %v", ns, name, err)
