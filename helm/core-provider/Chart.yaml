@@ -23,7 +23,7 @@ version: CHART_VERSION
 # It is recommended to use it with quotes.
 appVersion: APP_VERSION
 home: https://krateo.io
-icon: https://raw.githubusercontent.com/krateoplatformops/krateo/main/docs/media/logo.svg
+icon: https://raw.githubusercontent.com/krateo-platformops/.github/main/brand/logo.svg
 keywords:
   - krateo
   - platformops
