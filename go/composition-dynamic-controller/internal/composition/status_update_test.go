@@ -53,7 +53,7 @@ func srOpts(dyn *dynamicfake.FakeDynamicClient) tools.UpdateOptions {
 
 // A 409 on the first status write (as happens during a GVK-migration handover) must be retried
 // after a re-fetch, and the status this reconcile computed must ultimately land. Regression guard
-// for braghettos/krateo-core-provider#57.
+// for krateo-platformops/core-provider#57.
 func TestUpdateStatusWithRetry_RecoversFromConflict(t *testing.T) {
 	// The stored object was concurrently modified (rv=2) after we read it (rv=1).
 	dyn := srFakeDyn(srPortal("2", "concurrent"))

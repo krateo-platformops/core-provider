@@ -20,7 +20,7 @@ import (
 // During a GVK-migration handover the retiring per-version controller and this one briefly contend
 // on the same composition CR's status, making that 409 routine; without a retry the healthy
 // Ready/Synced condition never lands and the composition stays wedged Ready=False until someone
-// manually restarts the controller (braghettos/krateo-core-provider#57). Re-submitting our status
+// manually restarts the controller (krateo-platformops/core-provider#57). Re-submitting our status
 // is safe because this controller owns the status subresource (last-writer-wins).
 //
 // Note: we carry mg's status as-is and refresh only its resourceVersion — we deliberately do NOT

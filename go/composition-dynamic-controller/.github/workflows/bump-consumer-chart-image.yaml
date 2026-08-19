@@ -29,7 +29,7 @@ jobs:
         run: |
           set -eo pipefail
           TAG="${GITHUB_REF_NAME}"
-          TARGET_REPO="braghettos/core-provider-chart"
+          TARGET_REPO="krateo-platformops/core-provider-chart"
           BRANCH="cdc-image-${TAG}"
           echo "Aligning ${TARGET_REPO} cdc.image.tag -> ${TAG}"
 

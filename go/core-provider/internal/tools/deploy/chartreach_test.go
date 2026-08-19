@@ -22,11 +22,11 @@ func TestIsClusterLocalChartURL(t *testing.T) {
 	}
 
 	reachable := []string{
-		"oci://ghcr.io/braghettos/krateo/demo:1.0",
+		"oci://ghcr.io/example/krateo/demo:1.0",
 		"https://charts.example.com/demo.tgz",
 		"oci://registry-1.docker.io/library/demo",
 		"oci://8.8.8.8:5000/charts/demo", // public IP
-		"ghcr.io/braghettos/krateo/demo", // scheme-less public
+		"ghcr.io/example/krateo/demo", // scheme-less public
 		"",                               // unknown host -> fail open
 	}
 	for _, u := range reachable {
