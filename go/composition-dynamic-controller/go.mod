@@ -6,7 +6,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/go-logr/logr v1.4.3
 	github.com/gobuffalo/flect v1.0.3
-	github.com/krateo-platformops/plumbing v1.13.2
+	github.com/krateo-platformops/plumbing v1.14.1
 	github.com/krateo-platformops/unstructured-runtime v1.4.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0
