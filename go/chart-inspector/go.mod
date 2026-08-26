@@ -6,7 +6,7 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/krateo-platformops/composition-dynamic-controller v1.4.0
 	github.com/krateo-platformops/core-provider v0.0.0-20260803144138-97785b777edd
-	github.com/krateo-platformops/plumbing v1.13.2
+	github.com/krateo-platformops/plumbing v1.14.1
 	github.com/krateo-platformops/provider-runtime v1.3.0
 	github.com/krateo-platformops/unstructured-runtime v1.4.0
 	github.com/swaggo/http-swagger v1.3.4
