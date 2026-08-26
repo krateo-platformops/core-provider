@@ -8,7 +8,7 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.17
-	github.com/krateo-platformops/plumbing v1.13.2
+	github.com/krateo-platformops/plumbing v1.14.1
 	github.com/krateo-platformops/provider-runtime v1.3.0
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.11.1
