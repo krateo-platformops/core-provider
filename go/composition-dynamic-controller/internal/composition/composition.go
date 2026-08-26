@@ -40,10 +40,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
@@ -238,14 +235,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}, nil
 	}
 
-	if rel.Status == helmconfig.StatusPendingInstall || rel.Status == helmconfig.StatusPendingUpgrade || rel.Status == helmconfig.StatusPendingRollback {
-		// A pending status means a helm operation is in flight OR its process died mid-flight — helm
-		// labels both the same and never re-labels a crash. Status alone can't tell them apart, so we
-		// use how long it has been pending (rel.Updated = helm Info.LastDeployed). A LARGE composition's
-		// upgrade (hundreds of children + hooks) legitimately stays pending for tens of seconds; the old
-		// unconditional rollback reverted such in-flight operations mid-flight (even rolling back a
-		// pending-rollback), which — with the reconcile re-enqueue cadence — produced an Upgrade<->Rollback
-		// thrash on the 319-resource portal composition.
+	if isIncompleteHelmOperation(rel.Status) {
+		// A pending-* OR uninstalling status means a helm operation is in flight OR its process died
+		// mid-flight — helm labels both the same and never re-labels a crash. (StatusUninstalling is
+		// included so a release stuck mid-uninstall — e.g. a Delete that died after helm began the
+		// uninstall — is detected as stuck and cleared; otherwise it wedges forever, since helm refuses
+		// to operate on a release locked in `uninstalling`.) Status alone can't tell in-flight from
+		// crashed apart, so we use how long it has been pending (rel.Updated = helm Info.LastDeployed).
+		// A LARGE composition's upgrade (hundreds of children + hooks) legitimately stays pending for
+		// tens of seconds; the old unconditional rollback reverted such in-flight operations mid-flight
+		// (even rolling back a pending-rollback), which — with the reconcile re-enqueue cadence —
+		// produced an Upgrade<->Rollback thrash on the 319-resource portal composition.
 		pendingFor := time.Since(rel.Updated)
 		if pendingFor < pendingOperationGrace {
 			// Recent => legitimately in flight. Do NOT roll it back and do NOT start a concurrent
@@ -274,10 +274,10 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			}
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 		}
-		// Pending longer than any real operation => genuinely stuck (e.g. controller died mid-op). Roll
-		// back once to clear the stale pending lock so a fresh upgrade can proceed (helm refuses to
-		// upgrade a release that is stuck pending).
-		log.Debug("Composition stuck in a pending helm operation past the grace period; rolling back to clear it.",
+		// Stuck longer than any real operation => genuinely wedged (e.g. controller died mid-op). Roll
+		// back once to clear the stale pending/uninstalling lock so a fresh upgrade (or a clean re-drive
+		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
+		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
 		rel, err = hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 			MaxHistory:     helmMaxHistory,
@@ -882,14 +882,35 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// that re-rolls them into ZK-auth staleness). Instead, detect the handover and skip the
 	// uninstall: the new-version controller's Reconcile is install-or-upgrade, so it upgrades the
 	// surviving release IN PLACE (helm upgrade, not uninstall+install). We detect it race-free via
-	// the owning CompositionDefinition, whose spec.chart.version is bumped to the new version
-	// BEFORE the old CR is pruned: CD present AND CD.version != this CR's version => migration.
-	if handover, herr := h.isVersionMigrationHandover(ctx, dyn, mg); herr != nil {
-		log.Debug("could not determine version-migration handover; proceeding with uninstall", "err", herr)
-	} else if handover {
+	// the owning CompositionDefinition (resolved into pkg), whose spec.chart.version is bumped to the
+	// new version BEFORE the old CR is pruned: CD.version != this CR's apiVersion version => migration.
+	if isVersionMigrationHandover(mg, pkg) {
 		log.Info("GVK version-migration handover detected; skipping uninstall so the new-version controller upgrades the release in place", "release", releaseName)
 		h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("GVK migration: release %s handed over to the new version for in-place helm upgrade; uninstall skipped", releaseName)))
 		return nil
+	}
+
+	// A release stuck mid-uninstall (a prior Delete that died after helm began the uninstall) can never
+	// be re-driven: helm refuses to operate on a release locked in `uninstalling`, so the Uninstall
+	// below would fail every reconcile and the composition would wedge in Deleting forever. Mirror the
+	// Observe recovery: within the grace period the uninstall may still be legitimately in flight (wait
+	// and retry); past it, roll back to clear the lock, then re-drive the uninstall cleanly below.
+	if rel.Status == helmconfig.StatusUninstalling {
+		stuckFor := time.Since(rel.Updated)
+		if stuckFor < pendingOperationGrace {
+			log.Debug("Release uninstall in progress; waiting for it to settle before re-driving delete.",
+				"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
+			return fmt.Errorf("waiting for an in-flight uninstall of release %s to settle (stuck for %s)",
+				releaseName, stuckFor.Truncate(time.Second))
+		}
+		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
+			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
+		if _, rerr := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
+			MaxHistory:     helmMaxHistory,
+			ReleaseVersion: rel.Revision,
+		}); rerr != nil {
+			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
+		}
 	}
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
@@ -958,53 +979,53 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 // chart-version bump (its GVK changing v<old> -> v<new>) rather than a genuine removal, in which
 // case the helm release must survive for the new-version controller to upgrade in place.
 //
-// It reads the CR's own labels (set by the umbrella/cdc): the owning CompositionDefinition's GVR
-// + name (krateo.io/composition-definition-{group,version,resource,name}[,namespace]) and this
-// CR's version (krateo.io/composition-version, e.g. "v0-1-7"). It GETs that CompositionDefinition
-// and compares its spec.chart.version (normalized "0.1.8" -> "v0-1-8") to the CR's version:
-//   - CD absent (NotFound): the component is genuinely being removed -> NOT a handover (uninstall).
-//   - CD present and its version == the CR's version: no migration -> NOT a handover (uninstall).
-//   - CD present and its version != the CR's version: the definition already advanced to the new
-//     version while this old-version CR is pruned -> handover (skip uninstall).
+// It compares this CR's own version — taken from its apiVersion (mg.GroupVersionKind().Version,
+// e.g. "v0-1-7"), which is ALWAYS present and independent of any label — against the owning
+// CompositionDefinition's current chart version. That version is pkg.Version: the getter resolves
+// the owning CD (via the definition-ref labels when present, else a robust namespace search that
+// tolerates label skew) and reads its spec.chart.version, so this check does NOT depend on the
+// krateo.io/composition-definition-* / composition-version labels being present. Normalizing the
+// CD's semver ("0.1.8" -> "v0-1-8") and comparing:
+//   - CD version == this CR's version: no migration -> NOT a handover (uninstall).
+//   - CD version != this CR's version: the definition already advanced to the new version while
+//     this old-version CR is pruned -> handover (skip uninstall).
 //
-// This is race-free regardless of whether the new CR is created before or after the old is pruned,
-// because the CompositionDefinition's version is advanced before the prune. On any missing label or
-// lookup error it returns false so the caller falls back to the safe default (uninstall).
-func (h *handler) isVersionMigrationHandover(ctx context.Context, dyn dynamic.Interface, mg *unstructured.Unstructured) (bool, error) {
-	labels := mg.GetLabels()
-	if labels == nil {
-		return false, nil
+// This is race-free because the CompositionDefinition's version is advanced before the old CR is
+// pruned. Crucially it is fail-safe: a failed install that never stamped the composition-definition-*
+// labels no longer bails to "uninstall" — the owning CD is still resolved from the package info, so a
+// version bump is detected and the destructive uninstall is skipped. When the owning CD genuinely
+// cannot be resolved the package getter fails UPSTREAM (Delete returns an error and is retried)
+// rather than reaching this check, so a version bump can never trigger a destructive uninstall.
+func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info) bool {
+	if pkg == nil || pkg.Version == "" {
+		return false
 	}
-	cdName := labels["krateo.io/composition-definition-name"]
-	cdResource := labels["krateo.io/composition-definition-resource"]
-	cdGroup := labels["krateo.io/composition-definition-group"]
-	cdVersion := labels["krateo.io/composition-definition-version"]
-	cdNamespace := labels["krateo.io/composition-definition-namespace"]
-	crVersion := labels["krateo.io/composition-version"]
-	if cdName == "" || cdResource == "" || cdVersion == "" || crVersion == "" {
-		return false, nil
+	crVersion := mg.GroupVersionKind().Version
+	if crVersion == "" {
+		return false
 	}
+	// Normalize the owning CD's semver chart version ("0.1.8") to the CR's version form ("v0-1-8").
+	cdVersion := "v" + strings.ReplaceAll(pkg.Version, ".", "-")
+	return cdVersion != crVersion
+}
 
-	gvr := schema.GroupVersionResource{Group: cdGroup, Version: cdVersion, Resource: cdResource}
-	var ri dynamic.ResourceInterface = dyn.Resource(gvr)
-	if cdNamespace != "" {
-		ri = dyn.Resource(gvr).Namespace(cdNamespace)
+// isIncompleteHelmOperation reports whether a release status indicates a helm operation that is
+// either in flight or died mid-flight — helm labels both the same and never re-labels a crash. These
+// are the statuses the stuck-operation recovery watches: a pending install/upgrade/rollback, or an
+// uninstall that never completed (StatusUninstalling). Past the grace period the recovery rolls the
+// release back to clear the stale lock, since helm refuses to operate on a release wedged in any of
+// these states. StatusUninstalling is included so a Delete that died after helm began the uninstall
+// (leaving the release locked in `uninstalling`) can self-recover instead of wedging forever.
+func isIncompleteHelmOperation(status helmconfig.Status) bool {
+	switch status {
+	case helmconfig.StatusPendingInstall,
+		helmconfig.StatusPendingUpgrade,
+		helmconfig.StatusPendingRollback,
+		helmconfig.StatusUninstalling:
+		return true
+	default:
+		return false
 	}
-	cd, err := ri.Get(ctx, cdName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	chartVersion, _, _ := unstructured.NestedString(cd.Object, "spec", "chart", "version")
-	if chartVersion == "" {
-		return false, nil
-	}
-	// Normalize the semver chart version ("0.1.8") to the CR's version-label form ("v0-1-8").
-	cdVersionLabel := "v" + strings.ReplaceAll(chartVersion, ".", "-")
-	return cdVersionLabel != crVersion, nil
 }
 
 func (h *handler) getHelmLogger(verbose bool) func(format string, v ...interface{}) {
