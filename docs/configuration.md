@@ -70,7 +70,7 @@ writable-home requirement.
 | `cdc.image.tag` | `""` | **Tracks the chart `appVersion`** — every release ships the matching CDC build (a literal pin previously let a CDC fix ship without deploying, see values.yaml history note). Set explicitly only to hold the CDC back. |
 | `cdc.workers` / `cdc.resyncInterval` | unset | Optional fleet-wide floor for reconcile concurrency / resync; a definition's `spec.controller` still overrides per Kind. |
 | `cdc.env` | `COMPOSITION_CONTROLLER_WORKERS: "10"`, `..._RESYNC_INTERVAL: "60s"`, `..._GRACEFUL_SHUTDOWN_TIMEOUT: "30s"`, `HOME: /tmp` | The 60s resync makes umbrella self-bootstrap advance in minutes; the drain window must stay below `cdc.terminationGracePeriodSeconds` (45). |
-| `cdc.resources` | requests `50m`/`64Mi` | One Deployment per composition Kind runs concurrently — keep the per-controller footprint small. |
+| `cdc.resources` | requests `50m`/`128Mi`, limits `512Mi` (no CPU limit) | One Deployment per composition Kind runs concurrently. `64Mi` was too low, but the 200-239Mi fleet figures in #99 were inflated by the helm-client goroutine leak (fixed separately) — sizing from them would over-reserve. The clean control (`builderpublishes`, zero compositions, never reconciles) idles at `37Mi`, so `128Mi` covers the floor plus real reconcile working room. Limits are not reserved, so `512Mi` is free headroom for a large chart render. No CPU limit — a limit on a bursty reconcile loop throttles it to zero progress (same measured finding as the engine). **Re-derive from post-fix measurements.** |
 | `cdc.metrics.enabled` | `false` | No port exposed by default, hence no probes. |
 
 Per-definition override: `CompositionDefinition.spec.controller`

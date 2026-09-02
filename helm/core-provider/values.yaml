@@ -302,15 +302,45 @@ cdc:
   # runAsNonRoot: true
   # runAsUser: 1000
 
-  # One Deployment per composition TYPE runs concurrently, so keep the per-controller footprint
-  # small. CDC is single-replica by design (per-composition controller, no leader election).
+  # One Deployment per composition TYPE runs concurrently and CDC is single-replica by design
+  # (per-composition controller, no leader election), so the per-controller footprint matters —
+  # but it must reflect what a controller ACTUALLY holds (issue #99).
+  #
+  # Memory: 64Mi was too low, but NOT by the factor the raw fleet numbers suggest. The 200-239Mi
+  # steady state measured on krateo-057 was inflated by the goroutine leak fixed separately (every
+  # reconcile leaked a helm DiskCache cleanup goroutine — see #99): those pods were accumulating
+  # leaked goroutines, not holding a 200Mi working set. Sizing the request from that number would
+  # over-reserve ~10.5Gi fleet-wide for pods that do not need it.
+  #
+  # What the evidence actually supports: builderpublishes — same image, same limits, but ZERO
+  # compositions, so it never reconciles and never leaked — sits FLAT at 37Mi. That is the true
+  # idle floor. A reconciling controller legitimately needs more (chart fetch + render + helm
+  # 3-way merge), so 128Mi requests the floor plus real working room, without pricing in the leak.
+  # 41 controllers x 128Mi = 5.25Gi reserved, versus 2.6Gi before and 10.5Gi if we had believed the
+  # leak-inflated figure.
+  #
+  # The 512Mi limit is deliberate headroom for a large chart render, and limits are not reserved,
+  # so it costs no scheduling capacity. With the leak fixed, nothing should approach it.
+  #
+  # RE-DERIVE THESE once the leak fix has been deployed for a few days: measure the post-fix steady
+  # state and set the request from that. These numbers are the best defensible estimate from
+  # leak-contaminated data plus one clean control, not a measurement of the fixed system.
+  #
+  # NOTE (capacity): raising the request is still a real scheduling change — a cluster that was
+  # silently overcommitted may show Pending controllers until sized for what these pods use.
+  #
+  # CPU: deliberately NO cpu limit, for the reason already measured on the engine above — a CPU
+  # limit on a bursty reconcile loop is an anti-pattern here: a 500m limit throttled the engine in
+  # ~99.8% of scheduling periods (cgroup cpu.stat nr_throttled≈nr_periods) so it pegged at 500m and
+  # made ZERO reconcile progress. A CDC reconcile (fetch chart + render + helm install/upgrade of a
+  # whole chart) has the same bursty shape, so it carried the same risk. The request keeps the
+  # scheduler honest and the memory limit still bounds the pod.
   resources:
     requests:
       cpu: 50m
-      memory: 64Mi
+      memory: 128Mi
     limits:
-      cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
   # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
   # (graceful drain), not readiness-gating — probes are intentionally left off BY DESIGN: a
