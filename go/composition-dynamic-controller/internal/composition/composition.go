@@ -222,6 +222,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("creating helm client: %w", err)
 	}
+	// A helm client owns background resources and MUST be closed: WithCache() starts a DiskCache
+	// cleanup goroutine (hourly ticker) whose only exit is Close(), and WithCRDInformer would add a
+	// second. Observe builds TWO clients and runs on every resync, so never closing them leaked ~2
+	// goroutines per reconcile per composition — permanently. That is the monotone, work-correlated
+	// growth into the 256Mi limit in krateo-core-provider#99 (and why a controller with zero
+	// compositions, which never reaches Observe, stayed flat).
+	//
+	// Value-captured on purpose: `defer hc.Close()` evaluates hc NOW, whereas a closure would
+	// capture the variable and — since hc is reassigned below — close the second client twice.
+	// DiskCache.Stop() closes an unguarded channel, so a double close panics.
+	defer hc.Close()
 
 	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
 	if err != nil {
@@ -346,6 +357,10 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("getting helm client: %w", err)
 	}
+	// Second client in this function (tracing transport) — its own DiskCache janitor, so its own
+	// deferred close. See the note above on value capture: this closes THIS client, the earlier
+	// defer closes the first one.
+	defer hc.Close()
 
 	values, err := helmutils.ValuesFromSpec(mg)
 	if err != nil {
@@ -549,6 +564,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
+	// Close the client's background resources — see the note in Observe (#99). This client is
+	// built without WithCache(), so there is no janitor to stop today; closing is still correct
+	// and keeps the leak from reappearing if caching is ever enabled on this path.
+	defer hc.Close()
 
 	values, err := helmutils.ValuesFromSpec(mg)
 	if err != nil {
@@ -711,6 +730,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
+	// Close the client's background resources — see the note in Observe (#99). This client is
+	// built without WithCache(), so there is no janitor to stop today; closing is still correct
+	// and keeps the leak from reappearing if caching is ever enabled on this path.
+	defer hc.Close()
 
 	values, err := helmutils.ValuesFromSpec(mg)
 	if err != nil {
@@ -857,6 +880,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
+	// Close the client's background resources — see the note in Observe (#99). This client is
+	// built without WithCache(), so there is no janitor to stop today; closing is still correct
+	// and keeps the leak from reappearing if caching is ever enabled on this path.
+	defer hc.Close()
 
 	pkg, err := h.packageInfoGetter.WithLogger(log).Get(mg)
 	if err != nil {
