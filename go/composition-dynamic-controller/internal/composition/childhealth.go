@@ -75,6 +75,48 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	}
 }
 
+// readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable") and
+// the message to stamp.
+type readyOutcome struct {
+	reason  string
+	message string
+}
+
+// resolveReady folds a blueprint's projected health (.status.health.ready, when present) with the
+// generic managed-child rollup into the final Ready outcome (krateo-core-provider#96):
+//
+//   - A blueprint that projected ready=false is honored — the author declared it unhealthy.
+//   - Otherwise a positively-observed sick managed child (a workload with unready/unavailable
+//     replicas, a failed Job, a nested composition reporting Unavailable) keeps the composition
+//     Ready=False EVEN WHEN the blueprint projected ready=true. Projected health may VETO but must
+//     not override observed workload sickness to Ready: "applied" is not "serving", and a `deps:`
+//     edge must wait for the workload to actually be healthy.
+//   - When everything observed is healthy, the composition is Available, preferring the author's
+//     projected message when they supplied one.
+//
+// The rollup is itself fail-safe (unreadable / unmodeled children count healthy), so this can only
+// surface failures it can positively observe — it never flips a working composition to NotReady.
+func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v healthVerdict) readyOutcome {
+	if projPresent && !projReady {
+		msg := projMsg
+		if msg == "" {
+			msg = defaultMsg
+		}
+		return readyOutcome{reason: "Unavailable", message: msg}
+	}
+	switch v.reason {
+	case "Unavailable":
+		return readyOutcome{reason: "Unavailable", message: v.message}
+	case "Creating":
+		return readyOutcome{reason: "Creating", message: v.message}
+	}
+	msg := defaultMsg
+	if projPresent && projMsg != "" {
+		msg = projMsg
+	}
+	return readyOutcome{reason: "Available", message: msg}
+}
+
 // childHealth GETs one managed child (as the controller SA) and classifies it. Any read it cannot
 // complete degrades to healthy — never to a failure — so a missing RBAC grant or a create race
 // cannot regress the parent.
@@ -158,15 +200,28 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 }
 
 // workloadReady handles Deployment/StatefulSet/ReplicaSet (spec.replicas) and DaemonSet
-// (desiredNumberScheduled). Not-yet-met rollouts are converging, never failed — they self-progress.
+// (desiredNumberScheduled). A workload with unready replicas — including a CrashLoopBackOff pod that
+// holds readyReplicas at 0 — is CONVERGING, never failed (it self-progresses), so the composition
+// stays Ready=False (Creating) until the workload actually serves rather than merely being applied
+// (krateo-core-provider#96).
 func workloadReady(obj *unstructured.Unstructured) childState {
+	// DaemonSet: readiness is per-node (desiredNumberScheduled vs numberReady); numberUnavailable>0
+	// means some node's pod is not ready (e.g. crashing).
 	if desired, found, _ := unstructured.NestedInt64(obj.Object, "status", "desiredNumberScheduled"); found {
 		ready, _, _ := unstructured.NestedInt64(obj.Object, "status", "numberReady")
-		return boolState(ready >= desired)
+		unavailable, _, _ := unstructured.NestedInt64(obj.Object, "status", "numberUnavailable")
+		return boolState(ready >= desired && unavailable == 0)
 	}
-	desired, _, _ := unstructured.NestedInt64(obj.Object, "spec", "replicas")
+	// Deployment/StatefulSet/ReplicaSet: spec.replicas defaults to 1 when unset (Kubernetes' own
+	// default), so an omitted replicas must NOT read as desired=0 — which would call a 0-ready
+	// crashing workload "healthy". status.unavailableReplicas>0 is the direct "not serving" signal.
+	desired := int64(1)
+	if d, found, _ := unstructured.NestedInt64(obj.Object, "spec", "replicas"); found {
+		desired = d
+	}
 	ready, _, _ := unstructured.NestedInt64(obj.Object, "status", "readyReplicas")
-	return boolState(ready >= desired)
+	unavailable, _, _ := unstructured.NestedInt64(obj.Object, "status", "unavailableReplicas")
+	return boolState(ready >= desired && unavailable == 0)
 }
 
 // jobReady: succeeded -> healthy; failed beyond backoffLimit -> failed; else converging.
