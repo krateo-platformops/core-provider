@@ -306,22 +306,28 @@ cdc:
   # (per-composition controller, no leader election), so the per-controller footprint matters —
   # but it must reflect what a controller ACTUALLY holds (issue #99).
   #
-  # Memory: the previous 64Mi request was ~3.5x below the measured steady state. On krateo-057,
-  # 41 controllers share this shape and the fleet sits at 200-239Mi (84-93% of the old 256Mi
-  # limit), with agentgatewaycontrollers/kagentcrds/clickhouseoperators already in an OOMKill
-  # cycle (132 restarts on the worst, ~25 OOMKills/day). Under-requesting does NOT reduce what a
-  # process consumes — it only hides it from the scheduler, which then bin-packs against 64Mi
-  # while each pod holds 200Mi+ (2.6Gi reserved fleet-wide vs ~8.2Gi actually held). The request
-  # now states the truth; the 512Mi limit gives ~2x headroom over the observed ceiling.
+  # Memory: 64Mi was too low, but NOT by the factor the raw fleet numbers suggest. The 200-239Mi
+  # steady state measured on krateo-057 was inflated by the goroutine leak fixed separately (every
+  # reconcile leaked a helm DiskCache cleanup goroutine — see #99): those pods were accumulating
+  # leaked goroutines, not holding a 200Mi working set. Sizing the request from that number would
+  # over-reserve ~10.5Gi fleet-wide for pods that do not need it.
   #
-  # NOTE (capacity): correcting the request is a real scheduling change — a cluster that was
-  # silently overcommitted may show Pending controllers until it is sized for what they already
-  # use. That is the honest cost of the previous under-request, not a regression from it.
+  # What the evidence actually supports: builderpublishes — same image, same limits, but ZERO
+  # compositions, so it never reconciles and never leaked — sits FLAT at 37Mi. That is the true
+  # idle floor. A reconciling controller legitimately needs more (chart fetch + render + helm
+  # 3-way merge), so 128Mi requests the floor plus real working room, without pricing in the leak.
+  # 41 controllers x 128Mi = 5.25Gi reserved, versus 2.6Gi before and 10.5Gi if we had believed the
+  # leak-inflated figure.
   #
-  # NOTE (not a cure): #99 documents MONOTONE growth with no plateau, and its mechanism is NOT
-  # identified (no heap profile taken). A higher ceiling buys time (~15 days to reach 512Mi at
-  # the observed ~25Mi/day, vs ~5 to reach 256Mi) — it does not fix a leak. The pprof heap diff
-  # in #99 step 2 is still required.
+  # The 512Mi limit is deliberate headroom for a large chart render, and limits are not reserved,
+  # so it costs no scheduling capacity. With the leak fixed, nothing should approach it.
+  #
+  # RE-DERIVE THESE once the leak fix has been deployed for a few days: measure the post-fix steady
+  # state and set the request from that. These numbers are the best defensible estimate from
+  # leak-contaminated data plus one clean control, not a measurement of the fixed system.
+  #
+  # NOTE (capacity): raising the request is still a real scheduling change — a cluster that was
+  # silently overcommitted may show Pending controllers until sized for what these pods use.
   #
   # CPU: deliberately NO cpu limit, for the reason already measured on the engine above — a CPU
   # limit on a bursty reconcile loop is an anti-pattern here: a 500m limit throttled the engine in
@@ -332,7 +338,7 @@ cdc:
   resources:
     requests:
       cpu: 50m
-      memory: 256Mi
+      memory: 128Mi
     limits:
       memory: 512Mi
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
