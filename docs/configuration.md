@@ -70,7 +70,7 @@ writable-home requirement.
 | `cdc.image.tag` | `""` | **Tracks the chart `appVersion`** — every release ships the matching CDC build (a literal pin previously let a CDC fix ship without deploying, see values.yaml history note). Set explicitly only to hold the CDC back. |
 | `cdc.workers` / `cdc.resyncInterval` | unset | Optional fleet-wide floor for reconcile concurrency / resync; a definition's `spec.controller` still overrides per Kind. |
 | `cdc.env` | `COMPOSITION_CONTROLLER_WORKERS: "10"`, `..._RESYNC_INTERVAL: "60s"`, `..._GRACEFUL_SHUTDOWN_TIMEOUT: "30s"`, `HOME: /tmp` | The 60s resync makes umbrella self-bootstrap advance in minutes; the drain window must stay below `cdc.terminationGracePeriodSeconds` (45). |
-| `cdc.resources` | requests `50m`/`64Mi` | One Deployment per composition Kind runs concurrently — keep the per-controller footprint small. |
+| `cdc.resources` | requests `50m`/`256Mi`, limits `512Mi` (no CPU limit) | One Deployment per composition Kind runs concurrently, but the request must state what a controller actually holds: the old `64Mi` was ~3.5x below the measured 200-239Mi steady state, so the scheduler bin-packed against a fiction and three controllers OOMKilled at the old 256Mi ceiling (#99). No CPU limit — a limit on a bursty reconcile loop throttles it to zero progress (same finding as the engine). Raising the ceiling buys headroom; it does not fix the monotone growth in #99. |
 | `cdc.metrics.enabled` | `false` | No port exposed by default, hence no probes. |
 
 Per-definition override: `CompositionDefinition.spec.controller`

@@ -302,15 +302,39 @@ cdc:
   # runAsNonRoot: true
   # runAsUser: 1000
 
-  # One Deployment per composition TYPE runs concurrently, so keep the per-controller footprint
-  # small. CDC is single-replica by design (per-composition controller, no leader election).
+  # One Deployment per composition TYPE runs concurrently and CDC is single-replica by design
+  # (per-composition controller, no leader election), so the per-controller footprint matters —
+  # but it must reflect what a controller ACTUALLY holds (issue #99).
+  #
+  # Memory: the previous 64Mi request was ~3.5x below the measured steady state. On krateo-057,
+  # 41 controllers share this shape and the fleet sits at 200-239Mi (84-93% of the old 256Mi
+  # limit), with agentgatewaycontrollers/kagentcrds/clickhouseoperators already in an OOMKill
+  # cycle (132 restarts on the worst, ~25 OOMKills/day). Under-requesting does NOT reduce what a
+  # process consumes — it only hides it from the scheduler, which then bin-packs against 64Mi
+  # while each pod holds 200Mi+ (2.6Gi reserved fleet-wide vs ~8.2Gi actually held). The request
+  # now states the truth; the 512Mi limit gives ~2x headroom over the observed ceiling.
+  #
+  # NOTE (capacity): correcting the request is a real scheduling change — a cluster that was
+  # silently overcommitted may show Pending controllers until it is sized for what they already
+  # use. That is the honest cost of the previous under-request, not a regression from it.
+  #
+  # NOTE (not a cure): #99 documents MONOTONE growth with no plateau, and its mechanism is NOT
+  # identified (no heap profile taken). A higher ceiling buys time (~15 days to reach 512Mi at
+  # the observed ~25Mi/day, vs ~5 to reach 256Mi) — it does not fix a leak. The pprof heap diff
+  # in #99 step 2 is still required.
+  #
+  # CPU: deliberately NO cpu limit, for the reason already measured on the engine above — a CPU
+  # limit on a bursty reconcile loop is an anti-pattern here: a 500m limit throttled the engine in
+  # ~99.8% of scheduling periods (cgroup cpu.stat nr_throttled≈nr_periods) so it pegged at 500m and
+  # made ZERO reconcile progress. A CDC reconcile (fetch chart + render + helm install/upgrade of a
+  # whole chart) has the same bursty shape, so it carried the same risk. The request keeps the
+  # scheduler honest and the memory limit still bounds the pod.
   resources:
     requests:
       cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: 500m
       memory: 256Mi
+    limits:
+      memory: 512Mi
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
   # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
   # (graceful drain), not readiness-gating — probes are intentionally left off BY DESIGN: a
