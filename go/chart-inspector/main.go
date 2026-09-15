@@ -33,6 +33,17 @@ var (
 	serviceName = "chart-inspector"
 )
 
+// Build stamp, injected at image build time with -ldflags -X (see this module's Dockerfile and the
+// build_args in .github/workflows/release-{tag,pullrequest}.yaml). Without it an incident can only
+// be traced to a release version, never to a commit (#105).
+//
+// The defaults are deliberately non-empty so an unstamped build says so out loud instead of
+// reporting a convincing-looking blank.
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
+)
+
 // @title 		 Chart Inspector API
 // @version         1.0
 // @description   This is the API for the Chart Inspector service. It provides endpoints for inspecting Helm charts.
@@ -73,6 +84,11 @@ func main() {
 		log = slog.New(tel.WithTraceCorrelation(logger.NewHandler(*debugOn, os.Stderr))).
 			With(slog.String("service", serviceName))
 	}
+
+	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this pod
+	// running", without needing an OTel pipeline or a metrics scrape (#105).
+	log.Info("starting chart-inspector",
+		slog.String("version", buildVersion), slog.String("commit", buildCommit))
 
 	go func() {
 		if err := http.ListenAndServe("localhost:6060", nil); err != nil {

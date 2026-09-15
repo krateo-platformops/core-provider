@@ -23,3 +23,9 @@ jobs:
       packages: write
     with:
       modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
+      # Build stamp (#105). Without these the published images carry main.go's "dev"/"unknown"
+      # defaults and an incident can only be traced to a release version, never to a commit. The ARG
+      # names must match the three Dockerfiles, which feed them to -ldflags -X main.build{Version,Commit}.
+      build_args: |
+        VERSION=${{ github.ref_name }}
+        COMMIT_HASH=${{ github.sha }}

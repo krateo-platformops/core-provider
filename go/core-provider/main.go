@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -35,6 +36,17 @@ import (
 const (
 	providerName              = "Core"
 	defaultOtelExportInterval = 30 * time.Second
+)
+
+// Build stamp, injected at image build time with -ldflags -X (see this module's Dockerfile and the
+// build_args in .github/workflows/release-{tag,pullrequest}.yaml). Without it an incident can only
+// be traced to a release version, never to a commit (#105).
+//
+// The defaults are deliberately non-empty so an unstamped build says so out loud instead of
+// reporting a convincing-looking blank.
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
 )
 
 func main() {
@@ -76,13 +88,25 @@ func main() {
 	// OTEL_RESOURCE_ATTRIBUTES; the log + trace resources reuse the same, keeping all three signals
 	// identical. core-provider is the engine/operator, so it carries no composition-id.
 	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
-	if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
-		attrs := "service.version=" + sv
-		if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
-			attrs = existing + "," + attrs
-		}
-		os.Setenv("OTEL_RESOURCE_ATTRIBUTES", attrs)
+	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects:
+	// the stamp describes the image that is actually running, whereas the env var describes what the
+	// chart believes it deployed, and the two diverge whenever a tag is moved or an image is pinned by
+	// digest. SERVICE_VERSION remains the fallback for unstamped (local/dev) builds so nothing that
+	// reads service.version today loses it. service.build.commit is added alongside rather than folded
+	// into service.version, so dashboards keyed on the release version keep working while an incident
+	// can still be attributed to an exact commit (#105).
+	var attrPairs []string
+	if buildVersion != "dev" && buildVersion != "" {
+		attrPairs = append(attrPairs, "service.version="+buildVersion)
+	} else if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
+		attrPairs = append(attrPairs, "service.version="+sv)
 	}
+	attrPairs = append(attrPairs, "service.build.commit="+buildCommit)
+	attrs := strings.Join(attrPairs, ",")
+	if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
+		attrs = existing + "," + attrs
+	}
+	os.Setenv("OTEL_RESOURCE_ATTRIBUTES", attrs)
 
 	// Install the OTLP LoggerProvider BEFORE building the log handler, so logging.NewOTelHandler's
 	// otelslog bridge captures it and log records export over OTLP (gated OTEL_LOGS_ENABLED). No app
@@ -98,6 +122,10 @@ func main() {
 	// — tee them to the OTLP pipeline. Shared handler from provider-runtime; see
 	// docs/log-ingester-compatibility.md.
 	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
+
+	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this pod
+	// running", without needing an OTel pipeline or a metrics scrape (#105).
+	log.Info("starting core-provider", "version", buildVersion, "commit", buildCommit)
 
 	// controller-runtime logger at INFO (our logger above handles debug).
 	ctrl.SetLogger(logr.FromSlogHandler(logging.NewOTelHandler(slog.LevelInfo, os.Stderr, *metricsServiceName)))

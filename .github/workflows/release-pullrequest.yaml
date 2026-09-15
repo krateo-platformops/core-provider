@@ -23,6 +23,13 @@ jobs:
       packages: write
     with:
       modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
+      # Same build stamp as release-tag, so the ldflags path is EXERCISED on every PR rather than
+      # first running on a tag — a typo in the ARG names or the -ldflags symbol paths would otherwise
+      # only surface after a release was cut (#105). head.sha, not github.sha: on a pull_request event
+      # the latter is the ephemeral merge commit, which is not a commit anyone can check out.
+      build_args: |
+        VERSION=pr-${{ github.event.pull_request.number }}
+        COMMIT_HASH=${{ github.event.pull_request.head.sha }}
       push: false
 
   checks-core-provider:
