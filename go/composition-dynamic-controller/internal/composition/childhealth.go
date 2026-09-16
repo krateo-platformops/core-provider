@@ -248,10 +248,19 @@ func workloadReady(obj *unstructured.Unstructured) childState {
 // is absent" as evidence of unhealth, when it is only evidence that the field does not exist on
 // that kind. Suspension is the one genuine not-ready state a CronJob has, so it is the only thing
 // worth testing.
-func cronJobReady(obj *unstructured.Unstructured) childState {
-	if suspended, found, _ := unstructured.NestedBool(obj.Object, "spec", "suspend"); found && suspended {
-		return childConverging
-	}
+// A SUSPENDED CronJob is healthy, not converging. childConverging means "not ready YET, keep
+// waiting" — and a suspended CronJob never stops being suspended on its own, so returning it would
+// pin the parent composition Ready=False forever. That is the same permanent-wait trap this function
+// exists to fix, just narrower: a chart that ships `suspend: true` (a janitor you enable later is a
+// normal pattern) would wedge its composition exactly the way the unreachable jobReady branches did.
+//
+// Suspension is also not unhealth: the object matches its declared spec, which is what Ready means
+// for a child. "Nobody asked it to run" is a statement about intent, not about failure. If a
+// suspended schedule ever needs surfacing it belongs in a status projection, not in a health
+// predicate that blocks a dependency gate.
+// The parameter is deliberately unused: existence IS the verdict. It is kept for signature parity
+// with the other predicates so the classifyChild dispatch stays uniform.
+func cronJobReady(_ *unstructured.Unstructured) childState {
 	return childHealthy
 }
 

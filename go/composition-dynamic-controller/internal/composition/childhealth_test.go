@@ -133,34 +133,34 @@ func TestResolveReady(t *testing.T) {
 		wantMsg     string
 	}{
 		{
-			name: "projected ready=true but workload Unavailable -> Unavailable (the #96 fix)",
+			name:        "projected ready=true but workload Unavailable -> Unavailable (the #96 fix)",
 			projPresent: true, projReady: true, projMsg: "all good",
 			v: unavail, wantReason: "Unavailable", wantMsg: unavail.message,
 		},
 		{
-			name: "projected ready=true but workload Creating -> Creating",
+			name:        "projected ready=true but workload Creating -> Creating",
 			projPresent: true, projReady: true, projMsg: "all good",
 			v: creating, wantReason: "Creating", wantMsg: creating.message,
 		},
 		{
-			name: "projected ready=true and rollup healthy -> Available with projected message",
+			name:        "projected ready=true and rollup healthy -> Available with projected message",
 			projPresent: true, projReady: true, projMsg: "all good",
 			v: available, wantReason: "Available", wantMsg: "all good",
 		},
 		{
-			name: "projected ready=false -> Unavailable (author veto) even when rollup healthy",
+			name:        "projected ready=false -> Unavailable (author veto) even when rollup healthy",
 			projPresent: true, projReady: false, projMsg: "app says no",
 			v: available, wantReason: "Unavailable", wantMsg: "app says no",
 		},
 		{
-			name: "no projection, rollup Creating -> Creating",
+			name:        "no projection, rollup Creating -> Creating",
 			projPresent: false,
-			v: creating, wantReason: "Creating", wantMsg: creating.message,
+			v:           creating, wantReason: "Creating", wantMsg: creating.message,
 		},
 		{
-			name: "no projection, rollup Available -> Available with default message",
+			name:        "no projection, rollup Available -> Available with default message",
 			projPresent: false,
-			v: available, wantReason: "Available", wantMsg: "default-msg",
+			v:           available, wantReason: "Available", wantMsg: "default-msg",
 		},
 	}
 	for _, c := range cases {
@@ -366,8 +366,12 @@ func TestClassifyChild_CronJob(t *testing.T) {
 	suspended := cron(func(o map[string]any) {
 		o["spec"] = map[string]any{"schedule": "0 * * * *", "suspend": true}
 	})
-	if got := classifyChild("batch", suspended); got != childConverging {
-		t.Fatalf("suspended CronJob: got %v, want childConverging", got)
+	// A suspended CronJob is HEALTHY. childConverging would mean "not ready yet, keep waiting", but
+	// suspension never lifts on its own — a chart shipping `suspend: true` would pin its composition
+	// Ready=False forever, which is the same permanent-wait trap the unreachable jobReady branches
+	// caused. It also matches its declared spec, which is what Ready means for a child.
+	if got := classifyChild("batch", suspended); got != childHealthy {
+		t.Fatalf("suspended CronJob: got %v, want childHealthy (suspension never self-resolves)", got)
 	}
 
 	// suspend:false is explicit health, not a missing field.
