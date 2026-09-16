@@ -23,7 +23,14 @@ COPY apis/ apis/
 COPY internal/ internal/
 
 # Build
-RUN CGO_ENABLED=0 GO111MODULE=on go build -a -o /bin/manager main.go && \
+# Build stamp (#105). These come from build_args in release-{tag,pullrequest}.yaml; an unset ARG
+# leaves main.go's "dev"/"unknown" defaults, so a local `docker build` is honestly labelled rather
+# than claiming to be a release.
+ARG VERSION
+ARG COMMIT_HASH
+RUN CGO_ENABLED=0 GO111MODULE=on go build -a \
+      -ldflags "-X main.buildVersion=${VERSION:-dev} -X main.buildCommit=${COMMIT_HASH:-unknown}" \
+      -o /bin/manager main.go && \
     strip /bin/manager
 
 

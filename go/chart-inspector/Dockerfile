@@ -13,7 +13,14 @@ WORKDIR /src
 COPY . .
 WORKDIR /src/chart-inspector
 RUN go mod download
-RUN CGO_ENABLED=0 GO111MODULE=on go build -a -o /bin/webservice ./main.go && strip /bin/webservice
+# Build stamp (#105). These come from build_args in release-{tag,pullrequest}.yaml; an unset ARG
+# leaves main.go's "dev"/"unknown" defaults, so a local `docker build` is honestly labelled rather
+# than claiming to be a release.
+ARG VERSION
+ARG COMMIT_HASH
+RUN CGO_ENABLED=0 GO111MODULE=on go build -a \
+      -ldflags "-X main.buildVersion=${VERSION:-dev} -X main.buildCommit=${COMMIT_HASH:-unknown}" \
+      -o /bin/webservice ./main.go && strip /bin/webservice
 
 # Deployment environment
 # ----------------------

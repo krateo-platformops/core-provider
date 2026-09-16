@@ -50,6 +50,17 @@ const (
 	defaultOtelExportInterval = 30 * time.Second
 )
 
+// Build stamp, injected at image build time with -ldflags -X (see this module's Dockerfile and the
+// build_args in .github/workflows/release-{tag,pullrequest}.yaml). Without it an incident can only
+// be traced to a release version, never to a commit (#105).
+//
+// The defaults are deliberately non-empty so an unstamped build says so out loud instead of
+// reporting a convincing-looking blank.
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
+)
+
 func main() {
 	// Flags
 	kubeconfig := flag.String("kubeconfig", env.String("KUBECONFIG", ""),
@@ -115,7 +126,14 @@ func main() {
 	otelServiceName := flag.String("otel-service-name", serviceName, "The service name attached to exported OTLP metrics/traces.")
 	otelExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	deploymentName := flag.String("deployment-name", env.String("DEPLOYMENT_NAME", ""), "The deployment name for stable resource identification in metrics.")
-	serviceVersion := env.String("SERVICE_VERSION", "") // cdc image version, stamped as service.version on metrics/traces
+	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects
+	// (chart-set cdc.image.tag): the stamp describes the image actually running, the env var describes
+	// what the chart believes it deployed, and they diverge whenever a tag is moved or an image is
+	// pinned by digest. SERVICE_VERSION stays the fallback for unstamped (local/dev) builds (#105).
+	serviceVersion := env.String("SERVICE_VERSION", "")
+	if buildVersion != "dev" && buildVersion != "" {
+		serviceVersion = buildVersion
+	}
 
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Flags:")
@@ -156,6 +174,10 @@ func main() {
 	// — when OTEL_LOGS_ENABLED — teed to the OTLP pipeline. The shared handler lives in
 	// unstructured-runtime (pkg/logging) so every composition controller is consistent.
 	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *otelServiceName)))
+
+	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this
+	// controller running", without needing an OTel pipeline or a metrics scrape (#105).
+	log.Info("starting composition-dynamic-controller", "version", buildVersion, "commit", buildCommit)
 
 	defer func() {
 		if err := logsShutdown(context.Background()); err != nil {
