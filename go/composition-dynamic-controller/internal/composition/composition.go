@@ -55,6 +55,13 @@ var (
 	// thrash on the 319-resource portal composition. Default 5m (>= helm's default op timeout), so
 	// only operations that exceeded a real upgrade are treated as stuck. Tunable per deployment.
 	pendingOperationGrace = env.Duration(pendingGraceEnvvar, 5*time.Minute)
+
+	// childTeardownGrace bounds how long Delete waits for finalizer-bearing managed children to
+	// finish deleting before it uninstalls the release anyway (krateo-core-provider#108). The wait
+	// exists so a child can still reach its credentials while tearing down remote state; past the
+	// grace we assume the child cannot finalize (remote already gone, credentials revoked, provider
+	// down) and proceed, loudly, rather than holding the composition's own deletion open forever.
+	childTeardownGrace = env.Duration(childTeardownGraceEnvvar, 5*time.Minute)
 )
 
 const (
@@ -67,12 +74,18 @@ const (
 	// Event reasons
 	reasonCreated = "CompositionCreated"
 	reasonDeleted = "CompositionDeleted"
-	reasonUpdated = "CompositionUpdated"
+
+	// Raised when finalizer-bearing children outlive the teardown grace: the composition proceeds to
+	// uninstall, so their external resources may be left behind (#108). A Warning because abandoning
+	// remote state is a real consequence, not routine.
+	reasonChildTeardownAbandoned = "ChildTeardownAbandoned"
+	reasonUpdated                = "CompositionUpdated"
 
 	// Environment variables
-	helmMaxHistoryEnvvar  = "HELM_MAX_HISTORY"
-	krateoNamespaceEnvVar = "KRATEO_NAMESPACE"
-	pendingGraceEnvvar    = "COMPOSITION_CONTROLLER_PENDING_GRACE"
+	helmMaxHistoryEnvvar     = "HELM_MAX_HISTORY"
+	krateoNamespaceEnvVar    = "KRATEO_NAMESPACE"
+	pendingGraceEnvvar       = "COMPOSITION_CONTROLLER_PENDING_GRACE"
+	childTeardownGraceEnvvar = "COMPOSITION_CONTROLLER_CHILD_TEARDOWN_GRACE"
 
 	// Default namespace for Krateo Installation
 	krateoNamespaceDefault = "krateo-system"
@@ -938,6 +951,31 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}); rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
+	}
+
+	// Ordered teardown (#108). helm deletes unknown kinds LAST ("unknown kind is last", helm's
+	// kind_sorter.go), so a plain uninstall removes the credential Secret at position 32 of
+	// UninstallOrder BEFORE the custom resources that need those credentials to delete their remote
+	// state — stranding them with held finalizers and no parent left to repair them. Drain the
+	// finalizer-bearing children first, while their dependencies still exist.
+	if pending := h.drainFinalizerBoundChildren(ctx, dyn, mg); len(pending) > 0 {
+		waited := drainedFor(pending, time.Now())
+		if waited < childTeardownGrace {
+			// Requeue: the composition keeps its finalizer and Delete is re-invoked. This is a
+			// bounded version of the hot loop these children are already stuck in today.
+			log.Debug("Waiting for managed children to finalize before uninstalling.",
+				"pending", len(pending), "children", pendingIDs(pending),
+				"waited", waited.String(), "grace", childTeardownGrace.String())
+			return waitingForChildrenErr(pending, waited)
+		}
+		// Past the grace the child cannot finalize on its own (remote already gone, credentials
+		// revoked, provider down). Proceed rather than hold the composition's deletion open forever —
+		// but say so, because the remote state is now being abandoned rather than cleaned up.
+		log.Info("Managed children did not finalize within the grace period; uninstalling anyway — their remote state may be left behind",
+			"pending", len(pending), "children", pendingIDs(pending), "grace", childTeardownGrace.String())
+		h.eventRecorder.Event(mg, event.Warning(reasonChildTeardownAbandoned, "Delete", fmt.Errorf(
+			"%d managed child(ren) did not finalize within %s (%s); uninstalling anyway, their external resources may be orphaned",
+			len(pending), childTeardownGrace, pendingIDs(pending))))
 	}
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)

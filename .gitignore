@@ -55,3 +55,7 @@ cover.out
 .tool-versions
 **/*.xpkg
 .vscode
+
+# Per-developer Claude Code settings (permission allowlists etc.) — personal, not team config.
+# .claude/settings.json remains committable for anything the team SHOULD share.
+.claude/settings.local.json
