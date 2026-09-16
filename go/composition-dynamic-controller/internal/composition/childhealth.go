@@ -160,6 +160,8 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 		return krateoReady(obj) // Krateo CRs (incl. child Compositions/CompositionDefinitions)
 	case group == "apps":
 		return workloadReady(obj)
+	case group == "batch" && obj.GetKind() == "CronJob":
+		return cronJobReady(obj)
 	case group == "batch":
 		return jobReady(obj)
 	default:
@@ -224,7 +226,37 @@ func workloadReady(obj *unstructured.Unstructured) childState {
 	return boolState(ready >= desired && unavailable == 0)
 }
 
+// cronJobReady: a CronJob is a SCHEDULE, not a unit of work, so it has nothing to complete and
+// "converging" never ends. It is healthy once it exists and is not suspended.
+//
+// It must not be judged by jobReady. A CronJob is batch/v1, so dispatching on group alone sent it
+// there, where BOTH branches are unreachable against the CronJob schema: CronJobStatus carries only
+// {active, lastScheduleTime, lastSuccessfulTime} so status.succeeded never appears and the healthy
+// branch cannot be taken, and backoffLimit lives at spec.jobTemplate.spec.backoffLimit rather than
+// spec.backoffLimit so the failed branch cannot be taken either. Every CronJob therefore returned
+// childConverging forever, and its parent composition sat Ready=False forever with it.
+//
+// Observed: krateo-057's Frontend composition went Ready=False "1 of 13 managed children are not
+// ready" the moment frontend 1.6.18 added a preview-sandbox janitor CronJob, and stayed there
+// across two successful firings — lastScheduleTime and lastSuccessfulTime are fields jobReady never
+// reads. The blast radius was not cosmetic: the installer gates rendering on inst.depsReady, so a
+// permanently-not-Ready Frontend stopped the Portal composition from ever being re-created after a
+// pin flip removed it, which froze the portal Helm release, which froze every chart that release
+// registers. One unreachable predicate, four layers of consequence.
+//
+// This is the same shape as the krateoReady note below — a predicate treating "the field I look for
+// is absent" as evidence of unhealth, when it is only evidence that the field does not exist on
+// that kind. Suspension is the one genuine not-ready state a CronJob has, so it is the only thing
+// worth testing.
+func cronJobReady(obj *unstructured.Unstructured) childState {
+	if suspended, found, _ := unstructured.NestedBool(obj.Object, "spec", "suspend"); found && suspended {
+		return childConverging
+	}
+	return childHealthy
+}
+
 // jobReady: succeeded -> healthy; failed beyond backoffLimit -> failed; else converging.
+// Jobs ONLY — see cronJobReady for why a CronJob must never reach this.
 func jobReady(obj *unstructured.Unstructured) childState {
 	if succeeded, _, _ := unstructured.NestedInt64(obj.Object, "status", "succeeded"); succeeded > 0 {
 		return childHealthy

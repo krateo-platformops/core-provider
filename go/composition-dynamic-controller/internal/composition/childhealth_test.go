@@ -324,3 +324,66 @@ func TestReadProjectedHealth(t *testing.T) {
 		}
 	}
 }
+
+// A CronJob is a schedule, not a unit of work. It used to be dispatched to jobReady purely because
+// it is batch/v1, where BOTH branches are unreachable against its schema — CronJobStatus has no
+// `succeeded`, and backoffLimit lives under spec.jobTemplate.spec — so every CronJob returned
+// childConverging forever and pinned its parent composition Ready=False with it.
+func TestClassifyChild_CronJob(t *testing.T) {
+	cron := func(mutate func(map[string]any)) *unstructured.Unstructured {
+		obj := map[string]any{
+			"apiVersion": "batch/v1",
+			"kind":       "CronJob",
+			"spec":       map[string]any{"schedule": "0 * * * *"},
+			"status":     map[string]any{},
+		}
+		if mutate != nil {
+			mutate(obj)
+		}
+		return &unstructured.Unstructured{Object: obj}
+	}
+
+	// The regression itself: a CronJob that has never fired is healthy. This is the exact shape of
+	// krateo-057's preview-sandbox janitor at the moment frontend 1.6.18 added it.
+	if got := classifyChild("batch", cron(nil)); got != childHealthy {
+		t.Fatalf("never-fired CronJob: got %v, want childHealthy", got)
+	}
+
+	// And it stays healthy once it HAS fired — which is worth its own case, because "it will go
+	// ready when the schedule first fires" was the wrong prediction that hid this for hours. The
+	// fields it sets are ones jobReady never reads.
+	fired := cron(func(o map[string]any) {
+		o["status"] = map[string]any{
+			"lastScheduleTime":   "2026-09-16T19:00:00Z",
+			"lastSuccessfulTime": "2026-09-16T19:00:12Z",
+		}
+	})
+	if got := classifyChild("batch", fired); got != childHealthy {
+		t.Fatalf("fired CronJob: got %v, want childHealthy", got)
+	}
+
+	// Suspension is the one genuine not-ready state a CronJob has.
+	suspended := cron(func(o map[string]any) {
+		o["spec"] = map[string]any{"schedule": "0 * * * *", "suspend": true}
+	})
+	if got := classifyChild("batch", suspended); got != childConverging {
+		t.Fatalf("suspended CronJob: got %v, want childConverging", got)
+	}
+
+	// suspend:false is explicit health, not a missing field.
+	notSuspended := cron(func(o map[string]any) {
+		o["spec"] = map[string]any{"schedule": "0 * * * *", "suspend": false}
+	})
+	if got := classifyChild("batch", notSuspended); got != childHealthy {
+		t.Fatalf("suspend=false CronJob: got %v, want childHealthy", got)
+	}
+
+	// Jobs must be UNAFFECTED — the new case is kind-discriminated, not a blanket batch change.
+	job := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "batch/v1", "kind": "Job",
+		"spec": map[string]any{"backoffLimit": int64(3)}, "status": map[string]any{"succeeded": int64(0), "failed": int64(0)},
+	}}
+	if got := classifyChild("batch", job); got != childConverging {
+		t.Fatalf("in-flight Job: got %v, want childConverging", got)
+	}
+}
