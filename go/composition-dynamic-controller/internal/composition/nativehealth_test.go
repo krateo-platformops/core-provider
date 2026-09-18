@@ -1,9 +1,14 @@
 package composition
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func corePod(phase string, readyCond *bool) *unstructured.Unstructured {
@@ -106,8 +111,65 @@ func TestClassifyChild_CustomResourcePhaseStillNotEvaluated(t *testing.T) {
 	}}
 	_ = unstructured.SetNestedField(mongo.Object, "Failed", "status", "phase")
 
-	if got := classifyChild("mongodbcommunity.mongodb.com", mongo); got != childHealthy {
-		t.Errorf("got %d; tier 1 deliberately does NOT interpret a third-party .status.phase — "+
-			"if this changed, #121's tier-2 design needs revisiting", got)
+	// Reported as UNEVALUATED rather than silently healthy: tier 1 still does not interpret a
+	// third-party .status.phase (that is tier 2's job), but the gap is now counted and surfaced
+	// instead of disappearing.
+	if got := classifyChild("mongodbcommunity.mongodb.com", mongo); got != childUnevaluated {
+		t.Errorf("got %d, want childUnevaluated — tier 1 must not interpret a third-party "+
+			".status.phase, but it must not hide that it did not either", got)
+	}
+}
+
+// Unevaluated children must be COUNTED and SURFACED, but must never change the verdict — the whole
+// point is to expose the gap without inventing a judgement (#121 tier 2).
+func TestRollup_UnevaluatedIsReportedButNeverActedOn(t *testing.T) {
+	h := &handler{}
+	// A custom resource we cannot interpret, plus a ConfigMap that is legitimately nothing-to-assess.
+	mongo := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "mongodbcommunity.mongodb.com/v1", "kind": "MongoDBCommunity",
+		"metadata": map[string]any{"name": "m", "namespace": "ns"},
+	}}
+	_ = unstructured.SetNestedField(mongo.Object, "Failed", "status", "phase")
+	cm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "c", "namespace": "ns"},
+	}}
+
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		{Group: "mongodbcommunity.mongodb.com", Version: "v1", Resource: "mongodbcommunities"}: "MongoDBCommunityList",
+		{Group: "", Version: "v1", Resource: "configmaps"}:                                     "ConfigMapList",
+	}, mongo, cm)
+
+	mg := &unstructured.Unstructured{Object: map[string]any{}}
+	_ = unstructured.SetNestedSlice(mg.Object, []any{
+		map[string]any{"apiVersion": "mongodbcommunity.mongodb.com/v1", "resource": "mongodbcommunities", "name": "m", "namespace": "ns"},
+		map[string]any{"apiVersion": "v1", "resource": "configmaps", "name": "c", "namespace": "ns"},
+	}, "status", "managed")
+
+	v := h.rollupManagedChildren(context.Background(), dyn, mg)
+
+	// Verdict unchanged: still Available. An unevaluated child is NOT evidence of unhealth.
+	if !v.ready || v.reason != "Available" {
+		t.Fatalf("unevaluated children must not change the verdict; got ready=%v reason=%s", v.ready, v.reason)
+	}
+	// Only the custom resource counts — the ConfigMap has no readiness to evaluate, so it is not a gap.
+	if v.unevaluated != 1 {
+		t.Errorf("unevaluated = %d, want 1 (the custom resource only; a ConfigMap is not a gap)", v.unevaluated)
+	}
+	// And the gap is visible where people actually look.
+	if !strings.Contains(v.message, "not health-evaluated") {
+		t.Errorf("message must surface the gap, got %q", v.message)
+	}
+}
+
+// With nothing unevaluated the message stays exactly as before — no new noise on compositions whose
+// children are all assessable.
+func TestRollup_MessageUnchangedWhenAllEvaluated(t *testing.T) {
+	if got := availableMessage(0, 3); got != "Composition is up-to-date" {
+		t.Errorf("got %q, want the unchanged message when nothing is unevaluated", got)
+	}
+	if got := availableMessage(2, 3); got != "Composition is up-to-date (2 of 3 managed children not health-evaluated)" {
+		t.Errorf("unexpected qualified message: %q", got)
 	}
 }

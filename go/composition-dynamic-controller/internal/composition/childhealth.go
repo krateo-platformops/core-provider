@@ -20,7 +20,27 @@ const (
 	childHealthy childState = iota
 	childConverging
 	childFailed
+	// childUnevaluated: the child exists, but nothing here can say whether it is healthy — a custom
+	// resource whose status vocabulary only its blueprint knows, or one we could not read.
+	//
+	// It rolls up exactly like childHealthy, so it NEVER affects Ready. Its whole purpose is to be
+	// counted: tier 2 of krateo-core-provider#121 depends on blueprint authors attaching a RESTAction
+	// to their CompositionDefinition, and adoption is 0 of 44 because omitting it fails SILENTLY —
+	// the composition just reads green, so the author never sees the gap. Counting these makes the
+	// absence visible without inventing a verdict we are not entitled to.
+	childUnevaluated
 )
+
+// nativeGroups are the API groups whose readiness semantics Kubernetes itself defines, so this
+// controller can legitimately interpret them (tier 1). Everything else is a custom resource whose
+// vocabulary belongs to whoever wrote the CRD.
+//
+// "" is core/v1; the *.k8s.io groups are the rest of the built-ins. A child in one of these that we
+// do not model (ConfigMap, Service, RBAC, CRD...) is not a GAP — those kinds carry no readiness at
+// all, so existence genuinely is health for them.
+func isNativeGroup(group string) bool {
+	return group == "" || strings.HasSuffix(group, ".k8s.io")
+}
 
 // healthVerdict is the composition-level rollup of its managed children.
 type healthVerdict struct {
@@ -28,6 +48,8 @@ type healthVerdict struct {
 	reason  string // "Available" | "Creating" | "Unavailable"
 	message string
 	failing []string
+	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
+	unevaluated int
 }
 
 // rollupManagedChildren GETs each child listed in status.managed and rolls their health into one
@@ -42,7 +64,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	}
 
 	var failing []string
-	converging := 0
+	converging, unevaluated := 0, 0
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
@@ -53,6 +75,8 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			failing = append(failing, childID(ref))
 		case childConverging:
 			converging++
+		case childUnevaluated:
+			unevaluated++ // counted only; never changes the verdict
 		}
 	}
 
@@ -71,8 +95,25 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			message: fmt.Sprintf("%d of %d managed children are not ready", converging, len(managed)),
 		}
 	default:
-		return healthVerdict{ready: true, reason: "Available", message: "Composition is up-to-date"}
+		// Green — but say so honestly. If some children could not be assessed, "up-to-date" is a
+		// claim about the ones we could read, and silently omitting that is what let 0 of 44
+		// blueprints notice they never attached a RESTAction (#121 tier 2).
+		return healthVerdict{
+			ready: true, reason: "Available",
+			message:     availableMessage(unevaluated, len(managed)),
+			unevaluated: unevaluated,
+		}
 	}
+}
+
+// availableMessage qualifies the healthy message when some children could not be assessed, so the
+// gap is visible at the point people actually look (the Ready condition, which the portal renders).
+func availableMessage(unevaluated, total int) string {
+	if unevaluated == 0 {
+		return "Composition is up-to-date"
+	}
+	return fmt.Sprintf("Composition is up-to-date (%d of %d managed children not health-evaluated)",
+		unevaluated, total)
 }
 
 // readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable") and
@@ -171,8 +212,14 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 		return podReady(obj)
 	case group == "" && obj.GetKind() == "PersistentVolumeClaim":
 		return pvcReady(obj)
+	case isNativeGroup(group):
+		// A built-in kind we do not model (ConfigMap, Service, RBAC, CRD, ...). These carry no
+		// readiness, so existence genuinely IS health — not a gap, and not counted as one.
+		return childHealthy
 	default:
-		return childHealthy // ConfigMap/Secret/Service/RBAC/CRD/plain CRs: existence is health
+		// A CUSTOM resource nobody told us how to read. Not healthy-by-existence — unevaluated.
+		// mongodbcommunity reporting `.status.phase: Failed` with no conditions lands here (#121).
+		return childUnevaluated
 	}
 }
 
@@ -252,7 +299,9 @@ func pvcReady(obj *unstructured.Unstructured) childState {
 func krateoReady(obj *unstructured.Unstructured) childState {
 	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !found {
-		return childHealthy
+		// No conditions at all (authn's seed ServiceAccount, and friends). Still must NOT affect
+		// Ready — that is the #72 wedge — but it is honestly unevaluated rather than assessed-healthy.
+		return childUnevaluated
 	}
 	for _, c := range conds {
 		cm, ok := c.(map[string]any)
@@ -268,8 +317,10 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childConverging
 		}
 	}
-	// Has conditions but no Ready type: not a Ready-bearing resource; existence is health.
-	return childHealthy
+	// Has conditions but no Ready type. This is publish-pet's case: github.krateo.io/repositories
+	// carries only Synced=False/ReconcileError, so there is nothing here to read. Unevaluated, not
+	// healthy — the composition was reporting green over a child whose failure we never looked at.
+	return childUnevaluated
 }
 
 // workloadReady handles Deployment/StatefulSet/ReplicaSet (spec.replicas) and DaemonSet

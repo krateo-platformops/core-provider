@@ -40,7 +40,9 @@ func TestClassifyChild_Krateo(t *testing.T) {
 		// A leaf krateo.io CR with no conditions (e.g. authn's ServiceAccount) is healthy by
 		// existence — the absence of a Ready condition is not evidence of trouble. Treating it as
 		// converging permanently wedged the parent Ready=False (snowplow-seed).
-		{"no-conditions", krateoCR("", "", false), childHealthy},
+		// #121: a leaf CR with no conditions is UNEVALUATED, not assessed-healthy. It still must not
+		// affect Ready (that was the #72 snowplow wedge) — it is now merely counted and reported.
+		{"no-conditions", krateoCR("", "", false), childUnevaluated},
 	}
 	for _, c := range cases {
 		if got := classifyChild("composition.krateo.io", c.obj); got != c.expect {
@@ -59,8 +61,10 @@ func TestClassifyChild_KrateoConditionsWithoutReady(t *testing.T) {
 	_ = unstructured.SetNestedSlice(u.Object, []any{
 		map[string]any{"type": "Synced", "status": "True"},
 	}, "status", "conditions")
-	if got := classifyChild("serviceaccount.authn.krateo.io", u); got != childHealthy {
-		t.Errorf("krateo CR with non-Ready conditions: got %d want healthy", got)
+	// Unevaluated, not healthy: there is no Ready condition to read, so we assessed nothing. This is
+	// publish-pet's shape — github.krateo.io/repositories carries only Synced=False (#121).
+	if got := classifyChild("serviceaccount.authn.krateo.io", u); got != childUnevaluated {
+		t.Errorf("krateo CR with non-Ready conditions: got %d want childUnevaluated", got)
 	}
 }
 
