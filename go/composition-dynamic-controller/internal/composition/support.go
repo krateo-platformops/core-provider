@@ -14,6 +14,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,70 +29,56 @@ type ManagedResource struct {
 	Path       string `json:"path"`
 }
 
-func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	if !force {
-		currentCondition := unstructuredtools.GetCondition(mg, condition.Available().Type, condition.Available().Reason)
-
-		if currentCondition != nil && currentCondition.Message == message {
-			return nil
-		}
-	}
-
-	cond := condition.Available()
+// setReadyCondition writes cond unless an EQUIVALENT one is already stored, where equivalence
+// includes Status (krateo-core-provider#119).
+//
+// The subtlety that caused the bug: unstructuredtools.GetCondition matches on Type + Reason ONLY.
+// So looking up (Ready, Available) returns a condition that carries reason=Available regardless of
+// whether its stored status is True or False. The old checks then compared just the Message, which
+// means a Ready condition stored as
+//
+//	{status: False, reason: Available, message: "Composition is up-to-date"}
+//
+// looked "already current" to setAvaibleStatus and was never rewritten. The contradiction was then
+// self-perpetuating: every later reconcile short-circuited on the same comparison, so Ready froze
+// while Synced kept advancing. Observed on krateo-057's Mongodb/sample-mongodb, stuck for 2+ hours
+// across many reconciles.
+//
+// Comparing Status closes that: a stored condition that disagrees with the one being written is
+// always repaired. Message is still compared so a genuinely unchanged condition is not rewritten
+// every reconcile (which would churn lastTransitionTime and the resourceVersion).
+func setReadyCondition(mg *unstructured.Unstructured, cond metav1.Condition, message string, force bool) error {
 	cond.Message = message
-	err := unstructuredtools.SetConditions(mg, cond)
-	if err != nil {
-		return fmt.Errorf("setting condition: %w", err)
-	}
-	return nil
-}
-
-func setGracefullyPausedCondition(mg *unstructured.Unstructured, force bool) error {
 	if !force {
-		currentCondition := unstructuredtools.GetCondition(mg, compositionCondition.ReconcileGracefullyPaused().Type, compositionCondition.ReconcileGracefullyPaused().Reason)
-
-		if currentCondition != nil && currentCondition.Message == "Composition is gracefully paused." {
+		if cur := unstructuredtools.GetCondition(mg, cond.Type, cond.Reason); cur != nil &&
+			cur.Message == message && cur.Status == cond.Status {
 			return nil
 		}
 	}
-
-	cond := compositionCondition.ReconcileGracefullyPaused()
-	cond.Message = "Composition is gracefully paused."
-	err := unstructuredtools.SetConditions(mg, cond)
-	if err != nil {
-		return fmt.Errorf("setting condition: %w", err)
-	}
-	return nil
-}
-
-func setCreatingStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	if !force {
-		currentCondition := unstructuredtools.GetCondition(mg, condition.Creating().Type, condition.Creating().Reason)
-		if currentCondition != nil && currentCondition.Message == message {
-			return nil
-		}
-	}
-	cond := condition.Creating()
-	cond.Message = message
 	if err := unstructuredtools.SetConditions(mg, cond); err != nil {
 		return fmt.Errorf("setting condition: %w", err)
 	}
 	return nil
+}
+
+func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, condition.Available(), message, force)
+}
+
+// Also Type=Ready (reason ReconcileGracefullyPaused), so it could hold the same contradiction.
+func setGracefullyPausedCondition(mg *unstructured.Unstructured, force bool) error {
+	return setReadyCondition(mg, compositionCondition.ReconcileGracefullyPaused(), "Composition is gracefully paused.", force)
+}
+
+// Creating and Unavailable carried the identical defect — #119 names only setAvaibleStatus, but all
+// three shared the same Type+Reason+Message comparison, so any of them could leave a contradictory
+// status in place. Routed through the same helper rather than fixing one and leaving two.
+func setCreatingStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, condition.Creating(), message, force)
 }
 
 func setUnavailableStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	if !force {
-		currentCondition := unstructuredtools.GetCondition(mg, condition.Unavailable().Type, condition.Unavailable().Reason)
-		if currentCondition != nil && currentCondition.Message == message {
-			return nil
-		}
-	}
-	cond := condition.Unavailable()
-	cond.Message = message
-	if err := unstructuredtools.SetConditions(mg, cond); err != nil {
-		return fmt.Errorf("setting condition: %w", err)
-	}
-	return nil
+	return setReadyCondition(mg, condition.Unavailable(), message, force)
 }
 
 type ConditionType string
