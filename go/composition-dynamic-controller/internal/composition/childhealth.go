@@ -164,8 +164,79 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 		return cronJobReady(obj)
 	case group == "batch":
 		return jobReady(obj)
+	// core/v1 (group "") — only the two kinds that actually carry readiness. Everything else in the
+	// core group (ConfigMap, Secret, Service, ServiceAccount, ...) is config: it has no notion of
+	// being unready, so it falls through to existence-is-health below (krateo-core-provider#121).
+	case group == "" && obj.GetKind() == "Pod":
+		return podReady(obj)
+	case group == "" && obj.GetKind() == "PersistentVolumeClaim":
+		return pvcReady(obj)
 	default:
 		return childHealthy // ConfigMap/Secret/Service/RBAC/CRD/plain CRs: existence is health
+	}
+}
+
+// podReady classifies a bare Pod. Most Pods in a composition belong to a Deployment/StatefulSet and
+// are judged through workloadReady instead — this is for charts that render a Pod directly.
+//
+// Phase is authoritative for the terminal outcomes; Running is not, because a Running Pod may still
+// be failing its readiness probe and serving nothing. Note the asymmetry that keeps this safe: an
+// ABSENT Ready condition is NOT treated as unhealth. That is the mistake krateoReady made (wedged
+// snowplow) and jobReady made for CronJobs (wedged the portal, #112) — a field a resource does not
+// carry is evidence of nothing.
+func podReady(obj *unstructured.Unstructured) childState {
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+	switch phase {
+	case "Succeeded":
+		return childHealthy // ran to completion; a finished Pod is not an unhealthy one
+	case "Failed":
+		return childFailed // terminal: it will not recover on its own
+	case "Running":
+		if ready, found := podReadyCondition(obj); found {
+			return boolState(ready)
+		}
+		return childHealthy // Running with no Ready condition: do not invent unhealth
+	case "":
+		return childHealthy // status not written yet, or unreadable — fail-safe, as everywhere here
+	default:
+		return childConverging // Pending, Unknown: not yet, but it can still get there
+	}
+}
+
+// podReadyCondition returns (isTrue, found) for the Pod's Ready condition.
+func podReadyCondition(obj *unstructured.Unstructured) (bool, bool) {
+	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if !found {
+		return false, false
+	}
+	for _, c := range conds {
+		cm, ok := c.(map[string]any)
+		if !ok || stringField(cm, "type") != "Ready" {
+			continue
+		}
+		return stringField(cm, "status") == "True", true
+	}
+	return false, false
+}
+
+// pvcReady classifies a PersistentVolumeClaim by its bind phase.
+//
+// Pending is CONVERGING rather than failed on purpose: with the common WaitForFirstConsumer binding
+// mode a claim stays Pending until a consumer Pod is scheduled, which is normal and self-resolving.
+// A claim that genuinely never binds does hold the parent at Creating — correct, because a workload
+// with no storage is not ready. Lost is terminal: the bound volume is gone and nothing in-cluster
+// brings it back.
+func pvcReady(obj *unstructured.Unstructured) childState {
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+	switch phase {
+	case "Bound":
+		return childHealthy
+	case "Lost":
+		return childFailed
+	case "":
+		return childHealthy // not yet written / unreadable — fail-safe
+	default:
+		return childConverging // Pending
 	}
 }
 
