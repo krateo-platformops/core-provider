@@ -151,6 +151,34 @@ func (r *RBACInstaller) ApplyNamespace(ctx context.Context, namespace *corev1.Na
 	return namespace, nil
 }
 
+// helmReleaseNameAnnotation is the marker Helm stamps on every object it owns.
+const helmReleaseNameAnnotation = "meta.helm.sh/release-name"
+
+// errIfHelmOwned refuses to modify RBAC that belongs to a Helm release.
+//
+// Generated RBAC used to be named after the release, which is exactly what a chart's conventional
+// `{{ include "chart.fullname" . }}` produces — so a chart shipping its own Role/RoleBinding wrote
+// to the same object we did, and Helm won (core-provider#130). The names no longer collide (see
+// rbacgen.rbacNameSuffix), so reaching this should now be impossible.
+//
+// It is still worth failing on, because the ORIGINAL defect was invisible precisely here: unioning
+// rules into a chart-owned object succeeds, Helm reverts it on that release's next apply, and
+// neither side logs anything. The composition then fails on a permission it was granted moments
+// earlier, which reads as "generated RBAC is incomplete" rather than "generated RBAC was
+// overwritten". An error naming the release turns a silent revert into a diagnosis.
+func errIfHelmOwned(u *unstructured.Unstructured, kind string) error {
+	rel := u.GetAnnotations()[helmReleaseNameAnnotation]
+	if rel == "" {
+		return nil
+	}
+	name := u.GetName()
+	if ns := u.GetNamespace(); ns != "" {
+		name = ns + "/" + name
+	}
+	return fmt.Errorf("refusing to modify %s %s: it is owned by helm release %q, so anything written "+
+		"here would be silently reverted by that release's next apply", kind, name, rel)
+}
+
 func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbacv1.Role, error) {
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(role)
 	if err != nil {
@@ -182,6 +210,10 @@ func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbac
 		return role, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to Get Role: %w", err)
+	}
+
+	if err := errIfHelmOwned(existingU, "Role"); err != nil {
+		return nil, err
 	}
 
 	existingRole := &rbacv1.Role{}
@@ -237,7 +269,8 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 		},
 	).Namespace(roleBinding.Namespace)
 
-	if _, err := cli.Get(ctx, roleBinding.Name, metav1.GetOptions{}); errors.IsNotFound(err) {
+	existingU, err := cli.Get(ctx, roleBinding.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
 		res, err := cli.Create(ctx, u, metav1.CreateOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create RoleBinding: %w", err)
@@ -252,6 +285,10 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 		return roleBinding, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to Get RoleBinding: %w", err)
+	}
+
+	if err := errIfHelmOwned(existingU, "RoleBinding"); err != nil {
+		return nil, err
 	}
 
 	res, err := cli.Update(ctx, u, metav1.UpdateOptions{})
@@ -299,6 +336,10 @@ func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv
 		return clusterRole, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to Get ClusterRole: %w", err)
+	}
+
+	if err := errIfHelmOwned(existingU, "ClusterRole"); err != nil {
+		return nil, err
 	}
 
 	existingClusterRole := &rbacv1.ClusterRole{}
@@ -353,7 +394,8 @@ func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRole
 		},
 	)
 
-	if _, err := cli.Get(ctx, clusterRoleBinding.Name, metav1.GetOptions{}); errors.IsNotFound(err) {
+	existingU, err := cli.Get(ctx, clusterRoleBinding.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
 		res, err := cli.Create(ctx, u, metav1.CreateOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create ClusterRoleBinding: %w", err)
@@ -368,6 +410,10 @@ func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRole
 		return clusterRoleBinding, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to Get ClusterRoleBinding: %w", err)
+	}
+
+	if err := errIfHelmOwned(existingU, "ClusterRoleBinding"); err != nil {
+		return nil, err
 	}
 
 	res, err := cli.Update(ctx, u, metav1.UpdateOptions{})

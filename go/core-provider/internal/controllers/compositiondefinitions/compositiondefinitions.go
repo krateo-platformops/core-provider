@@ -609,6 +609,29 @@ func statusFieldsFromSpec(cr *compositiondefinitionsv1alpha1.CompositionDefiniti
 	return fields
 }
 
+// seedReadyIfAbsent gives a CompositionDefinition a Ready condition before any work that can fail.
+//
+// Observe's error paths return bare, so a definition that fails before anything sets Ready ends up
+// carrying Synced=False and NO Ready condition at all. That is worse than Ready=False: a sweep
+// filtering `Ready != True` catches it, but one filtering `Ready == False` reports a clean fleet,
+// and to a human an absent condition reads as "still starting" rather than "broken". On 057 a
+// definition sat failing its chart fetch for FIVE DAYS in exactly this shape without surfacing.
+//
+// Nor is it self-correcting: the first failure decides. Every later reconcile takes the same early
+// return, so the field is never backfilled.
+//
+// This survives that first failure because the reconciler persists conditions even when Observe
+// returns an error — it sets ReconcileError and calls Status().Update before propagating.
+//
+// Only seeds when genuinely absent. GetCondition returns a zero-Reason placeholder for a condition
+// that is not there, while every condition this controller sets carries a Reason, so an existing
+// verdict — including Ready=True — is never disturbed.
+func seedReadyIfAbsent(cr *compositiondefinitionsv1alpha1.CompositionDefinition) {
+	if cr.GetCondition(rtv1.TypeReady).Reason == "" {
+		cr.SetConditions(rtv1.Creating())
+	}
+}
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -649,6 +672,21 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	// Record where the controller is deployed and whether that cluster is reachable.
 	e.setTargetStatus(cr)
+
+	// Seed Ready=False before any of the work that can fail. Every error path below returns bare,
+	// so a definition that fails before anything sets Ready ends up carrying Synced=False and NO
+	// Ready condition at all. That is a far worse state than Ready=False: a sweep filtering
+	// `Ready != True` catches it, but one filtering `Ready == False` reports a clean fleet, and to
+	// a human a missing condition reads as "still starting" rather than "broken". On 057 a
+	// definition sat failing its chart fetch for FIVE DAYS in exactly this shape without surfacing.
+	//
+	// It is not self-correcting either: the first failure decides. Every later reconcile takes the
+	// same early return, so the field is never backfilled.
+	//
+	// This survives the first failure because the reconciler persists conditions even when Observe
+	// returns an error — it sets ReconcileError and calls Status().Update before propagating.
+	//
+	seedReadyIfAbsent(cr)
 
 	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {

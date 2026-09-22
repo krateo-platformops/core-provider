@@ -51,6 +51,35 @@ func (r *RBACGen) WithBaseName(baseName string) RBACGenInterface {
 	return r
 }
 
+// rbacNameSuffix keeps the RBAC we generate out of the namespace a chart can address.
+//
+// The generated objects used to be named after the release — which is the composition name. That
+// is exactly what Helm's conventional fullname helper produces:
+//
+//	{{- if contains $name .Release.Name }}{{ .Release.Name }}{{ else }}...
+//
+// so ANY chart shipping its own Role/RoleBinding under `{{ include "chart.fullname" . }}` collides
+// with ours whenever the composition name contains the chart name — the normal case, since a
+// composition is usually named after its chart. It is one object with two writers, and Helm wins:
+// Role (21) and RoleBinding (23) are applied before workloads like CronJob (34) in InstallOrder, so
+// the overwrite is deterministic, not racy.
+//
+// Both halves were lost. The derived rules were replaced by the chart's, AND the binding's subject
+// was rewritten from the cdc's ServiceAccount to the chart's, so the cdc ended up with no link to
+// the Role at all. The install then failed on the first kind the STATIC baseline role does not
+// already cover — which is how this surfaced as "cronjobs is missing from generated RBAC"
+// (krateo-platformops/core-provider#130).
+//
+// The chart is not at fault: that helper is what `helm create` scaffolds. So the platform moves.
+// The suffix has to be something a fullname template cannot produce — a chart would have to be
+// NAMED "krateo-rbac" and released under a matching name to collide again.
+const rbacNameSuffix = "-krateo-rbac"
+
+// rbacName is the name of every RBAC object we generate for this composition.
+func (r *RBACGen) rbacName() string {
+	return r.baseName + rbacNameSuffix
+}
+
 func (r *RBACGen) Generate(ctx context.Context, params Parameters) (*rbac.RBAC, error) {
 	resources, err := r.chartInspector.Resources(ctx, chartinspector.Parameters{
 		CompositionName:                params.CompositionName,
@@ -68,8 +97,8 @@ func (r *RBACGen) Generate(ctx context.Context, params Parameters) (*rbac.RBAC, 
 		return nil, fmt.Errorf("getting resources from chart-inspector: %w", err)
 	}
 	policy := rbac.RBAC{
-		ClusterRole:        rbac.InitClusterRole(r.baseName),
-		ClusterRoleBinding: rbac.InitClusterRoleBinding(r.baseName, r.baseName, r.saName, r.saNamespace),
+		ClusterRole:        rbac.InitClusterRole(r.rbacName()),
+		ClusterRoleBinding: rbac.InitClusterRoleBinding(r.rbacName(), r.rbacName(), r.saName, r.saNamespace),
 		Namespaced:         map[string]rbac.Namespaced{},
 		Namespaces:         []*corev1.Namespace{},
 	}
@@ -117,8 +146,8 @@ func (r *RBACGen) Generate(ctx context.Context, params Parameters) (*rbac.RBAC, 
 		}
 		if _, ok := policy.Namespaced[key.namespace]; !ok {
 			policy.Namespaced[key.namespace] = rbac.Namespaced{
-				Role:        rbac.InitRole(r.baseName, key.namespace),
-				RoleBinding: rbac.InitRoleBinding(r.baseName, r.baseName, key.namespace, r.saName, r.saNamespace),
+				Role:        rbac.InitRole(r.rbacName(), key.namespace),
+				RoleBinding: rbac.InitRoleBinding(r.rbacName(), r.rbacName(), key.namespace, r.saName, r.saNamespace),
 			}
 		}
 		policy.Namespaced[key.namespace].Role.Rules = append(policy.Namespaced[key.namespace].Role.Rules, rule)
