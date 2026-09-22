@@ -43,6 +43,10 @@ all three images and the chart ship together from a single plain-semver tag.
   status projection, remote seeding.
 - [internals/gotchas.md](./internals/gotchas.md) — real runtime pitfalls, each
   grounded in code.
+- [internals/cdc-events-and-logs.md](./internals/cdc-events-and-logs.md) — every
+  Kubernetes Event and log line a cdc instance emits, traced across
+  cdc/unstructured-runtime/plumbing, with the ClickHouse predicates that select
+  them. Read it before writing an Alert on compositions.
 
 Component-local docs: the CDC's runtime contract is in
 [go/composition-dynamic-controller/README.md](../go/composition-dynamic-controller/README.md);

@@ -18,6 +18,7 @@ examples/remote-target/manifest.yaml: the manifest — kubectl apply -f
 docs/internals/architecture.md: how the engine binary is built — entry point, the three controllers, the internal/tools packages
 docs/internals/behavior.md: the reconcile lifecycle, what is deployed per version, digest contract, status projection, remote seeding
 docs/internals/gotchas.md: real runtime pitfalls, each grounded in code
+docs/internals/cdc-events-and-logs.md: every Event + log line a cdc instance emits, traced across cdc/unstructured-runtime/plumbing, with the ClickHouse predicates that select them — read this before writing an Alert on compositions
 # How-tos:
 docs/how-to/remote-target-credentials.md: KubernetesTarget kubeconfig Secrets with ESO — contract, RBAC, rotation recipes
 docs/how-to/remote-target-rbac.yaml: the target-side ClusterRole for remote projection
