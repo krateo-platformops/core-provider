@@ -19,7 +19,7 @@ version: 0.36.16
 
 
 home: https://krateo.io
-icon: https://github.com/krateoplatformops/krateo/blob/main/docs/media/logo.svg
+icon: https://raw.githubusercontent.com/krateo-platformops/.github/main/brand/logo.svg
 keywords:
   - krateo
   - platformops
