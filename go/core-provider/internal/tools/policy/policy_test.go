@@ -56,9 +56,36 @@ func TestEnsureCreatesPolicyAndBinding(t *testing.T) {
 	if len(muts) != 1 {
 		t.Fatalf("expected 1 mutation, got %d", len(muts))
 	}
-	cel, _, _ := unstructured.NestedString(muts[0].(map[string]any), "applyConfiguration", "expression")
+	mut := muts[0].(map[string]any)
+
+	// #66: the patch type is load-bearing. ApplyConfiguration performs a structured merge, which
+	// converts the WHOLE object to its typed form first — so an unrelated field whose schema types
+	// it numeric while it holds a Quantity string ("200m") makes the conversion fail, and with
+	// failurePolicy: Fail the apply is DENIED. One such composition wedged an entire umbrella
+	// reconcile. A JSON Patch touches only the path it names.
+	if got, _, _ := unstructured.NestedString(mut, "patchType"); got != "JSONPatch" {
+		t.Errorf("patchType = %q, want JSONPatch: ApplyConfiguration forces a whole-object typed "+
+			"conversion that denies valid Quantity strings (#66)", got)
+	}
+	if _, found, _ := unstructured.NestedString(mut, "applyConfiguration", "expression"); found {
+		t.Error("applyConfiguration must not be set: it reintroduces the whole-object conversion (#66)")
+	}
+
+	cel, _, _ := unstructured.NestedString(mut, "jsonPatch", "expression")
 	if !strings.Contains(cel, versionLabel) || !strings.Contains(cel, "request.requestKind.version") {
 		t.Errorf("mutation expression does not stamp %s from served version: %q", versionLabel, cel)
+	}
+	// An object with no labels at all needs the map created in one step — a JSON Patch `add` to
+	// /metadata/labels/<key> fails when /metadata/labels is absent. Without both branches the
+	// policy denies every composition that happens to carry no labels.
+	if !strings.Contains(cel, "has(object.metadata.labels)") {
+		t.Errorf("expression must handle an object with no labels, or it denies label-less "+
+			"compositions: %q", cel)
+	}
+	// The label key contains "/", which RFC 6901 requires escaped as ~1 inside a JSON Pointer.
+	// escapeKey does it; hand-written escaping breaks silently the next time the label is renamed.
+	if !strings.Contains(cel, "jsonpatch.escapeKey") {
+		t.Errorf("the label key must be escaped for the JSON Pointer path: %q", cel)
 	}
 
 	// Matches the composition API group, all resources, on CREATE/UPDATE.
