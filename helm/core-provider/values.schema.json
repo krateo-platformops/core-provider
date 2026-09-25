@@ -24,7 +24,7 @@
         "repository": {
           "type": "string",
           "title": "Image repository",
-          "default": "krateoplatformops/core-provider"
+          "default": "krateo-platformops/core-provider"
         },
         "pullPolicy": {
           "type": "string",
@@ -341,7 +341,7 @@
             "repository": {
               "type": "string",
               "title": "Image repository",
-              "default": "krateoplatformops/chart-inspector"
+              "default": "krateo-platformops/chart-inspector"
             },
             "pullPolicy": {
               "type": "string",
@@ -539,7 +539,7 @@
             "repository": {
               "type": "string",
               "title": "Image repository",
-              "default": "krateoplatformops/composition-dynamic-controller"
+              "default": "krateo-platformops/composition-dynamic-controller"
             },
             "pullPolicy": {
               "type": "string",

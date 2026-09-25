@@ -16,7 +16,43 @@ on:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
 jobs:
+  # Release gate (#92). Before this, a pushed tag went straight to `build` with no `needs:`, so all
+  # three images published without the suite ever running against that commit. A tag is the one
+  # moment where nothing else stands between a mistake and a published artifact: PR checks prove the
+  # branch was green, not that the tagged commit is, and the two differ whenever a tag is cut from
+  # anything but a just-merged head — which is exactly when a release goes wrong.
+  #
+  # Mirrors the three per-module checks from release-pullrequest.yaml. CRD drift stays on
+  # core-provider, the only module with committed crds/. The `integration`-tagged tests are
+  # deliberately excluded here as they are there: they spin up a real kind cluster and pull from
+  # Docker Hub, which is not something to put between a tag and its artifacts.
+  test-core-provider:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/core-provider
+      crd_drift: true
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
+
+  test-composition-dynamic-controller:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/composition-dynamic-controller
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
+
+  test-chart-inspector:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/chart-inspector
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+    secrets: inherit
+
   build:
+    # The gate itself. Without `needs:` the jobs run CONCURRENTLY and images publish regardless of
+    # the result — which is how oasgen-provider shipped past a red suite while appearing to have a
+    # test gate (#92). A declared test job is not a gate; `needs:` is.
+    needs: [test-core-provider, test-composition-dynamic-controller, test-chart-inspector]
     uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
     permissions:
       contents: read
