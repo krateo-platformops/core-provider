@@ -303,9 +303,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
-		rel, err = hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-			MaxHistory:     helmMaxHistory,
-			ReleaseVersion: rel.Revision,
+		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
+			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
+				MaxHistory:     helmMaxHistory,
+				ReleaseVersion: rel.Revision,
+			})
 		})
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
@@ -404,23 +406,25 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// state it is a no-op: no revision, no hooks. ResourceUpToDate reflects whether the cluster
 	// already matched the desired state; the digest below is computed for STATUS REPORTING only,
 	// not as an up-to-date gate.
-	reconcileRes, err := hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-		ActionConfig: &helmconfig.ActionConfig{
-			ChartVersion:          pkg.Version,
-			ChartName:             pkg.Repo,
-			Username:              pkg.Auth.Username,
-			Password:              pkg.Auth.Password,
-			InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-			Values:                values,
-			PostRenderer:          postrenderLabels,
-			// Adopt an existing child object rather than aborting the whole release when it carries
-			// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
-			// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
-			// into the current release: invalid ownership metadata") and wedges the platform (D1,
-			// 2026-07-08); with it the release takes ownership, self-healing the conflict.
-			TakeOwnership: true,
-		},
-		MaxHistory: helmMaxHistory,
+	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
+		return hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
+			ActionConfig: &helmconfig.ActionConfig{
+				ChartVersion:          pkg.Version,
+				ChartName:             pkg.Repo,
+				Username:              pkg.Auth.Username,
+				Password:              pkg.Auth.Password,
+				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+				Values:                values,
+				PostRenderer:          postrenderLabels,
+				// Adopt an existing child object rather than aborting the whole release when it carries
+				// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
+				// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
+				// into the current release: invalid ownership metadata") and wedges the platform (D1,
+				// 2026-07-08); with it the release takes ownership, self-healing the conflict.
+				TakeOwnership: true,
+			},
+			MaxHistory: helmMaxHistory,
+		})
 	})
 	if err != nil {
 		retErr := fmt.Errorf("reconciling helm chart: %w", err)
@@ -629,9 +633,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			})
 		})
 	} else {
-		rel, err = helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
-			return hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
-				ActionConfig: actionConfig,
+		rel, err = helmPhase(log, "install", releaseName, func() (*helmconfig.Release, error) {
+			return helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
+				return hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
+					ActionConfig: actionConfig,
+				})
 			})
 		})
 		if err != nil {
@@ -945,9 +951,11 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
-		if _, rerr := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-			MaxHistory:     helmMaxHistory,
-			ReleaseVersion: rel.Revision,
+		if _, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
+			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
+				MaxHistory:     helmMaxHistory,
+				ReleaseVersion: rel.Revision,
+			})
 		}); rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
@@ -979,9 +987,11 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
-	err = helmMetrics.TimedUninstall(func() error {
-		return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
-			IgnoreNotFound: true,
+	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
+		return helmMetrics.TimedUninstall(func() error {
+			return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
+				IgnoreNotFound: true,
+			})
 		})
 	})
 	if err != nil {
