@@ -54,10 +54,41 @@ func objects() (*unstructured.Unstructured, *unstructured.Unstructured) {
 		},
 		"failurePolicy":      "Fail",
 		"reinvocationPolicy": "Never",
+		// JSONPatch, not ApplyConfiguration (#66).
+		//
+		// ApplyConfiguration performs a structured merge, which requires converting the WHOLE
+		// incoming object to its typed form first. That conversion fails whenever any unrelated
+		// field holds a value its schema does not accept — and it fails for a value Kubernetes
+		// itself considers valid. A composition whose schema types spec.resources.requests.cpu as
+		// numeric (because the chart's values.schema.json said `type: number`) but whose value is a
+		// Quantity string like "200m" produced:
+		//
+		//   error applying patch: failed to convert original object to typed object: errors:
+		//     .spec.resources.requests.cpu: expected numeric (int or float), got string
+		//
+		// failurePolicy is Fail, so the apply was DENIED. And because the installer's self-heal
+		// re-applies its whole manifest every cycle, one composition with a string cpu wedged the
+		// entire umbrella reconcile: Pass B never progressed and the downstream agent fleet never
+		// deployed. A label stamp took out an install.
+		//
+		// A JSON Patch touches only the path it names. Nothing else in the object is parsed,
+		// converted or validated by this mutation, so an unrelated field's representation cannot
+		// deny the request. Adding a label should never have depended on the rest of the object
+		// being typed-convertible.
+		//
+		// The two-branch expression is required: JSON Patch `add` to /metadata/labels/<key> fails
+		// when /metadata/labels does not exist, so an object with no labels at all needs the map
+		// created in one step instead.
+		//
+		// jsonpatch.escapeKey handles the RFC 6901 escaping of "/" in the label key (it becomes
+		// ~1). Hand-writing that escape is exactly the sort of thing that works until someone
+		// renames the label.
 		"mutations": []any{map[string]any{
-			"patchType": "ApplyConfiguration",
-			"applyConfiguration": map[string]any{
-				"expression": `Object{ metadata: Object.metadata{ labels: {"` + versionLabel + `": request.requestKind.version} } }`,
+			"patchType": "JSONPatch",
+			"jsonPatch": map[string]any{
+				"expression": `has(object.metadata.labels)` +
+					` ? [JSONPatch{op: "add", path: "/metadata/labels/" + jsonpatch.escapeKey("` + versionLabel + `"), value: request.requestKind.version}]` +
+					` : [JSONPatch{op: "add", path: "/metadata/labels", value: {"` + versionLabel + `": request.requestKind.version}}]`,
 			},
 		}},
 	}
