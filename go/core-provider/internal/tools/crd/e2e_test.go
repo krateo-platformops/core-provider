@@ -13,8 +13,10 @@ package crd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +80,18 @@ func waitCRDEstablished(t *testing.T, cl client.Client, name string) {
 	t.Fatalf("CRD %s not established", name)
 }
 
+// isDiscoveryLag reports whether an error is the CRD-not-yet-servable window rather than a real
+// rejection. Deliberately narrow: it must never swallow a policy denial or a schema error, because
+// those are what several of these tests exist to observe.
+func isDiscoveryLag(err error) bool {
+	var nkme *meta.NoKindMatchError
+	if errors.As(err, &nkme) || meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
+		return true
+	}
+	// The RESTMapper's wrapped form, which the typed checks above miss.
+	return strings.Contains(err.Error(), "There can be a delay between when CustomResourceDefinitions are created")
+}
+
 // createEventually creates an object, tolerating the window between a CRD reporting Established
 // and its resource actually being servable.
 //
@@ -101,7 +115,12 @@ func createEventually(t *testing.T, ctx context.Context, ri dynamic.ResourceInte
 		}
 		// Only discovery lag is retried. A schema rejection, a policy denial or anything else is a
 		// real result and must fail the test immediately rather than after a minute of retries.
-		if !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err) {
+		//
+		// The predicate has to be generous about HOW the lag is reported. meta.IsNoMatchError uses a
+		// bare type assertion with no unwrapping, so a wrapped NoKindMatchError slips past it — which
+		// is exactly what happened the first time this helper was used: it bailed instantly on the
+		// very error it was written to absorb. Match the RESTMapper's own sentence as a fallback.
+		if !isDiscoveryLag(err) {
 			t.Fatalf("create object: %v", err)
 		}
 		lastErr = err
