@@ -59,6 +59,59 @@ jobs:
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
+  e2e:
+    # The e2e suite (internal/tools/crd/*_e2e_test.go, `//go:build e2e`) needs a REAL apiserver and
+    # was therefore behind a build tag that nothing passed. It proves things the unit tests cannot:
+    # that a generated CRD round-trips losslessly through the None+vacuum storage version, that the
+    # composition-version MutatingAdmissionPolicy stamps in-apiserver with no webhook, and that
+    # nested defaults materialize under an omitted parent.
+    #
+    # Unrun, it rotted: TestE2E_NestedDefault235 asserted a fix that had never been implemented and
+    # had been failing silently for weeks (#138). A test suite with no gate behind it is not a
+    # safety net, it is a claim — this is the same shape as #92, where the release path published
+    # images regardless of test results.
+    #
+    # Needs k8s >= 1.36 for the GA MutatingAdmissionPolicy API. Note kindest/node has no v1.36.0
+    # image published; v1.36.4 is the usable 1.36 tag.
+    name: e2e (real apiserver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: Create kind cluster (k8s 1.36)
+        uses: helm/kind-action@v1
+        with:
+          node_image: kindest/node:v1.36.4
+          cluster_name: core-provider-e2e
+      # Fail loudly if the cluster cannot actually exercise what the suite is for. The policy test
+      # calls t.Skipf when MutatingAdmissionPolicy is unavailable, so without this a wrong node
+      # image would produce a GREEN job that silently proved nothing — which is precisely the
+      # failure this whole issue is about.
+      - name: Verify the cluster can exercise the suite
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          kubectl version -o json | jq -r '"server: " + .serverVersion.gitVersion'
+          kubectl api-resources --api-group=admissionregistration.k8s.io \
+            | grep -q mutatingadmissionpolicies \
+            || { echo "::error::MutatingAdmissionPolicy (GA) missing - the policy e2e test would SKIP, not pass"; exit 1; }
+
+      - name: Run e2e suite
+        working-directory: go/core-provider
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          go test -tags=e2e -timeout 20m -v ./internal/tools/crd/... 2>&1 | tee /tmp/e2e.log
+          # A skipped test is not a passing test. If the suite skipped anything, say so and fail:
+          # the entire point of this job is that these assertions actually run.
+          if grep -q -- '--- SKIP' /tmp/e2e.log; then
+            echo "::error::e2e tests were SKIPPED - this job exists to run them, not to report green"
+            grep -- '--- SKIP' /tmp/e2e.log
+            exit 1
+          fi
+
   lint-docs:
     # THE canonical documentation-conformance check (the Krateo Documentation Standard):
     # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.
