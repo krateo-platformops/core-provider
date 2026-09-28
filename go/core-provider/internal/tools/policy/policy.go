@@ -121,5 +121,66 @@ func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) err
 		}
 	}
 
-	return nil
+	return upgradeLegacyPolicy(ctx, kube)
+}
+
+// legacyApplyConfigurationExpression is the exact mutation this package shipped before #66. It is
+// reconstructed rather than hardcoded so a rename of versionLabel cannot leave this matching a
+// string nobody writes any more.
+func legacyApplyConfigurationExpression() string {
+	return `Object{ metadata: Object.metadata{ labels: {"` + versionLabel + `": request.requestKind.version} } }`
+}
+
+// upgradeLegacyPolicy migrates a policy still carrying the pre-#66 ApplyConfiguration mutation onto
+// the JSON Patch form.
+//
+// Without this the fix reaches nobody. EnsureCompositionVersionPolicy is create-if-absent, and
+// every cluster that has ever run core-provider already HAS the policy — so IsAlreadyExists was
+// swallowed and the broken mutation stayed forever. Verified on krateo-057: the live policy still
+// carried patchType ApplyConfiguration and the legacy expression verbatim, so a composition with a
+// Quantity-string cpu would still have been denied on a cluster running the "fixed" version.
+//
+// Deliberately narrow. It rewrites the mutation ONLY when the existing policy carries exactly one
+// mutation that is exactly what we previously shipped. Anything else — a chart-managed policy, an
+// operator's edit, an already-migrated policy, extra mutations — is left untouched, which preserves
+// the original intent of never fighting another field manager. The equality check is the consent:
+// we only overwrite what we can prove is our own previous output.
+func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
+	existing := &unstructured.Unstructured{}
+	existing.SetAPIVersion(policyAPIVersion)
+	existing.SetKind("MutatingAdmissionPolicy")
+
+	if err := kube.Get(ctx, client.ObjectKey{Name: PolicyName}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Created above, or removed concurrently. Either way there is nothing to migrate.
+			return nil
+		}
+		return err
+	}
+
+	muts, found, err := unstructured.NestedSlice(existing.Object, "spec", "mutations")
+	if err != nil || !found || len(muts) != 1 {
+		return nil
+	}
+	m, ok := muts[0].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	patchType, _, _ := unstructured.NestedString(m, "patchType")
+	expr, _, _ := unstructured.NestedString(m, "applyConfiguration", "expression")
+	if patchType != "ApplyConfiguration" || expr != legacyApplyConfigurationExpression() {
+		return nil
+	}
+
+	desired, _ := objects()
+	desiredMuts, _, err := unstructured.NestedSlice(desired.Object, "spec", "mutations")
+	if err != nil {
+		return err
+	}
+	if err := unstructured.SetNestedSlice(existing.Object, desiredMuts, "spec", "mutations"); err != nil {
+		return err
+	}
+
+	return kube.Update(ctx, existing)
 }
