@@ -19,7 +19,6 @@ import (
 
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,10 +85,7 @@ func TestE2E_NestedDefault235(t *testing.T) {
 	obj.SetName("nd1")
 	obj.SetNamespace("default")
 	_ = unstructured.SetNestedField(obj.Object, map[string]any{}, "spec")
-	created, err := dyn.Resource(gvr).Namespace("default").Create(ctx, obj, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("create instance: %v", err)
-	}
+	created := createEventually(t, ctx, dyn.Resource(gvr).Namespace("default"), obj)
 
 	// The apiserver must have materialized spec.image and applied the nested default.
 	tag, found, _ := unstructured.NestedString(created.Object, "spec", "image", "tag")

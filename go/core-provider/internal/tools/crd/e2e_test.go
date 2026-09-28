@@ -21,6 +21,7 @@ import (
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -75,6 +76,39 @@ func waitCRDEstablished(t *testing.T, cl client.Client, name string) {
 		time.Sleep(2 * time.Second)
 	}
 	t.Fatalf("CRD %s not established", name)
+}
+
+// createEventually creates an object, tolerating the window between a CRD reporting Established
+// and its resource actually being servable.
+//
+// Established=True means the apiserver accepted the definition, NOT that every discovery path has
+// caught up — so a create issued immediately after can fail with "Resource kind ... not found.
+// There can be a delay between when CustomResourceDefinitions are created and when they are
+// available". It is a race, and the loser is whoever is running on a slower machine: this suite
+// passed on a local kind and failed on a CI runner the first time it was ever run there
+// (krateo-platformops/core-provider#138).
+//
+// Retrying the create is the honest fix. Sleeping longer only moves the threshold, and a fixed
+// sleep that is long enough for CI is wasted on every other run.
+func createEventually(t *testing.T, ctx context.Context, ri dynamic.ResourceInterface, obj *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		created, err := ri.Create(ctx, obj, metav1.CreateOptions{})
+		if err == nil {
+			return created
+		}
+		// Only discovery lag is retried. A schema rejection, a policy denial or anything else is a
+		// real result and must fail the test immediately rather than after a minute of retries.
+		if !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err) {
+			t.Fatalf("create object: %v", err)
+		}
+		lastErr = err
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("create object: resource never became servable within 60s: %v", lastErr)
+	return nil
 }
 
 // TestE2E_NoneVacuumRoundTrip drives the real generator + ApplyOrUpdateCRD to build a
@@ -140,9 +174,7 @@ func TestE2E_NoneVacuumRoundTrip(t *testing.T) {
 	obj.SetName("rt1")
 	obj.SetNamespace("default")
 	_ = unstructured.SetNestedField(obj.Object, "hello", "spec", "foo")
-	if _, err := dyn.Resource(gvr1).Namespace("default").Create(ctx, obj, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create v1 object: %v", err)
-	}
+	createEventually(t, ctx, dyn.Resource(gvr1).Namespace("default"), obj)
 
 	readFoo := func(gvr schema.GroupVersionResource) (string, bool) {
 		o, err := dyn.Resource(gvr).Namespace("default").Get(ctx, "rt1", metav1.GetOptions{})
@@ -203,10 +235,7 @@ func TestE2E_CompositionVersionPolicy(t *testing.T) {
 	obj.SetName("pol1")
 	obj.SetNamespace("default")
 	_ = unstructured.SetNestedField(obj.Object, "hello", "spec", "foo")
-	created, err := dyn.Resource(gvr).Namespace("default").Create(ctx, obj, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("create object: %v", err)
-	}
+	created := createEventually(t, ctx, dyn.Resource(gvr).Namespace("default"), obj)
 	if got := created.GetLabels()["krateo.io/composition-version"]; got != "v1-0-0" {
 		t.Fatalf("composition-version label = %q, want v1-0-0 (policy did not stamp it)", got)
 	}

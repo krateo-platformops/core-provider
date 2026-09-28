@@ -45,9 +45,7 @@ func writeAndVerifyStatus(t *testing.T, ctx context.Context, dyn dynamic.Interfa
 	obj.SetGroupVersionKind(gvk)
 	obj.SetName(name)
 	obj.SetNamespace("default")
-	if _, err := dyn.Resource(gvr).Namespace("default").Create(ctx, obj, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create %s/%s: %v", gvk.Version, name, err)
-	}
+	createEventually(t, ctx, dyn.Resource(gvr).Namespace("default"), obj)
 
 	got, err := dyn.Resource(gvr).Namespace("default").Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
