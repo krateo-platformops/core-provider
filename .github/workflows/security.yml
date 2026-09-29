@@ -4,7 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # NO `branches:` filter, deliberately.
+    #
+    # This workflow carries codeql, gosec, trivy and sbom. With `branches: [main]` a PR based on
+    # ANOTHER branch — a stacked PR — matched nothing here and ran none of it, while GitHub still
+    # rendered a green tick and "All checks have passed". The absence presented as success, so a
+    # reviewer doing the right thing got a confirmation meaning the opposite.
+    #
+    # Measured in oasgen-provider on two PRs carrying identical code and differing only in base:
+    # 18 checks against main, 1 against a stack base (krateo-platformops/oasgen-provider#149).
+    #
+    # The `push:` filter above stays: push events are not PRs, and main is the only branch whose
+    # pushes should trigger a full run.
 
 permissions:
   contents: read

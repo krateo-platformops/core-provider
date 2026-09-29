@@ -2,8 +2,22 @@ name: release-pullrequest
 
 on:
   pull_request:
-    branches:
-      - main
+    # NO `branches:` filter, deliberately.
+    #
+    # This workflow carries the test matrix, image builds, CRD drift and the e2e job. With `branches: [main]` a PR based on ANOTHER
+    # branch — a stacked PR — matched nothing here and ran none of it, while GitHub still
+    # rendered a green tick and "All checks have passed". The absence presented as success,
+    # so a reviewer doing the right thing got a confirmation meaning the opposite.
+    #
+    # Measured in oasgen-provider on two PRs carrying identical code and differing only in
+    # base: 18 checks against main, 1 against a stack base (krateo-platformops/oasgen-provider#149).
+    #
+    # Cost: a stacked PR runs the suite twice — once against its stack base, again after
+    # GitHub retargets it to main on merge. That is real CI minutes in exchange for a green
+    # tick that means the suite actually ran.
+    #
+    # The `push:` filter below stays: push events are not PRs and main is the only branch
+    # whose pushes should trigger a full run.
 
 # core-provider is a Go MONOREPO: three independent modules each with its own go.mod +
 # Dockerfile under go/<module>/. The previous inline jobs ran from the repo ROOT and failed on
