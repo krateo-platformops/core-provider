@@ -48,6 +48,10 @@ type healthVerdict struct {
 	reason  string // "Available" | "Creating" | "Unavailable"
 	message string
 	failing []string
+	// converging names children that are not ready YET, as failing names those that have failed.
+	// Both are named rather than counted: a count tells an operator that something is wrong and
+	// gives them no way to reach it (#144 discussion on 057).
+	converging []string
 	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
 	unevaluated int
 }
@@ -63,8 +67,8 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		return healthVerdict{ready: true, reason: "Available", message: "Composition is up-to-date"}
 	}
 
-	var failing []string
-	converging, unevaluated := 0, 0
+	var failing, converging []string
+	unevaluated := 0
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
@@ -74,7 +78,18 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		case childFailed:
 			failing = append(failing, childID(ref))
 		case childConverging:
-			converging++
+			// Named, not just counted. The previous "%d of %d managed children are not ready"
+			// gave an operator a number and no way to reach the child: status.managed lists
+			// Kubernetes objects with no readiness field to sort by, so finding the one meant
+			// sweeping every kind in composition.krateo.io and checking each CR's own conditions —
+			// ~40 kinds, ambiguous because compositions flap Ready=False transiently during a roll.
+			// That produced three wrong attributions in one evening on 057, including blaming a
+			// composition that was not in status.managed at all.
+			//
+			// The count could never have been produced without knowing which child it was. Not
+			// saying so was the whole defect, and the asymmetry made it obvious in hindsight: the
+			// childFailed branch below has named its children all along.
+			converging = append(converging, childID(ref))
 		case childUnevaluated:
 			unevaluated++ // counted only; never changes the verdict
 		}
@@ -88,11 +103,13 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			message: fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
 			failing: failing,
 		}
-	case converging > 0:
+	case len(converging) > 0:
 		return healthVerdict{
-			ready:   false,
-			reason:  "Creating",
-			message: fmt.Sprintf("%d of %d managed children are not ready", converging, len(managed)),
+			ready:  false,
+			reason: "Creating",
+			message: fmt.Sprintf("%d of %d managed children are not ready: %s",
+				len(converging), len(managed), joinCap(converging, 3)),
+			converging: converging,
 		}
 	default:
 		// Green — but say so honestly. If some children could not be assessed, "up-to-date" is a
