@@ -54,6 +54,9 @@ type healthVerdict struct {
 	converging []string
 	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
 	unevaluated int
+	// total is len(status.managed), kept so the unevaluated caveat can be composed by resolveReady
+	// rather than baked into the rollup's own message — which resolveReady discards.
+	total int
 }
 
 // rollupManagedChildren GETs each child listed in status.managed and rolls their health into one
@@ -102,6 +105,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			reason:  "Unavailable",
 			message: fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
 			failing: failing,
+			total:   len(managed),
 		}
 	case len(converging) > 0:
 		return healthVerdict{
@@ -110,6 +114,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			message: fmt.Sprintf("%d of %d managed children are not ready: %s",
 				len(converging), len(managed), joinCap(converging, 3)),
 			converging: converging,
+			total:      len(managed),
 		}
 	default:
 		// Green — but say so honestly. If some children could not be assessed, "up-to-date" is a
@@ -119,6 +124,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			ready: true, reason: "Available",
 			message:     availableMessage(unevaluated, len(managed)),
 			unevaluated: unevaluated,
+			total:       len(managed),
 		}
 	}
 }
@@ -126,11 +132,22 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 // availableMessage qualifies the healthy message when some children could not be assessed, so the
 // gap is visible at the point people actually look (the Ready condition, which the portal renders).
 func availableMessage(unevaluated, total int) string {
+	return withUnevaluated("Composition is up-to-date", unevaluated, total)
+}
+
+// withUnevaluated appends the coverage caveat to whatever message is being stamped.
+//
+// It is a caveat about OUR OWN coverage, not a competing claim about health — which is why it
+// appends rather than replaces. Getting that backwards is how it went missing: the rollup baked the
+// caveat into its own message, resolveReady then chose between the projected and the phase message
+// and never read the rollup's, so the caveat was computed on every reconcile and discarded every
+// time (#121 tier 2 shipped unreachable; found while answering how childFailed coexists with the
+// projection).
+func withUnevaluated(base string, unevaluated, total int) string {
 	if unevaluated == 0 {
-		return "Composition is up-to-date"
+		return base
 	}
-	return fmt.Sprintf("Composition is up-to-date (%d of %d managed children not health-evaluated)",
-		unevaluated, total)
+	return fmt.Sprintf("%s (%d of %d managed children not health-evaluated)", base, unevaluated, total)
 }
 
 // readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable") and
@@ -160,6 +177,13 @@ func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v hea
 		if msg == "" {
 			msg = defaultMsg
 		}
+		// Both signals agree the composition is unhealthy, so keep both. The author's verdict is the
+		// primary reason and leads; the rollup's names are the part an operator can act on, and
+		// returning projMsg alone discarded them — the one case where the two agree was the one case
+		// that lost the identifiers.
+		if len(v.failing) > 0 {
+			msg = fmt.Sprintf("%s; also unhealthy: %s", msg, joinCap(v.failing, 3))
+		}
 		return readyOutcome{reason: "Unavailable", message: msg}
 	}
 	switch v.reason {
@@ -168,11 +192,14 @@ func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v hea
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
 	}
+	// Available. The base is the phase message the caller supplied ("Composition is up-to-date",
+	// "Composition values updated"), or the author's projected message when they wrote one — NOT
+	// v.message, which hardcodes "Composition is up-to-date" and would overwrite the phase.
 	msg := defaultMsg
 	if projPresent && projMsg != "" {
 		msg = projMsg
 	}
-	return readyOutcome{reason: "Available", message: msg}
+	return readyOutcome{reason: "Available", message: withUnevaluated(msg, v.unevaluated, v.total)}
 }
 
 // childHealth GETs one managed child (as the controller SA) and classifies it. Any read it cannot

@@ -89,3 +89,107 @@ func TestRollup_FailedStillNamesTheChild(t *testing.T) {
 		t.Errorf("failed children must stay named: %q", v.message)
 	}
 }
+
+// #121's tier-2 caveat was computed on every reconcile and discarded every time.
+//
+// The rollup baked "(N of M managed children not health-evaluated)" into its own message;
+// resolveReady then chose between the projected message and the caller's phase message and never
+// read the rollup's, so the caveat could not reach the condition. It shipped in 2.13.15 as the
+// answer to "tier 2 needs something that makes its absence visible" and made nothing visible.
+//
+// Worth recording how it survived: I "verified it live" by observing compositions on 057 reporting
+// "Composition is up-to-date" with no suffix and concluding unevaluated == 0. The suffix could not
+// render, so that observation was compatible with any value of unevaluated.
+func TestResolveReady_UnevaluatedCaveatReachesTheCondition(t *testing.T) {
+	v := healthVerdict{ready: true, reason: "Available",
+		message: availableMessage(3, 10), unevaluated: 3, total: 10}
+
+	out := resolveReady(false, false, "", "Composition is up-to-date", v)
+
+	if out.reason != "Available" {
+		t.Fatalf("expected Available, got %s", out.reason)
+	}
+	if !strings.Contains(out.message, "3 of 10 managed children not health-evaluated") {
+		t.Errorf("the coverage caveat must reach the condition, or tier 2 reports nothing: %q", out.message)
+	}
+}
+
+// The caveat appends to the caller's PHASE message rather than replacing it. Using v.message would
+// overwrite "Composition values updated" with "Composition is up-to-date" at the Update call site.
+func TestResolveReady_CaveatPreservesThePhaseMessage(t *testing.T) {
+	v := healthVerdict{ready: true, reason: "Available", unevaluated: 2, total: 5}
+
+	out := resolveReady(false, false, "", "Composition values updated", v)
+
+	if !strings.HasPrefix(out.message, "Composition values updated") {
+		t.Errorf("phase message must lead, not be replaced: %q", out.message)
+	}
+	if !strings.Contains(out.message, "2 of 5") {
+		t.Errorf("caveat must still be appended: %q", out.message)
+	}
+}
+
+// An author's projected message also keeps the caveat: it qualifies OUR coverage, not their claim.
+func TestResolveReady_CaveatSurvivesAProjectedMessage(t *testing.T) {
+	v := healthVerdict{ready: true, reason: "Available", unevaluated: 1, total: 4}
+
+	out := resolveReady(true, true, "app reports healthy", "Composition is up-to-date", v)
+
+	if !strings.HasPrefix(out.message, "app reports healthy") {
+		t.Errorf("the author's message must lead: %q", out.message)
+	}
+	if !strings.Contains(out.message, "1 of 4") {
+		t.Errorf("a projected message must not suppress the coverage caveat: %q", out.message)
+	}
+}
+
+// No unevaluated children: no caveat, message untouched.
+func TestResolveReady_NoCaveatWhenFullyEvaluated(t *testing.T) {
+	v := healthVerdict{ready: true, reason: "Available", unevaluated: 0, total: 9}
+
+	out := resolveReady(false, false, "", "Composition is up-to-date", v)
+
+	if out.message != "Composition is up-to-date" {
+		t.Errorf("no caveat expected when everything was evaluated: %q", out.message)
+	}
+}
+
+// A projected ready=false short-circuits the rollup, which discarded the failing children's names —
+// the one case where both signals AGREE was the one case that lost the identifiers.
+func TestResolveReady_ProjectedFalseKeepsTheFailingNames(t *testing.T) {
+	v := healthVerdict{ready: false, reason: "Unavailable",
+		message: "managed children not healthy: portals/ns/db",
+		failing: []string{"portals/ns/db"}, total: 6}
+
+	out := resolveReady(true, false, "health check failed", "Composition is up-to-date", v)
+
+	if out.reason != "Unavailable" {
+		t.Fatalf("expected Unavailable, got %s", out.reason)
+	}
+	if !strings.HasPrefix(out.message, "health check failed") {
+		t.Errorf("the author's verdict is the primary reason and must lead: %q", out.message)
+	}
+	if !strings.Contains(out.message, "portals/ns/db") {
+		t.Errorf("the rollup's names must survive a projected false — they are the actionable half: %q", out.message)
+	}
+}
+
+// A projected ready=true must still NOT override an observed failed child, and must not smuggle the
+// author's message over the rollup's. Guarding the #96 rule while the message plumbing changes.
+func TestResolveReady_ProjectedTrueCannotMaskAFailedChild(t *testing.T) {
+	v := healthVerdict{ready: false, reason: "Unavailable",
+		message: "managed children not healthy: portals/ns/db",
+		failing: []string{"portals/ns/db"}, total: 6}
+
+	out := resolveReady(true, true, "app reports healthy", "Composition is up-to-date", v)
+
+	if out.reason != "Unavailable" {
+		t.Fatalf("a projected true must not override an observed failure, got %s", out.reason)
+	}
+	if !strings.Contains(out.message, "portals/ns/db") {
+		t.Errorf("the rollup's message must win here, naming the child: %q", out.message)
+	}
+	if strings.Contains(out.message, "app reports healthy") {
+		t.Errorf("the author's optimistic message must not appear when a child is observed sick: %q", out.message)
+	}
+}
