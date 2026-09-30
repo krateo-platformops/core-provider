@@ -61,9 +61,25 @@ type healthVerdict struct {
 
 // rollupManagedChildren GETs each child listed in status.managed and rolls their health into one
 // verdict. It is deliberately FAIL-SAFE: a child it cannot read (Forbidden — the controller SA lacks
-// the grant), that does not exist yet (NotFound — just applied / self-heals), or whose kind it does
-// not model, is counted HEALTHY. So the rollup can never flip a working composition to Unavailable;
-// it can only surface children it can positively observe are sick (see krateo-core-provider#72, #73).
+// the grant) or whose kind it does not model is counted HEALTHY, so the rollup can never flip a
+// working composition to Unavailable; it can only surface children it positively observes are sick
+// (see krateo-core-provider#72, #73).
+//
+// NotFound is the exception and is NOT healthy: it means "just applied, self-heals", so it counts as
+// CONVERGING and the composition reports Ready=False with reason Creating. An earlier version of this
+// comment grouped NotFound with Forbidden as healthy, which was wrong.
+//
+// WHAT THE NAMED SETS MEAN, because this is the sentence a future editor can violate without
+// noticing: `failing` and `converging` name children we could READ that were unready or absent.
+// Every non-NotFound GET error degrades to healthy and is SILENT — nothing names it. So absence from
+// those lists is NOT evidence of health. The list is a floor, not a census.
+//
+// That silence is deliberate and must stay. The obvious "improvement" is to name unreadable children
+// too, on the grounds that an unreadable child is a problem worth reporting. Do not: a controller SA
+// missing one RBAC grant would then turn every composition using that kind Ready=False at once,
+// converting an RBAC gap into a fleet-wide outage. A missing grant must not regress a working
+// composition — that is the whole point of the fail-safe, and naming is the one change that can undo
+// it while looking like a fix.
 func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interface, mg *unstructured.Unstructured) healthVerdict {
 	managed, found, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
 	if !found || len(managed) == 0 {
