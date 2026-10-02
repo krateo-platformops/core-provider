@@ -182,9 +182,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// ownership metadata"). That makes one out-of-band/edited child composition wedge the whole
 			// platform reconcile (D1, 2026-07-08). TakeOwnership skips that adoption abort while
 			// keeping server-side lookup; it is inert here because DryRun performs no real apply.
-			TakeOwnership:         true,
-			IncludeCRDs:           true,
-			SkipCRDs:              false,
+			TakeOwnership: true,
+			IncludeCRDs:   true,
+			SkipCRDs:      false,
 		},
 		Namespace:       compositionNamespace, // Override namespace for this composition
 		CreateNamespace: true,

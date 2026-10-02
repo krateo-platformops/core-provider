@@ -10,8 +10,9 @@
 // proving the JWT and the extras (static + per-instance, request-wins) flow through end to end.
 //
 // Driven by env (set by the harness):
-//   APIREF_E2E_AUTHN_URL, APIREF_E2E_SNOWPLOW_URL, APIREF_E2E_TOKEN_PATH,
-//   APIREF_E2E_APIREF_NAME, APIREF_E2E_APIREF_NAMESPACE
+//
+//	APIREF_E2E_AUTHN_URL, APIREF_E2E_SNOWPLOW_URL, APIREF_E2E_TOKEN_PATH,
+//	APIREF_E2E_APIREF_NAME, APIREF_E2E_APIREF_NAMESPACE
 //
 // Run: go test -tags e2e ./internal/composition/ -run TestE2E_ApiRefChain -v
 package composition
@@ -98,10 +99,10 @@ func TestE2E_ApiRefChain_AuthnJWT_Snowplow_Extras(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"cn":     "demo-app",     // per-instance: compositionName
-		"cns":    "apps",         // per-instance: compositionNamespace
-		"cid":    "uid-e2e-123",  // per-instance: compositionId
-		"region": "eu",           // static apiRef.extras
+		"cn":     "demo-app",    // per-instance: compositionName
+		"cns":    "apps",        // per-instance: compositionNamespace
+		"cid":    "uid-e2e-123", // per-instance: compositionId
+		"region": "eu",          // static apiRef.extras
 	}
 	for k, w := range want {
 		if got := get(k); got != w {
