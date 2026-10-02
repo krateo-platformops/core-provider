@@ -6,6 +6,18 @@ description: >
   by a KubernetesTarget. Requires Kubernetes >= 1.36.
 type: application
 
+# Kubernetes >= 1.36 is a hard requirement on the TARGET cluster. This chart also ships
+# templates/compositions-version-policy.yaml (MutatingAdmissionPolicy, admissionregistration.k8s.io/v1),
+# which is the GA shape and does not exist before 1.36.
+#
+# This is the most valuable of the three floors and the least obvious. This chart is what projects
+# the policy into a REMOTE target, and a target cluster below 1.36 cannot serve
+# MutatingAdmissionPolicy at all -- so it installing "successfully" there is exactly the silent
+# failure. The target is also the cluster nobody checks the version of, because it is not the
+# management cluster where core-provider runs.
+kubeVersion: ">=1.36.0-0"
+
+
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)

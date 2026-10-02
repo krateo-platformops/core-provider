@@ -12,6 +12,20 @@ description: Krateo PlatformOps Core Provider CRDs
 # pipeline. Library charts do not define any templates and therefore cannot be deployed.
 type: application
 
+# Kubernetes >= 1.36, matching core-provider itself. Note this is a PRODUCT-COHERENCE floor, not
+# an API requirement of these two CRDs: they use x-kubernetes-validations (GA since 1.29) and
+# nothing newer, so they would install on much older clusters.
+#
+# The floor is here because installing them below 1.36 can only produce the silent failure the
+# core-provider chart describes -- a CompositionDefinition CRD that accepts objects which nothing
+# will ever label or reconcile. These CRDs have no use without the controller, and the controller
+# needs 1.36.
+#
+# This is the weakest-grounded of the three. If a split install ever needs the CRDs on a cluster
+# being upgraded toward 1.36, this is the line to revisit -- the other two are not.
+kubeVersion: ">=1.36.0-0"
+
+
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
