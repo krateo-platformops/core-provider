@@ -180,7 +180,26 @@ chartInspector:
   # FOOTPRINT NOTE: this defaults to 1 replica requesting cpu:"1"/memory:512Mi (below), so the default
   # committed footprint is ~1 core / 512Mi. For HA on multi-node production clusters, set
   # chartInspector.replicaCount:>=2 + chartInspector.autoscaling.enabled:true (and autoscaling.minReplicas:>=2).
-  replicaCount: 1
+  # Two replicas, not one (#148).
+  #
+  # 67 composition CRs depend on this single endpoint for RBAC generation, and the CDC has no
+  # in-reconcile retry — so any restart of a lone replica makes every composition reconciling in
+  # that window fail and report Ready=False. preStopSleepSeconds closes the termination race; a
+  # second replica removes the single point entirely, so the dataplane always has a healthy
+  # alternative to route to.
+  #
+  # Safe to run multi-replica: chart-inspector is a stateless HTTP service with no leader election.
+  # Its helm cache and CRD informer are per-process, so two pods keep independent caches — the only
+  # cost is a cold cache on whichever pod serves a given request, and a second informer's watch.
+  #
+  # Note this also activates the PodDisruptionBudget below, which is already enabled but suppressed
+  # at one replica (a PDB on a single replica blocks every voluntary node drain).
+  replicaCount: 2
+
+  # Seconds the container keeps serving after receiving SIGTERM, covering asynchronous endpoint
+  # withdrawal. Set to 0 to disable the hook entirely.
+  preStopSleepSeconds: 10
+
   imagePullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
