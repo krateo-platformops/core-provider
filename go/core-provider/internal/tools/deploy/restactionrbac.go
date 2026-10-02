@@ -127,7 +127,22 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 		Verb:     "get",
 	})
 
+	// Non-read rows are refused by the generator (#149): a userAccessFilter asks "may this user do
+	// X?", and copying its verb into a Role would answer that by GRANTING X to the group being
+	// asked about. Surface what was refused so an author can see why a picker's check produced no
+	// grant — resource and verb only, never a user identity.
+	if d := restactionrbac.NonGrantable(readSet); d.Count > 0 {
+		log.Info("apiRef RBAC: refused non-read rows from the read-set; a userAccessFilter check is not a grant",
+			"count", d.Count, "rows", d.Resources)
+	}
+
 	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACName(saName))
+	if cr == nil || crb == nil {
+		// Every row was non-read, so there is nothing to grant. Emitting a binding to an empty role
+		// would read as an intended grant someone had broken.
+		log.Info("apiRef RBAC: no grantable rows in the read-set; no ClusterRole emitted", "name", restActionRBACName(saName))
+		return nil
+	}
 
 	if err := kubecli.Apply(ctx, dyn, clusterRoleGVR, cr, applyOpts); err != nil {
 		log.Error(err, "installing apiRef ClusterRole", "name", cr.Name)
