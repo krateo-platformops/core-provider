@@ -13,9 +13,9 @@ import (
 // resolves the RESTAction under the per-user clientconfig bound to that group.
 type Generated struct {
 	ClusterRole        *rbacv1.ClusterRole        // nil when no cluster-scoped rows
-	ClusterRoleBinding *rbacv1.ClusterRoleBinding  // nil when no cluster-scoped rows
-	Roles              []rbacv1.Role               // one per namespace with rows
-	RoleBindings       []rbacv1.RoleBinding        // paired with Roles
+	ClusterRoleBinding *rbacv1.ClusterRoleBinding // nil when no cluster-scoped rows
+	Roles              []rbacv1.Role              // one per namespace with rows
+	RoleBindings       []rbacv1.RoleBinding       // paired with Roles
 	// Dropped reports read-set rows refused as non-read, so a caller can tell an author why a
 	// userAccessFilter check produced no grant. Resource and verb only, never a user identity.
 	Dropped DroppedSummary
@@ -45,7 +45,15 @@ var readVerbs = map[string]bool{"get": true, "list": true, "watch": true}
 //
 // The failure this prevents is an inversion, not a leak. A userAccessFilter asks "may this user do
 // X?"; copying its verb into a generated Role answers that question by GRANTING X to the group
-// being asked about. Three live portal pickers use verb: create (krateo-platformops/core-provider#149).
+// being asked about. Five live pickers do this (krateo-platformops/core-provider#149) — three in
+// portal (blueprint-formdef, blueprint-install-formdef, alert-formdef) and two in portal-agents
+// (agent-formdef, agents-policy-formdef), as of 1.8.63.
+//
+// Note which verb this reads, because the obvious way to find those rows is wrong. r.Verb is what
+// snowplow PUT in the row, and for a userAccessFilter row that is the uaf's verb, not the row's own
+// (see Resource.Verb: "get|list|<uaf.Verb>"). A RESTAction manifest's top-level `verb:` is a read on
+// every one of these five — grepping it finds nothing while returning a plausible whole-cluster
+// control. The verb that reaches here is nested under userAccessFilter.
 func grantable(r Resource) bool {
 	return !r.NonReadVerb && readVerbs[r.Verb]
 }
