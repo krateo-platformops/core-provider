@@ -16,6 +16,9 @@ type Generated struct {
 	ClusterRoleBinding *rbacv1.ClusterRoleBinding  // nil when no cluster-scoped rows
 	Roles              []rbacv1.Role               // one per namespace with rows
 	RoleBindings       []rbacv1.RoleBinding        // paired with Roles
+	// Dropped reports read-set rows refused as non-read, so a caller can tell an author why a
+	// userAccessFilter check produced no grant. Resource and verb only, never a user identity.
+	Dropped DroppedSummary
 }
 
 // Generate turns a read-set into group-bound RBAC. name is the metadata name for
@@ -27,7 +30,72 @@ type Generated struct {
 //
 // Unlike chart rbacgen (one "*" rule per resource bound to the SA), the verb
 // comes from the read-set row — precise least privilege.
+// readVerbs is the complete set this package will ever grant. A RESTAction's generated RBAC exists
+// so the bound group can perform the READS the action performs on its behalf; nothing else belongs
+// in it.
+var readVerbs = map[string]bool{"get": true, "list": true, "watch": true}
+
+// grantable reports whether a read-set row may become a Role rule.
+//
+// Two independent gates, deliberately. snowplow marks a row whose verb came from a
+// userAccessFilter rather than from a read with NonReadVerb (snowplow#179), and that flag is the
+// producer's statement of intent. But a consumer that mints RBAC must not depend on one party
+// alone, so the verb is also checked against readVerbs directly: an unflagged "create" is still not
+// a read, whatever the producer meant.
+//
+// The failure this prevents is an inversion, not a leak. A userAccessFilter asks "may this user do
+// X?"; copying its verb into a generated Role answers that question by GRANTING X to the group
+// being asked about. Three live portal pickers use verb: create (krateo-platformops/core-provider#149).
+func grantable(r Resource) bool {
+	return !r.NonReadVerb && readVerbs[r.Verb]
+}
+
+// partitionGrantable splits a read-set into rows that may be granted and those that may not,
+// preserving order so generated objects stay byte-identical for an unchanged read-set.
+func partitionGrantable(rows []Resource) (keep []Resource, dropped []Resource) {
+	for _, r := range rows {
+		if grantable(r) {
+			keep = append(keep, r)
+			continue
+		}
+		dropped = append(dropped, r)
+	}
+	return keep, dropped
+}
+
+// NonGrantable reports the rows a Generate call will refuse, so a caller can log why a
+// userAccessFilter check produced no grant without duplicating the gate.
+func NonGrantable(rows []Resource) DroppedSummary {
+	_, dropped := partitionGrantable(rows)
+	return summarise(dropped)
+}
+
+// DroppedSummary describes the non-read rows a Generate call refused to grant, so a caller can tell
+// an author why a picker's check produced no grant. Deliberately carries the resource and verb only
+// — never a user identity, which is what a userAccessFilter row is about.
+type DroppedSummary struct {
+	Count     int
+	Resources []string
+}
+
+func summarise(dropped []Resource) DroppedSummary {
+	seen := map[string]bool{}
+	out := DroppedSummary{Count: len(dropped)}
+	for _, r := range dropped {
+		id := r.Resource + ":" + r.Verb
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out.Resources = append(out.Resources, id)
+	}
+	sort.Strings(out.Resources)
+	return out
+}
+
 func Generate(readSet []Resource, group, name string) Generated {
+	readSet, dropped := partitionGrantable(readSet)
+
 	var clusterRows []Resource
 	byNamespace := map[string][]Resource{}
 	for _, r := range readSet {
@@ -45,6 +113,7 @@ func Generate(readSet []Resource, group, name string) Generated {
 	}
 
 	var out Generated
+	out.Dropped = summarise(dropped)
 
 	if len(clusterRows) > 0 {
 		out.ClusterRole = &rbacv1.ClusterRole{
@@ -92,6 +161,15 @@ func Generate(readSet []Resource, group, name string) Generated {
 // lifecycle — apply, digest-hash, lookup, delete — keys off one fixed-name object pair, exactly
 // like the authn ServiceAccount mapping. Verbs are per-row (least privilege, never "*").
 func GenerateClusterScoped(readSet []Resource, group, name string) (*rbacv1.ClusterRole, *rbacv1.ClusterRoleBinding) {
+	// Same gate as Generate. This is a separate entry point used by the deploy path, and fixing one
+	// without the other is exactly how a filter like this comes back.
+	readSet, _ = partitionGrantable(readSet)
+	if len(readSet) == 0 {
+		// A binding to a role granting nothing reads as an intended grant someone broke. Emit
+		// neither.
+		return nil, nil
+	}
+
 	cr := &rbacv1.ClusterRole{
 		// TypeMeta must be set: these objects are applied via the dynamic client
 		// (converted to unstructured), which requires an explicit GVK — a struct

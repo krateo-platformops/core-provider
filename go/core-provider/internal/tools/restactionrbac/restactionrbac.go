@@ -40,6 +40,12 @@ type Resource struct {
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Verb      string `json:"verb"`
+	// NonReadVerb is snowplow's marker that this row's Verb is NOT a read verb — the row came from
+	// a userAccessFilter asking "may this user do X?", not from a read the RESTAction performs
+	// (snowplow#179). It was previously absent from this struct, so the flag was silently dropped
+	// at decode and the verb was copied into a generated Role verbatim, turning a permission CHECK
+	// into a permission GRANT.
+	NonReadVerb bool `json:"nonReadVerb,omitempty"`
 }
 
 // response is snowplow's GET /rbac 200 body.
