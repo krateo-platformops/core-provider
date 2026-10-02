@@ -54,6 +54,29 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.chartInspector.resources | nindent 12 }}
+          {{- if .Values.chartInspector.preStopSleepSeconds }}
+          # preStop sleep closes the terminating-pod dataplane race (#148).
+          #
+          # Endpoint withdrawal is asynchronous: when a pod starts terminating, kube-proxy/the
+          # dataplane may still route a new connection to it for a short window. A caller that dials
+          # the ClusterIP in that window sends a SYN to a pod no longer accepting, and the connection
+          # hangs until the DIALER times out — 30s, from http.DefaultTransport, not the client's
+          # deliberate 300s request timeout. The CDC has no in-reconcile retry, so that reconcile
+          # fails and the composition reports Ready=False until the next pass.
+          #
+          # Sleeping here keeps the container serving while its endpoint is withdrawn, so in-flight
+          # and newly-routed requests complete normally. The pod is already out of the Service by the
+          # time it exits.
+          #
+          # Observed on krateo-057 during an engine roll: Portal/portal went Ready=False on exactly
+          # this dial timeout and self-healed 2m09s later. With 67 composition CRs depending on this
+          # one endpoint for RBAC generation, every restart manufactures unhealthy-looking
+          # compositions that have nothing wrong with them — which is the noise that hides a real one.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.chartInspector.preStopSleepSeconds }}"]
+          {{- end }}
 
           volumeMounts:
             {{- with .Values.chartInspector.volumeMounts }}

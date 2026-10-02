@@ -517,6 +517,12 @@
           "type": "array",
           "title": "topologySpreadConstraints",
           "default": []
+        },
+        "preStopSleepSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10,
+          "description": "Seconds the chart-inspector container keeps serving after SIGTERM, covering asynchronous endpoint withdrawal. Endpoint removal is not atomic with pod termination, so a caller dialing the ClusterIP during that window hangs until its DIALER times out (30s from http.DefaultTransport, not the client's deliberate 300s request timeout) and the reconcile fails with no retry. Set to 0 to omit the preStop hook entirely."
         }
       }
     },
