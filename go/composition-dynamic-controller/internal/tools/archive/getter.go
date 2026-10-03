@@ -375,6 +375,23 @@ func (g *dynamicGetter) searchCompositionDefinition(gvr schema.GroupVersionResou
 		// label (which only a successful reconcile would migrate), so an exact version match
 		// can never succeed and reconciliation wedges. Tolerate the skew when the owner is
 		// unambiguous.
+		//
+		// This tier tolerates version SKEW, not label ABSENCE, and the distinction matters more
+		// than it looks. Read on its own it suggests the krateo.io/composition-version label is
+		// optional -- resolution clearly succeeds here without a matching one -- which in turn
+		// suggests the charts' Kubernetes >= 1.36 floor (the MutatingAdmissionPolicy that stamps
+		// that label) could be lowered. It cannot.
+		//
+		// Everything in this function runs DOWNSTREAM of the controller's ListWatcher, which
+		// carries an exact-equality requirement on that same label: see main.go:329
+		// (labels.NewRequirement(CompositionVersionLabel, selection.Equals, ...)) feeding
+		// main.go:376. An instance with no label is never delivered, so this tier never runs for
+		// one. It rescues an instance whose label is present but stale; it cannot rescue an
+		// instance whose label was never written.
+		//
+		// Noted here rather than only in helm/core-provider/Chart.yaml because this is where a
+		// reader checking whether the floor is load-bearing actually lands, and the answer this
+		// code appears to give in isolation is the wrong one.
 		if !found {
 			var sameKind []*unstructured.Unstructured
 			for i := range all.Items {
