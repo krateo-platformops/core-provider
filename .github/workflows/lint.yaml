@@ -43,7 +43,42 @@ jobs:
               helm dependency build "${dir}" >/dev/null 2>&1 || helm dependency update "${dir}" >/dev/null 2>&1 || true
             fi
             helm lint "${dir}" || fail=1
-            helm template smoke "${dir}" >/dev/null || fail=1
+
+            # Render at the chart's OWN declared floor, not at helm's built-in default.
+            #
+            # `helm template` with no --kube-version renders against the version helm was compiled
+            # for -- v1.34.0 on helm 3.19.0 -- so a chart declaring `kubeVersion: ">=1.36.0-0"` fails
+            # its own smoke test with "chart requires kubeVersion ... which is incompatible with
+            # Kubernetes v1.34.0". Note `helm lint` does NOT enforce kubeVersion, so the failure
+            # appears only here, which makes it read like a template bug rather than a floor.
+            #
+            # Templating at the declared minimum is also a better check than pinning a constant: it
+            # asserts the chart actually renders on the oldest cluster it claims to support, and it
+            # keeps working when a floor moves. Charts with no kubeVersion keep helm's default.
+            kv=$(grep -m1 '^kubeVersion:' "${dir}/Chart.yaml" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [ -n "$kv" ]; then
+              echo "kubeVersion floor declared: rendering at ${kv}"
+              set -- --kube-version "$kv"
+            else
+              set --
+            fi
+
+            # Capture the render instead of discarding it, so the check can assert it PRODUCED
+            # something. `helm template` exits 0 on a chart that renders to nothing (all templates
+            # disabled by values, an empty templates/), which is indistinguishable from a healthy
+            # render when the output goes to /dev/null -- a green tick for a chart that ships no
+            # objects at all.
+            if out=$(helm template smoke "${dir}" "$@" 2>&1); then
+              if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+                echo "::error::${dir}: helm template rendered NOTHING. A chart that emits no objects passes a bare render check for the wrong reason."
+                fail=1
+              else
+                echo "template: rendered $(printf '%s\n' "$out" | grep -c '^---') document(s)"
+              fi
+            else
+              printf '%s\n' "$out"
+              fail=1
+            fi
             echo "::endgroup::"
           done
           exit $fail

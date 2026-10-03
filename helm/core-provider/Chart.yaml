@@ -12,6 +12,24 @@ description: Krateo PlatformOps Core Provider
 # pipeline. Library charts do not define any templates and therefore cannot be deployed.
 type: application
 
+# Kubernetes >= 1.36 is a hard requirement, not a recommendation. This chart ships
+# templates/compositions-version-policy.yaml, a MutatingAdmissionPolicy on
+# admissionregistration.k8s.io/v1 -- the GA shape, which does not exist before 1.36. That policy
+# stamps the krateo.io/composition-version label, and the composition-dynamic-controller watches
+# by it (see compositiondefinitions.go: "must exist in every cluster a composition CRD lives in").
+#
+# Without this floor a 1.35 cluster installs the chart happily and fails at RUNTIME, in the worst
+# available shape: compositions are admitted unlabelled, no CDC watch matches them, and the
+# install looks healthy while reconciling nothing. An install-time refusal is strictly better
+# than a silent no-op, which is the whole reason this line exists.
+#
+# 1.36 also subsumes the 1.33 CRD-validation-ratcheting floor: several paths here write
+# CompositionDefinition with a full-object Update (compositiondefinitions.go:289,
+# compositionmirror.go:141/150/298), which re-validates the whole object. Do not "simplify" this
+# to 1.33 on ratcheting grounds -- the binding constraint is the policy, and it is higher.
+kubeVersion: ">=1.36.0-0"
+
+
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
