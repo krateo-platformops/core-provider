@@ -21,6 +21,10 @@ type: application
 # will ever label or reconcile. These CRDs have no use without the controller, and the controller
 # needs 1.36.
 #
+# Like the other two this DOES exclude supported clusters -- 1.33, 1.34 and 1.35 are all current
+# upstream -- but here the exclusion buys coherence rather than correctness, which is why it is the
+# one of the three stated as a choice rather than a requirement.
+#
 # This is the weakest-grounded of the three. If a split install ever needs the CRDs on a cluster
 # being upgraded toward 1.36, this is the line to revisit -- the other two are not.
 kubeVersion: ">=1.36.0-0"
