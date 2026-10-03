@@ -7,11 +7,12 @@
 // version GC actually SAFE, or can it prune a version out from under a live composition instance?
 //
 // It builds a generated composition CRD with vacuum(storage) + v1-0-0 + v2-0-0(current) and probes:
-//   S1 safe prune      — a stale served version with no instances/refs is prunable
-//   S2 label guard     — an instance carrying composition-version=v1-0-0 protects v1-0-0
-//   S3 the danger      — an instance that EXISTS at v1-0-0 but LACKS the label: is it protected?
-//   S4 cross-reference — another CompositionDefinition on v1-0-0 protects it
-//   S5 no-op safety    — vacuum and the current version are never prunable
+//
+//	S1 safe prune      — a stale served version with no instances/refs is prunable
+//	S2 label guard     — an instance carrying composition-version=v1-0-0 protects v1-0-0
+//	S3 the danger      — an instance that EXISTS at v1-0-0 but LACKS the label: is it protected?
+//	S4 cross-reference — another CompositionDefinition on v1-0-0 protects it
+//	S5 no-op safety    — vacuum and the current version are never prunable
 //
 // Requires the CompositionDefinition CRD installed (scripts install crds/ before `go test`).
 package compositiondefinitions

@@ -6,13 +6,15 @@
 // This is the honest reproduction of the "umbrella stops emitting Compositions until the cdc is
 // restarted" symptom and its fix. It uses the REAL production code paths (NewRESTMapper +
 // WatchCRDsAndInvalidate), registers a CRD MID-RUN against a live kube-apiserver, and proves:
+//
 //   - WATCHED mapper: after the CRD is created, the mapper resolves the new kind on its own within the
 //     coalescing window — NO process restart (the fix works end-to-end).
+//
 //   - UNWATCHED mapper (negative control): the same mid-run CRD stays invisible (stale) until an
 //     explicit Reset() — i.e. exactly what a controller restart used to do by hand.
 //
-// Run: KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.36.0) \
-//        go test -tags envtest ./internal/tools/dynamic/ -run Envtest -v
+//     Run: KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.36.0) \
+//     go test -tags envtest ./internal/tools/dynamic/ -run Envtest -v
 package dynamic
 
 import (
