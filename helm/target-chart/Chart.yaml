@@ -15,6 +15,13 @@ type: application
 # MutatingAdmissionPolicy at all -- so it installing "successfully" there is exactly the silent
 # failure. The target is also the cluster nobody checks the version of, because it is not the
 # management cluster where core-provider runs.
+#
+# This floor DOES exclude supported clusters, deliberately. 1.33, 1.34 and 1.35 are all current
+# upstream and can no longer be used as a target. On them this chart's policy cannot be served, so
+# nothing stamps krateo.io/composition-version on the target's compositions, and the
+# composition-dynamic-controller's exact-equality selector
+# (composition-dynamic-controller/main.go:329) matches none of them. The bootstrap reports success
+# and the target reconciles nothing. A refused install is the better failure.
 kubeVersion: ">=1.36.0-0"
 
 

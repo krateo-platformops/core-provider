@@ -12,21 +12,31 @@ description: Krateo PlatformOps Core Provider
 # pipeline. Library charts do not define any templates and therefore cannot be deployed.
 type: application
 
-# Kubernetes >= 1.36 is a hard requirement, not a recommendation. This chart ships
-# templates/compositions-version-policy.yaml, a MutatingAdmissionPolicy on
-# admissionregistration.k8s.io/v1 -- the GA shape, which does not exist before 1.36. That policy
-# stamps the krateo.io/composition-version label, and the composition-dynamic-controller watches
-# by it (see compositiondefinitions.go: "must exist in every cluster a composition CRD lives in").
+# Minimum Kubernetes version. NOT a routine compatibility bound -- it is a correctness requirement,
+# and two independent ones. 1.36 is the higher of the two, not a rounding.
 #
-# Without this floor a 1.35 cluster installs the chart happily and fails at RUNTIME, in the worst
-# available shape: compositions are admitted unlabelled, no CDC watch matches them, and the
-# install looks healthy while reconciling nothing. An install-time refusal is strictly better
-# than a silent no-op, which is the whole reason this line exists.
+# (1) MutatingAdmissionPolicy, GA on admissionregistration.k8s.io/v1 from 1.36. This chart ships it
+# as templates/compositions-version-policy.yaml, and it is what stamps krateo.io/composition-version
+# at admission. The composition-dynamic-controller builds an EXACT-equality requirement on that
+# label -- labels.NewRequirement(CompositionVersionLabel, selection.Equals, ...) at
+# composition-dynamic-controller/main.go:329 -- and hands it to the ListWatcher (main.go:376). So an
+# unlabelled composition is never delivered to the controller at all.
 #
-# 1.36 also subsumes the 1.33 CRD-validation-ratcheting floor: several paths here write
-# CompositionDefinition with a full-object Update (compositiondefinitions.go:289,
-# compositionmirror.go:141/150/298), which re-validates the whole object. Do not "simplify" this
-# to 1.33 on ratcheting grounds -- the binding constraint is the policy, and it is higher.
+# Note the three-tier resolution in archive/getter.go does NOT rescue this, though it reads as
+# though it might: tier 3 ("a single definition serving this kind") tolerates version SKEW, and it
+# runs downstream of the watch filter. An instance the ListWatcher never yields is never resolved by
+# anything.
+#
+# (2) CRD validation ratcheting, GA at 1.33. Several paths write CompositionDefinition with a
+# full-object Update (compositiondefinitions.go:289, compositionmirror.go:141/150/298), which
+# re-validates the whole object. Still a real requirement; it is simply no longer the binding one.
+# Do not "simplify" the floor to 1.33 on ratcheting grounds -- the policy is binding and higher.
+#
+# This floor DOES exclude supported clusters, deliberately. 1.33, 1.34 and 1.35 are all current
+# upstream and can no longer install this chart. Those versions do not serve
+# MutatingAdmissionPolicy, so nothing writes krateo.io/composition-version, the controller's exact
+# selector matches nothing, and the install comes up green while reconciling no composition at all.
+# A refused install is the better failure, and that is the entire reason this line exists.
 kubeVersion: ">=1.36.0-0"
 
 
