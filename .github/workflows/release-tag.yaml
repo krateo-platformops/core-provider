@@ -30,6 +30,7 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/core-provider
+      fmt_check: true
       crd_drift: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
@@ -38,6 +39,7 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/composition-dynamic-controller
+      fmt_check: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
@@ -45,6 +47,7 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/chart-inspector
+      fmt_check: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
