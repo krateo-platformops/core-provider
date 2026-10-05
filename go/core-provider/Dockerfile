@@ -1,5 +1,5 @@
 # Build phase
-FROM golang:1.25.6-bookworm AS builder
+FROM golang:1.26.0-bookworm AS builder
 LABEL stage=builder
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -36,7 +36,7 @@ RUN CGO_ENABLED=0 GO111MODULE=on go build -a \
 
 # Deployment environment
 # ----------------------
-FROM golang:1.25.6-alpine
+FROM golang:1.26.0-alpine
 
 ENV GOCACHE='/tmp/.cache'
 RUN mkdir -p "$GOCACHE/go-build" && chmod -R 1777 "$GOCACHE"
