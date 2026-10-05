@@ -5,12 +5,18 @@
 // contract that things outside this repository depend on, and a change to it is silent at the point
 // of change.
 //
-// The downstream consumer that prompted this: krateo-gcp-blueprint (and the AWS and Azure
-// catalogues alongside it) generate Composition CRDs for ~2,000 charts across three repositories by
-// reproducing this derivation. If Kind derivation moves, every Composition type in those catalogues
-// is renamed, and nothing in this repository's tests would have said so. A reviewer changing
-// strutil.ToGolangName or the flect version would see this file fail and have to decide
-// deliberately -- which is the whole point.
+// The downstream consumers that prompted this: the krateo-aws-blueprint, krateo-gcp-blueprint and
+// krateo-azure-blueprint catalogues generate Composition CRDs by reproducing this derivation --
+// roughly 737 charts at first release (AWS 242, GCP 206 Config Connector stable resources, Azure
+// 289 GA), and growing as each provider's surface grows.
+//
+// They share one generator core with per-provider profiles, so the derivation exists in exactly ONE
+// place across all three. That makes this guard more valuable rather than less: a single upstream
+// flect change would rename every Composition type in all three catalogues at once, through one
+// code path, and nothing in this repository's tests would have said so.
+//
+// A reviewer changing strutil.ToGolangName or the flect version now sees this file fail and has to
+// decide deliberately -- which is the whole point.
 //
 // Note what this does NOT cover, so the next reader does not over-trust it: the RESOURCE (plural)
 // is not derived here. Pluralizer.GVKtoGVR calls plumbing/kubeutil/plurals.Get, whose default
@@ -94,7 +100,8 @@ func TestGroupVersionKind_Characterization(t *testing.T) {
 			}
 			if gvk.Kind != tc.wantKind {
 				t.Errorf("Kind for chart %q = %q, want %q\n"+
-					"This derivation is reproduced by the GCP/AWS/Azure blueprint catalogues (~2,000 charts).\n"+
+					"This derivation is reproduced by the AWS/GCP/Azure blueprint catalogues (~737 charts at\n"+
+					"first release) through one shared generator core.\n"+
 					"Changing it renames every Composition type they generate. If the change is intended, "+
 					"update this table AND tell those repos.", tc.chart, gvk.Kind, tc.wantKind)
 			}
