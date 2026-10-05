@@ -30,10 +30,21 @@ type: application
 kubeVersion: ">=1.36.0-0"
 
 
-# This is the chart version. This version number should be incremented each time you make changes
-# to the chart and its templates, including the app version.
-# Versions are expected to follow Semantic Versioning (https://semver.org/)
-version: 0.36.16
+# Stamped by the release workflow from the tag, like the other two charts here.
+#
+# This was a hardcoded 0.36.16 until #157. Because the release republishes every chart on every tag,
+# a fixed version meant each release overwrote charts/core-provider-crds:0.36.16 with new content
+# and orphaned what was there: 30 pushes, 1 surviving tag, 29 untagged. A consumer pinning 0.36.16
+# got whatever the most recent release happened to produce.
+#
+# The worked example is the Kubernetes floor added in #154: it landed in this chart and shipped to
+# 0.36.16, so every existing pin silently acquired `kubeVersion: ">=1.36.0-0"` with no version
+# change to signal it. A pin whose meaning changes underneath it is the opposite of a pin.
+#
+# NOTE this chart now moves with the core-provider tag line rather than its own. That is the point
+# -- it makes each release's CRD chart independently addressable and diffable -- but it means any
+# consumer pinning 0.36.16 must move to the tag version, because 0.36.16 will no longer be produced.
+version: CHART_VERSION
 
 
 home: https://krateo.io
