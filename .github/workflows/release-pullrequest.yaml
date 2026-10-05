@@ -56,6 +56,7 @@ jobs:
     with:
       module: go/core-provider
       fmt_check: true
+      tidy_check: true
       crd_drift: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
@@ -65,6 +66,7 @@ jobs:
     with:
       module: go/composition-dynamic-controller
       fmt_check: true
+      tidy_check: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
@@ -73,6 +75,7 @@ jobs:
     with:
       module: go/chart-inspector
       fmt_check: true
+      tidy_check: true
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
