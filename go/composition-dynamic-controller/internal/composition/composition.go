@@ -79,7 +79,13 @@ const (
 	// uninstall, so their external resources may be left behind (#108). A Warning because abandoning
 	// remote state is a real consequence, not routine.
 	reasonChildTeardownAbandoned = "ChildTeardownAbandoned"
-	reasonUpdated                = "CompositionUpdated"
+
+	// Raised when the pre-teardown RBAC refresh could not run (chart-inspector down, generation
+	// failed). The teardown proceeds on the grants already in place, which may not be enough — a
+	// Warning so a subsequent rollback/uninstall denial has a recorded cause rather than looking
+	// like a fresh permissions mystery (#167).
+	reasonRBACRefreshSkipped = "RBACRefreshSkipped"
+	reasonUpdated            = "CompositionUpdated"
 
 	// Environment variables
 	helmMaxHistoryEnvvar     = "HELM_MAX_HISTORY"
@@ -259,6 +265,27 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}, nil
 	}
 
+	// RBAC FIRST — before any helm call, including the stuck-operation recovery below.
+	//
+	// Every helm call in this function runs under the composition's own ServiceAccount, so the
+	// derived grants are a PRECONDITION of all of them. This block used to sit after the recovery,
+	// which made a wedged release unrecoverable: the recovery's Rollback needs `get` on the chart's
+	// resources, it fails without them, and the function returns before ever reaching the only call
+	// that can repair the grants (core-provider#167). That is not hypothetical — a binding left
+	// pointing at a deleted ServiceAccount after a version bump (core-provider#166) wedged the portal
+	// composition for 22 hours, because the one block able to re-subject it was sequenced behind the
+	// operation that needed it. ApplyRBAC can always fix this: the static baseline grants
+	// rbac.authorization.k8s.io/{roles,rolebindings,clusterroles,clusterrolebindings}.
+	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+		cond := condition.Unavailable()
+		cond.Message = err.Error()
+		unstructuredtools.SetConditions(mg, cond)
+		if _, uerr := updateStatusWithRetry(ctx, mg, updateOpts); uerr != nil {
+			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", uerr)
+		}
+		return controller.ExternalObservation{}, err
+	}
+
 	if isIncompleteHelmOperation(rel.Status) {
 		// A pending-* OR uninstalling status means a helm operation is in flight OR its process died
 		// mid-flight — helm labels both the same and never re-labels a crash. (StatusUninstalling is
@@ -312,52 +339,6 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
 		}
-	}
-
-	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
-	if err != nil {
-		return controller.ExternalObservation{}, fmt.Errorf("converting GVK to GVR: %w", err)
-	}
-
-	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
-	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
-	// Get Resources and generate RBAC
-	generated, err := rbgen.
-		WithBaseName(releaseName).
-		Generate(ctx, rbacgen.Parameters{
-			CompositionName:                mg.GetName(),
-			CompositionNamespace:           mg.GetNamespace(),
-			CompositionGVR:                 compositionGVR,
-			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
-			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
-			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
-		})
-	if err != nil {
-		retErr := fmt.Errorf("generating RBAC using chart-inspector: %w", err)
-		condition := condition.Unavailable()
-		condition.Message = retErr.Error()
-		unstructuredtools.SetConditions(mg, condition)
-		_, err = updateStatusWithRetry(ctx, mg, updateOpts)
-		if err != nil {
-			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", err)
-		}
-		return controller.ExternalObservation{}, fmt.Errorf("generating RBAC using chart-inspector: %w", retErr)
-	}
-	rbInstaller := rbac.NewRBACInstaller(dyn)
-	helmMetrics := metrics.NewHelmMetrics(ctx)
-	err = helmMetrics.TimedRBAC(func() error {
-		return rbInstaller.ApplyRBAC(generated)
-	})
-	if err != nil {
-		retErr := fmt.Errorf("applying rbac: %w", err)
-		condition := condition.Unavailable()
-		condition.Message = retErr.Error()
-		unstructuredtools.SetConditions(mg, condition)
-		_, err = updateStatusWithRetry(ctx, mg, updateOpts)
-		if err != nil {
-			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", err)
-		}
-		return controller.ExternalObservation{}, retErr
 	}
 
 	tracer := tracer.NewTracer(ctx, meta.IsVerbose(mg))
@@ -936,6 +917,23 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
+	// RBAC FIRST — before the recovery below and the uninstall that follows it. Both run under this
+	// composition's ServiceAccount and both need the chart's OWN kinds: the rollback `get`s every
+	// resource in the manifest, the uninstall deletes them. If the binding has drifted off a replaced
+	// ServiceAccount (core-provider#166), every route out of here is denied and the composition loops
+	// on rollback->uninstall forever. Observe cannot help: it returns at the deletionTimestamp check,
+	// so this handler is the ONLY one that can repair the grants of a composition being deleted
+	// (core-provider#167).
+	//
+	// Deliberately NOT fatal, unlike the Observe path. A teardown must not become impossible because
+	// chart-inspector is unavailable — that trades one wedge for another. Say so and carry on with
+	// whatever grants are already in place; the uninstall may well succeed on them.
+	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+		log.Info("Could not refresh derived RBAC before teardown; continuing with the grants already in place",
+			"release", releaseName, "error", err.Error())
+		h.eventRecorder.Event(mg, event.Warning(reasonRBACRefreshSkipped, "Delete", err))
+	}
+
 	// A release stuck mid-uninstall (a prior Delete that died after helm began the uninstall) can never
 	// be re-driven: helm refuses to operate on a release locked in `uninstalling`, so the Uninstall
 	// below would fail every reconcile and the composition would wedge in Deleting forever. Mirror the
@@ -1047,6 +1045,46 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("updating cr with values: %w", err)
 	}
 
+	return nil
+}
+
+// applyDerivedRBAC derives this composition's RBAC from its chart (via chart-inspector) and applies
+// it. Applying also RE-SUBJECTS the generated bindings to the controller's CURRENT ServiceAccount,
+// which is the part that is easy to miss and the reason this is called before any helm operation.
+//
+// The generated objects are RELEASE-scoped (`<release>-krateo-rbac`, stable across versions), while
+// the ServiceAccount is {resource}-{apiVersion}-scoped and is REPLACED on every chart bump. Nothing
+// else repoints the binding, so between a bump and the next successful apply the composition holds a
+// binding naming a ServiceAccount that no longer exists — RBAC is name-based, so it resolves against
+// nothing and the controller silently runs on the static baseline alone (core-provider#166).
+func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, dyn dynamic.Interface, releaseName string) error {
+	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
+	if err != nil {
+		return fmt.Errorf("converting GVK to GVR: %w", err)
+	}
+
+	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
+	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
+	generated, err := rbgen.
+		WithBaseName(releaseName).
+		Generate(ctx, rbacgen.Parameters{
+			CompositionName:                mg.GetName(),
+			CompositionNamespace:           mg.GetNamespace(),
+			CompositionGVR:                 compositionGVR,
+			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
+			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
+			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
+		})
+	if err != nil {
+		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
+	}
+
+	rbInstaller := rbac.NewRBACInstaller(dyn)
+	if err := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
+		return rbInstaller.ApplyRBAC(generated)
+	}); err != nil {
+		return fmt.Errorf("applying rbac: %w", err)
+	}
 	return nil
 }
 
