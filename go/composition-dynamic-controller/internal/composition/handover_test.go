@@ -4,14 +4,17 @@ import (
 	"testing"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
+	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // crWithVersion builds a composition CR whose apiVersion encodes crVersion (e.g. "v0-1-7"), plus any
-// extra labels. isVersionMigrationHandover derives the CR version from the apiVersion alone, so the
-// labels are deliberately irrelevant — the tests below prove the handover is detected with and
-// without the krateo.io/composition-definition-* labels the umbrella normally stamps.
+// extra labels, and NO origin-version annotation — so it exercises the fallback path for objects
+// created before that stamp existed. The labels are deliberately irrelevant: the tests below prove
+// the handover is detected with and without the krateo.io/composition-definition-* labels the
+// umbrella normally stamps. For the stamped case, which is what a CRD re-point turns on, see
+// crWithOrigin.
 func crWithVersion(crVersion string, labels map[string]string) *unstructured.Unstructured {
 	mg := &unstructured.Unstructured{}
 	mg.SetAPIVersion("composition.krateo.io/" + crVersion)
@@ -21,6 +24,20 @@ func crWithVersion(crVersion string, labels map[string]string) *unstructured.Uns
 	if labels != nil {
 		mg.SetLabels(labels)
 	}
+	return mg
+}
+
+// crWithOrigin builds a CR as the apiserver would return it AFTER a CRD re-point: the object was
+// created at originVersion, but a read reports servedVersion because that is the only version the
+// CRD now serves. The krateo.io/composition-version label is re-stamped on a bump too, so it is set
+// to the served version here as well — leaving the annotation as the only surviving witness.
+func crWithOrigin(servedVersion, originVersion string) *unstructured.Unstructured {
+	mg := crWithVersion(servedVersion, map[string]string{
+		"krateo.io/composition-version": servedVersion,
+	})
+	mg.SetAnnotations(map[string]string{
+		compositionMeta.AnnotationKeyOriginVersion: originVersion,
+	})
 	return mg
 }
 
@@ -98,6 +115,33 @@ func TestIsVersionMigrationHandover(t *testing.T) {
 			cr:         crWithVersion("v0-2-190", nil),
 			pkg:        pkgWithChartVersion("0.2.193"),
 			wantResult: true,
+		},
+		{
+			// core-provider#168, the case this annotation exists for. krateo-057: portal was created
+			// at v1-8-70, the 1.8.71 bump re-pointed the CRD before the old-version controller
+			// processed the prune, and the new-version controller read the terminating CR at
+			// v1-8-71. Comparing the DELIVERED apiVersion gives v1-8-71 == v1-8-71 -> "genuine
+			// deletion" -> the release and ~400 children are uninstalled on a version bump.
+			name:       "re-point race: created at v1-8-70, served as v1-8-71, CD at 1.8.71 -> handover",
+			cr:         crWithOrigin("v1-8-71", "v1-8-70"),
+			pkg:        pkgWithChartVersion("1.8.71"),
+			wantResult: true,
+		},
+		{
+			// The inverse control: a CR genuinely created at the version the CD still pins must
+			// still uninstall. Without this, "always hand over" would pass the case above.
+			name:       "stamped origin equals the CD version -> genuine deletion",
+			cr:         crWithOrigin("v1-8-71", "v1-8-71"),
+			pkg:        pkgWithChartVersion("1.8.71"),
+			wantResult: false,
+		},
+		{
+			// The stamp wins over the served apiVersion, not merely when they disagree in the
+			// direction above: a CR created at a NEWER version than the CD pins is not a handover.
+			name:       "stamped origin ahead of the CD version -> not a handover",
+			cr:         crWithOrigin("v1-8-70", "v1-8-71"),
+			pkg:        pkgWithChartVersion("1.8.71"),
+			wantResult: false,
 		},
 	}
 

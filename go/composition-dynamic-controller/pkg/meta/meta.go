@@ -34,6 +34,16 @@ const (
 	// that indicates the time when the reconciliation was gracefully paused.
 	// This is used to track how long the resource has been paused.
 	AnnotationKeyReconciliationGracefullyPausedTime = "krateo.io/gracefully-paused-time"
+
+	// AnnotationKeyOriginVersion records the apiVersion version the composition was CREATED at
+	// (e.g. "v1-8-70"), stamped once and never rewritten.
+	//
+	// Nothing else on the object survives a CRD re-point. The apiVersion a read returns is whatever
+	// the CRD serves NOW, not what the object was written as, and CompositionVersionLabel is
+	// re-stamped on a bump. A composition created at v1-8-70 therefore reads back as v1-8-71 the
+	// moment core-provider re-points the CRD — which is exactly when something needs to tell the two
+	// apart (core-provider#168).
+	AnnotationKeyOriginVersion = "krateo.io/origin-version"
 )
 
 // CalculateReleaseName generates a release name for the Helm chart based on the name and UID of the resource.
@@ -99,6 +109,31 @@ func SetCompositionDefinitionLabels(o metav1.Object, cdInfo CompositionDefinitio
 // annotation set to `true`.
 func IsGracefullyPaused(o metav1.Object) bool {
 	return o.GetAnnotations()[AnnotationKeyReconciliationGracefullyPaused] == "true"
+}
+
+// SetOriginVersion stamps the version the object was created at, ONCE. A second call is a no-op:
+// the value's only use is to survive the CRD re-point that rewrites every other version on the
+// object, so a function that could overwrite it would have no more value than the apiVersion it
+// exists to replace. Callers may invoke it on every reconcile; only the first one writes.
+func SetOriginVersion(o metav1.Object, version string) {
+	if version == "" {
+		return
+	}
+	if _, ok := o.GetAnnotations()[AnnotationKeyOriginVersion]; ok {
+		return
+	}
+	meta.AddAnnotations(o, map[string]string{AnnotationKeyOriginVersion: version})
+}
+
+// GetOriginVersion returns the stamped origin version and whether it was present. Absent means the
+// object predates the stamp, not that it has no origin — callers fall back to the delivered
+// apiVersion, which is what they used before it existed.
+func GetOriginVersion(o metav1.Object) (string, bool) {
+	v, ok := o.GetAnnotations()[AnnotationKeyOriginVersion]
+	if !ok || v == "" {
+		return "", false
+	}
+	return v, true
 }
 
 func SetGracefullyPausedTime(o metav1.Object, t time.Time) {

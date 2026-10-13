@@ -541,6 +541,16 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		Namespace: pkg.CompositionDefinitionInfo.Namespace,
 		GVR:       pkg.CompositionDefinitionInfo.GVR,
 	})
+	// Record the version this instance was created at, before a future CRD re-point can rewrite what
+	// a read reports. isVersionMigrationHandover has to tell "created at the old version and now
+	// being pruned" from "created at the current version and genuinely being deleted", and after the
+	// re-point this annotation is the only thing on the object that still separates them (#168).
+	//
+	// Stamped HERE and nowhere else, deliberately. Create runs when the release does not yet exist,
+	// so the delivered apiVersion is this instance's true origin. Doing the same in Update would
+	// stamp whatever version is served at that moment onto an object that may have been created at
+	// an older one — cementing a wrong answer where the fallback would have given today's.
+	compositionMeta.SetOriginVersion(mg, mg.GroupVersionKind().Version)
 	if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
 		return fmt.Errorf("stamping composition-definition labels: %w", err)
 	}
@@ -1054,20 +1064,27 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 // chart-version bump (its GVK changing v<old> -> v<new>) rather than a genuine removal, in which
 // case the helm release must survive for the new-version controller to upgrade in place.
 //
-// It compares this CR's own version — taken from its apiVersion (mg.GroupVersionKind().Version,
-// e.g. "v0-1-7"), which is ALWAYS present and independent of any label — against the owning
-// CompositionDefinition's current chart version. That version is pkg.Version: the getter resolves
-// the owning CD (via the definition-ref labels when present, else a robust namespace search that
-// tolerates label skew) and reads its spec.chart.version, so this check does NOT depend on the
+// It compares the version this CR was CREATED at — krateo.io/origin-version, stamped once in
+// Create, falling back to the delivered apiVersion for objects older than the stamp — against the
+// owning CompositionDefinition's current chart version. That version is pkg.Version: the getter
+// resolves the owning CD (via the definition-ref labels when present, else a robust namespace search
+// that tolerates label skew) and reads its spec.chart.version, so this check does NOT depend on the
 // krateo.io/composition-definition-* / composition-version labels being present. Normalizing the
 // CD's semver ("0.1.8" -> "v0-1-8") and comparing:
 //   - CD version == this CR's version: no migration -> NOT a handover (uninstall).
 //   - CD version != this CR's version: the definition already advanced to the new version while
 //     this old-version CR is pruned -> handover (skip uninstall).
 //
-// This is race-free because the CompositionDefinition's version is advanced before the old CR is
-// pruned. Crucially it is fail-safe: a failed install that never stamped the composition-definition-*
-// labels no longer bails to "uninstall" — the owning CD is still resolved from the package info, so a
+// This comment used to claim the comparison was race-free "because the CompositionDefinition's
+// version is advanced before the old CR is pruned". That was false, and the reasoning is worth
+// keeping as a warning: the CD does advance first, but the value being compared against it was read
+// from the delivered apiVersion, which the CRD re-point rewrites underneath an in-flight Delete. The
+// ordering of the two WRITES said nothing about what the later READ would return. See
+// core-provider#168 and the comment at the GetOriginVersion call below; legacy objects without the
+// stamp still carry that race.
+//
+// It is, separately, fail-safe: a failed install that never stamped the composition-definition-*
+// labels does not bail to "uninstall" — the owning CD is still resolved from the package info, so a
 // version bump is detected and the destructive uninstall is skipped. When the owning CD genuinely
 // cannot be resolved the package getter fails UPSTREAM (Delete returns an error and is retried)
 // rather than reaching this check, so a version bump can never trigger a destructive uninstall.
@@ -1075,7 +1092,27 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 	if pkg == nil || pkg.Version == "" {
 		return false
 	}
-	crVersion := mg.GroupVersionKind().Version
+	// Prefer the stamped origin version over the delivered apiVersion.
+	//
+	// mg.GroupVersionKind().Version is whatever the CRD serves at the moment of the read, not the
+	// version the object was written at, and core-provider re-points the CRD to serve exactly one
+	// version on a chart bump. So the comparison below used to be a race between the umbrella's
+	// prune and that re-point: while the old version was still served, the old-version controller
+	// read its CR at the old version and the handover was correctly detected; once the re-point
+	// landed and the old controller was gone, the NEW-version controller picked up the terminating
+	// CR, read it at the served version, found crVersion == cdVersion, and took the DESTRUCTIVE
+	// branch — uninstalling a release on what was only a version bump (core-provider#168).
+	//
+	// Both outcomes were observed on krateo-057 in the same roll: frontend 1.8.1 -> 1.8.2 won the
+	// race and upgraded in place; portal 1.8.70 -> 1.8.71 lost it and began tearing itself down.
+	// Losing is silent, which is why this is preferred rather than merely added.
+	//
+	// Falls back to the apiVersion for objects created before the stamp existed: they keep exactly
+	// today's behaviour, race included, rather than being misread as version-less.
+	crVersion, ok := compositionMeta.GetOriginVersion(mg)
+	if !ok {
+		crVersion = mg.GroupVersionKind().Version
+	}
 	if crVersion == "" {
 		return false
 	}

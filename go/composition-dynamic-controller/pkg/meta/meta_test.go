@@ -482,3 +482,42 @@ func TestCalculateReleaseName(t *testing.T) {
 		})
 	}
 }
+
+// The whole value of the origin stamp is that it does not move. Every other version on the object
+// (the apiVersion a read returns, the composition-version label) is rewritten when core-provider
+// re-points the CRD, which is precisely when isVersionMigrationHandover needs to tell the version
+// an instance was created at from the one now being served (core-provider#168). A SetOriginVersion
+// that could overwrite would be worth no more than the apiVersion it replaces.
+func TestSetOriginVersionWritesOnce(t *testing.T) {
+	obj := &unstructured.Unstructured{}
+
+	SetOriginVersion(obj, "v1-8-70")
+	if got, ok := GetOriginVersion(obj); !ok || got != "v1-8-70" {
+		t.Fatalf("first stamp: GetOriginVersion() = %q, %v; want %q, true", got, ok, "v1-8-70")
+	}
+
+	// A CRD re-point has happened and the object now reads as v1-8-71. Re-entering the create path
+	// must not launder the original value.
+	SetOriginVersion(obj, "v1-8-71")
+	if got, _ := GetOriginVersion(obj); got != "v1-8-70" {
+		t.Errorf("after re-stamp: GetOriginVersion() = %q, want %q — the stamp was overwritten, so a "+
+			"pruned CR would compare equal to the CD and take the destructive uninstall branch", got, "v1-8-70")
+	}
+}
+
+func TestOriginVersionAbsentAndEmpty(t *testing.T) {
+	// Absent: callers must fall back to the delivered apiVersion rather than treat the composition
+	// as version-less, so that objects predating the stamp keep their previous behaviour.
+	if got, ok := GetOriginVersion(&unstructured.Unstructured{}); ok || got != "" {
+		t.Errorf("unstamped object: GetOriginVersion() = %q, %v; want \"\", false", got, ok)
+	}
+
+	// An empty version is not a value worth recording: stamping it would make the object look
+	// stamped while carrying nothing, which reads as "created at no version" instead of "unknown".
+	obj := &unstructured.Unstructured{}
+	SetOriginVersion(obj, "")
+	if _, ok := GetOriginVersion(obj); ok {
+		t.Error("stamping an empty version marked the object as stamped; it must stay unstamped so " +
+			"the apiVersion fallback still applies")
+	}
+}
