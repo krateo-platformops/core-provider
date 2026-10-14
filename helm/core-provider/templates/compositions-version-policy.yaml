@@ -28,10 +28,13 @@ spec:
   failurePolicy: Fail
   reinvocationPolicy: Never
   mutations:
-    - patchType: ApplyConfiguration
-      applyConfiguration:
-        expression: >
-          Object{ metadata: Object.metadata{ labels: {"krateo.io/composition-version": request.requestKind.version} } }
+    # Must stay byte-identical to policy.objects() in
+    # go/core-provider/internal/tools/policy/policy.go. TestChartPolicyMatchesGeneratedPolicy
+    # fails this chart if it drifts; see the header above for why that matters.
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: |-
+          has(object.metadata.labels) ? [JSONPatch{op: "add", path: "/metadata/labels/" + jsonpatch.escapeKey("krateo.io/composition-version"), value: request.requestKind.version}] : [JSONPatch{op: "add", path: "/metadata/labels", value: {"krateo.io/composition-version": request.requestKind.version}}]
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding

@@ -407,13 +407,34 @@ func (e *external) setTargetStatus(cr *compositiondefinitionsv1alpha1.Compositio
 	cr.Status.Target = ts
 }
 
-// ensureCompositionVersionPolicy projects the cluster-wide composition-version
-// MutatingAdmissionPolicy into a remote target. The label it stamps is what per-version
-// listing/migration and safe deletion rely on; for local targets the management chart
-// already ships the policy, so this only acts on remote targets. Create-if-absent, so it
-// never fights a chart- or operator-managed policy already present in the target.
+// ensureCompositionVersionPolicy makes sure the cluster-wide composition-version
+// MutatingAdmissionPolicy is present and current in the cluster the compositions live in. The
+// label it stamps is what per-version listing/migration and safe deletion rely on.
+//
+// The two targets get different treatment, and the difference is the point.
+//
+// REMOTE: project it. Create-if-absent, so it never fights a chart- or operator-managed policy
+// already present in the target, then migrate a pre-#66 one. Fatal on error: without the policy
+// nothing in the target stamps the label, and every composition there is invisible to its cdc.
+//
+// LOCAL: migrate only, never create. The chart owns this object on the management cluster (on
+// krateo-057 it is helm release `installer` in `krateo-system`, via the core-provider subchart),
+// so creating it from here would produce an object without helm's ownership metadata and the next
+// `helm upgrade` would fail with "invalid ownership metadata" — wedging the umbrella over an
+// object the chart installs anyway.
+//
+// The local migration is deliberately NOT fatal. It is a stopgap for clusters still carrying the
+// pre-#66 ApplyConfiguration mutation (#173); the real repair is the corrected chart, which lands
+// on the next roll. Failing the reconcile because a best-effort migration failed would trade a
+// latent admission bug for a certain reconcile wedge, which is the wrong direction — the same
+// reasoning as Delete's non-fatal RBAC refresh in #167.
 func (e *external) ensureCompositionVersionPolicy(ctx context.Context) error {
 	if !e.remote {
+		if err := policy.UpgradeLegacyCompositionVersionPolicy(ctx, e.kube); err != nil {
+			e.log.Info("Skipped composition-version policy migration",
+				"reason", err.Error(),
+				"effect", "a pre-#66 ApplyConfiguration mutation may still be in place; see core-provider#173")
+		}
 		return nil
 	}
 	if err := policy.EnsureCompositionVersionPolicy(ctx, e.kube); err != nil {

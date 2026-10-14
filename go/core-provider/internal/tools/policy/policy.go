@@ -110,6 +110,12 @@ func objects() (*unstructured.Unstructured, *unstructured.Unstructured) {
 // The policy is a cluster singleton shared by every composition CRD, so it is
 // intentionally never removed on CompositionDefinition deletion.
 //
+// For REMOTE targets only. On the management cluster the chart owns this object, and
+// creating it from here would leave it without helm's ownership metadata — which makes the
+// next `helm upgrade` fail with "invalid ownership metadata", wedging the umbrella for the
+// sake of an object the chart was going to install anyway. Local callers want
+// UpgradeLegacyCompositionVersionPolicy, which never creates.
+//
 // Requires the GA MutatingAdmissionPolicy API (admissionregistration.k8s.io/v1),
 // i.e. Kubernetes >= 1.36 on the target.
 func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) error {
@@ -121,6 +127,22 @@ func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) err
 		}
 	}
 
+	return upgradeLegacyPolicy(ctx, kube)
+}
+
+// UpgradeLegacyCompositionVersionPolicy migrates an existing pre-#66 policy onto the JSON Patch
+// form WITHOUT creating anything. It is the local-target entry point.
+//
+// The management cluster's policy is helm-owned (on krateo-057: release-name `installer`,
+// namespace `krateo-system`, via the core-provider subchart of the umbrella), so a chart upgrade
+// is what properly repairs it and this is the stopgap for clusters that will not take one soon.
+// Creating is deliberately not on this path and core-provider's ClusterRole grants only get and
+// update on mutatingadmissionpolicies, so the "never create locally" rule is enforced by RBAC
+// rather than only by this comment.
+//
+// Absent policy is not an error. On a local target the chart installs it; if it is missing, that
+// is an incomplete install to be fixed by helm, not by minting an unowned object here.
+func UpgradeLegacyCompositionVersionPolicy(ctx context.Context, kube client.Client) error {
 	return upgradeLegacyPolicy(ctx, kube)
 }
 
@@ -152,7 +174,8 @@ func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 
 	if err := kube.Get(ctx, client.ObjectKey{Name: PolicyName}, existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Created above, or removed concurrently. Either way there is nothing to migrate.
+			// Just created by the remote path, removed concurrently, or — on a local target —
+			// never installed by the chart. Nothing to migrate in any of those cases.
 			return nil
 		}
 		return err

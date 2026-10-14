@@ -86,6 +86,21 @@ rules:
 - apiGroups: ["events.k8s.io"]
   resources: ["events"]
   verbs: ["create", "patch", "update"]
+# Migrate a composition-version MutatingAdmissionPolicy still carrying the pre-#66
+# ApplyConfiguration mutation onto the JSON Patch form (#173). get+update ONLY, deliberately:
+# this chart installs the policy itself, so the controller never needs to create it, and
+# withholding `create` makes "core-provider must not mint an unowned policy on the management
+# cluster" an RBAC guarantee rather than a convention. An unowned policy here would fail the next
+# `helm upgrade` with "invalid ownership metadata" and wedge the umbrella.
+# (Remote targets are reached with the target's own credentials, not this ClusterRole; that
+# identity does need `create` — see docs/how-to/remote-target-rbac.yaml.)
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingadmissionpolicies
+  verbs:
+  - get
+  - update
 # Manage the authn allowlist mapping for compositions that declare an apiRef, so the CDC
 # ServiceAccount may exchange its projected token for a service JWT (created in the authn
 # operator namespace on deploy, removed on undeploy).
