@@ -306,11 +306,26 @@ func deletePolicy(ctx context.Context, cl client.Client) {
 	}
 }
 
-// conversionFailure is the admission error #66 is about: ApplyConfiguration converts the WHOLE
-// incoming object to its typed form before merging, so a field whose schema says numeric while
-// the value is a Quantity string fails the conversion and — with failurePolicy: Fail — the write
-// is DENIED, for a field the mutation never touches.
-const conversionFailure = "failed to convert original object to typed object"
+// conversionFailure matches the admission error family #66 is about. ApplyConfiguration performs
+// a structured merge, which requires converting to a TYPED object first — and with
+// failurePolicy: Fail, any reason that conversion cannot be completed denies the write, for an
+// object the mutation barely touches.
+//
+// Matching the family rather than one message is deliberate, and the two variants observed so far
+// are why. On krateo-057 it was a value/schema mismatch:
+//
+//	failed to convert original object to typed object: errors:
+//	  .spec.resources.requests.cpu: expected numeric (int or float), got string
+//
+// In this test it is the apiserver having no registered type for a CRD created moments earlier:
+//
+//	failed to convert patch object to typed object:
+//	  no corresponding type for composition.krateo.io/v1-0-0, Kind=Qty...
+//
+// Different triggers, same defect: the mutation cannot be applied without typing the object, so
+// the object's typeability becomes a precondition for stamping a label on it. Pinning the exact
+// 057 wording made this test fail against a correct control arm, which is the wrong failure.
+const conversionFailure = "failed to convert"
 
 // TestE2E_PolicyDoesNotDenyQuantityStrings is the test that decides whether the JSON Patch form
 // actually AVOIDS the #66 conversion or merely relocates it. Everything else about #66 is
@@ -385,11 +400,11 @@ func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
 
 	if legacyErr == nil || !strings.Contains(legacyErr.Error(), conversionFailure) {
 		t.Fatalf("the #66 premise did not reproduce: under the pre-fix ApplyConfiguration policy "+
-			"a Quantity string in a numeric-typed field should be denied with %q, got: %v\n"+
+			"this write should be denied by a typed-conversion failure (%q), got: %v\n"+
 			"Until this arm fails in the expected way, the other arm proves nothing about the fix.",
 			conversionFailure, legacyErr)
 	}
-	t.Logf("control: legacy ApplyConfiguration denied the write with the #66 conversion error")
+	t.Logf("control: legacy ApplyConfiguration denied the write with a typed-conversion failure: %v", legacyErr)
 
 	// --- the shipped policy must NOT deny it for that reason ----------------------------------
 	if err := ensurePolicy(ctx, cl); err != nil {
