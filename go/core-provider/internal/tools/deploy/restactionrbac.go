@@ -20,14 +20,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// authnClientFor returns a process-wide authn client for the given URL. It is a singleton so the
-// issued JWT is cached across reconciles (the exchange is amortised), mirroring how the CDC holds a
-// long-lived authn client. The authn URL is stable (env-driven), so the first-seen URL wins.
 var (
 	authnOnce sync.Once
 	authnInst *authn.Client
 )
 
+// authnClientFor returns a process-wide authn client for the given URL. It is a singleton so the
+// issued JWT is cached across reconciles (the exchange is amortised), mirroring how the CDC holds a
+// long-lived authn client. The authn URL is stable (env-driven), so the first-seen URL wins.
 func authnClientFor(server string) *authn.Client {
 	authnOnce.Do(func() { authnInst = authn.New(server, "") })
 	return authnInst
