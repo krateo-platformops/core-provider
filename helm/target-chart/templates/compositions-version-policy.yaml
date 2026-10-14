@@ -8,6 +8,15 @@ each instance with the served version it was written through
 listing and migration. Install this chart into every cluster used as a core-provider
 remote target. Identical to the policy the deployment chart installs in the management
 cluster. Requires the GA MutatingAdmissionPolicy API (Kubernetes >= 1.36).
+
+What the label MEANS: operations covers CREATE and UPDATE, so the value is rewritten on
+every write. It records the served version an instance was LAST WRITTEN THROUGH — not the
+version it was created at, and not an origin that code may compare against (that is
+core-provider#168, which needs a separate CREATE-only sibling policy writing a different
+key). The UPDATE half is load-bearing and must not be dropped: every cdc ListWatcher
+filters on EXACT equality of this label, so an instance that stopped being re-stamped
+would never be delivered to any controller and would wedge on its finalizer.
+Full note: go/core-provider/internal/tools/policy/policy.go (versionLabel).
 */}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
