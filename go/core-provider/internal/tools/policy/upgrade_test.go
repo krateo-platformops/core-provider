@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -156,5 +157,27 @@ func TestMigrationIsIdempotent(t *testing.T) {
 	m := readMutation(t, got)
 	if pt, _, _ := unstructured.NestedString(m, "patchType"); pt != "JSONPatch" {
 		t.Errorf("after repeated passes patchType = %q, want JSONPatch", pt)
+	}
+}
+
+// A spec.mutations the client cannot parse must be REPORTED, not silently treated as "nothing to
+// migrate". The whole function exists to recognise one specific legacy shape, so an object it
+// cannot read is exactly the case worth surfacing — and the local caller only logs when an error
+// comes back, so swallowing this produced no signal at all. Caught in review of #174.
+func TestMalformedMutationsIsAnErrorNotASilentNoOp(t *testing.T) {
+	p := legacyPolicy()
+	// NestedSlice fails on a non-slice value at that path.
+	p.Object["spec"] = map[string]any{"mutations": "this is not a list"}
+
+	ctx := context.Background()
+	c := fakeclient.NewClientBuilder().WithScheme(newScheme()).WithObjects(p.DeepCopy()).Build()
+
+	err := UpgradeLegacyCompositionVersionPolicy(ctx, c)
+	if err == nil {
+		t.Fatal("a malformed spec.mutations returned success; it is indistinguishable from a clean " +
+			"no-op, which is the one thing this function must never be")
+	}
+	if !strings.Contains(err.Error(), "spec.mutations") {
+		t.Errorf("error should name the field it could not read, got: %v", err)
 	}
 }

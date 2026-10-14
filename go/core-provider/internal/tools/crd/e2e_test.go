@@ -21,6 +21,7 @@ import (
 	"time"
 
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
+	"github.com/krateo-platformops/core-provider/internal/tools/policy"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -231,6 +232,24 @@ func TestE2E_CompositionVersionPolicy(t *testing.T) {
 	}
 	t.Cleanup(func() { deletePolicy(ctx, cl) })
 
+	// Assert the apiserver accepted the JSON Patch form specifically. Without this the test
+	// passes against either mutation shape, which is how the pre-#66 expression survived here
+	// unnoticed — a green run that could not tell the two apart.
+	live := &unstructured.Unstructured{}
+	live.SetAPIVersion("admissionregistration.k8s.io/v1")
+	live.SetKind("MutatingAdmissionPolicy")
+	if err := cl.Get(ctx, client.ObjectKey{Name: policy.PolicyName}, live); err != nil {
+		t.Fatalf("reading back the policy we just applied: %v", err)
+	}
+	liveMuts, _, _ := unstructured.NestedSlice(live.Object, "spec", "mutations")
+	if len(liveMuts) != 1 {
+		t.Fatalf("expected exactly 1 mutation on the live policy, got %d", len(liveMuts))
+	}
+	if pt, _, _ := unstructured.NestedString(liveMuts[0].(map[string]any), "patchType"); pt != "JSONPatch" {
+		t.Fatalf("live policy patchType = %q, want JSONPatch — the apiserver is running the "+
+			"pre-#66 ApplyConfiguration mutation (core-provider#66, #173)", pt)
+	}
+
 	kind := fmt.Sprintf("Pol%d", time.Now().UnixNano()%100000)
 	gvk := schema.GroupVersionKind{Group: compositionGroup, Version: "v1-0-0", Kind: kind}
 	crd, err := crdutils.GenerateCRD(specSchema("foo"), gvk)
@@ -261,11 +280,157 @@ func TestE2E_CompositionVersionPolicy(t *testing.T) {
 	t.Logf("OK: MutatingAdmissionPolicy stamped composition-version=v1-0-0 in-apiserver (no webhook)")
 }
 
-func policyObjects() (*unstructured.Unstructured, *unstructured.Unstructured) {
+// ensurePolicy installs the policy core-provider ACTUALLY SHIPS, by calling the production
+// entry point rather than rebuilding one here.
+//
+// It used to hand-write its own copy — and that copy still carried the pre-#66
+// ApplyConfiguration mutation long after the shipped policy had moved to JSON Patch. So the one
+// job this e2e exists to do, proving the shipped policy works against a real apiserver, was not
+// being done: the test would have passed just the same with policy.objects() returning anything
+// at all. That is the same defect as core-provider#173 (a fix that reached the Go code and
+// neither chart) in a third location, and it is why this now calls into the package under test.
+func ensurePolicy(ctx context.Context, cl client.Client) error {
+	return policy.EnsureCompositionVersionPolicy(ctx, cl)
+}
+
+func deletePolicy(ctx context.Context, cl client.Client) {
+	for _, kind := range []struct{ kind, name string }{
+		{"MutatingAdmissionPolicyBinding", policy.BindingName},
+		{"MutatingAdmissionPolicy", policy.PolicyName},
+	} {
+		o := &unstructured.Unstructured{}
+		o.SetAPIVersion("admissionregistration.k8s.io/v1")
+		o.SetKind(kind.kind)
+		o.SetName(kind.name)
+		_ = cl.Delete(ctx, o)
+	}
+}
+
+// conversionFailure matches the admission error family #66 is about. ApplyConfiguration performs
+// a structured merge, which requires converting to a TYPED object first — and with
+// failurePolicy: Fail, any reason that conversion cannot be completed denies the write, for an
+// object the mutation barely touches.
+//
+// Matching the family rather than one message is deliberate, and the two variants observed so far
+// are why. On krateo-057 it was a value/schema mismatch:
+//
+//	failed to convert original object to typed object: errors:
+//	  .spec.resources.requests.cpu: expected numeric (int or float), got string
+//
+// In this test it is the apiserver having no registered type for a CRD created moments earlier:
+//
+//	failed to convert patch object to typed object:
+//	  no corresponding type for composition.krateo.io/v1-0-0, Kind=Qty...
+//
+// Different triggers, same defect: the mutation cannot be applied without typing the object, so
+// the object's typeability becomes a precondition for stamping a label on it. Pinning the exact
+// 057 wording made this test fail against a correct control arm, which is the wrong failure.
+const conversionFailure = "failed to convert"
+
+// TestE2E_PolicyDoesNotDenyQuantityStrings is the test that decides whether the JSON Patch form
+// actually AVOIDS the #66 conversion or merely relocates it. Everything else about #66 is
+// shape-checking — this submits the offending object to a real apiserver under each policy in
+// turn and compares the two outcomes.
+//
+// It is written as a differential on purpose. "The shipped policy admits it" alone would be
+// vacuous: if the apiserver never performed the conversion in the first place, a passing run
+// would prove nothing about the fix. So the legacy arm must FAIL in the specific #66 way, and if
+// it does not, this test says so loudly rather than quietly reporting success — the premise of
+// the fix would then be the thing in question.
+//
+// Both arms expect the create to be REJECTED; what differs is why. Mutating admission runs before
+// schema validation, so with a numeric-typed field holding "200m":
+//
+//	legacy  -> denied by the mutation's typed conversion (the #66 bug)
+//	shipped -> mutation succeeds, then ordinary CRD schema validation rejects the value
+//
+// The second is the correct behaviour: a bad value is rejected for being a bad value, not for
+// making an unrelated label stamp impossible.
+func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
+	if os.Getenv("KUBECONFIG") == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+	ctx := context.Background()
+	cl, dyn := e2eClients(t)
+
+	// A CRD whose schema types the field numerically, as a chart's values.schema.json did when
+	// it declared `cpu: {type: number}`, while the real value is a Quantity string.
+	kind := fmt.Sprintf("Qty%d", time.Now().UnixNano()%100000)
+	gvk := schema.GroupVersionKind{Group: compositionGroup, Version: "v1-0-0", Kind: kind}
+	numeric := []byte(`{"type":"object","properties":{"cpu":{"type":"number"}}}`)
+	crd, err := crdutils.GenerateCRD(numeric, gvk)
+	if err != nil {
+		t.Fatalf("GenerateCRD: %v", err)
+	}
+	gvr, err := ApplyOrUpdateCRD(ctx, cl, dyn, crd)
+	if err != nil {
+		t.Fatalf("ApplyOrUpdateCRD: %v", err)
+	}
+	t.Cleanup(func() {
+		c := &apiextensionsv1.CustomResourceDefinition{}
+		c.Name = crd.Name
+		_ = cl.Delete(ctx, c)
+	})
+	waitCRDEstablished(t, cl, crd.Name)
+
+	offending := func(name string) *unstructured.Unstructured {
+		o := &unstructured.Unstructured{}
+		o.SetGroupVersionKind(gvk)
+		o.SetName(name)
+		o.SetNamespace("default")
+		// A Quantity string in the numeric-typed field. Kubernetes considers "200m" a perfectly
+		// valid CPU quantity; the chart's schema is what calls it a number.
+		_ = unstructured.SetNestedField(o.Object, "200m", "spec", "cpu")
+		return o
+	}
+
+	// --- control arm: the pre-#66 policy must reproduce the conversion denial -----------------
+	lp, lb := legacyPolicyObjects()
+	for _, o := range []*unstructured.Unstructured{lp, lb} {
+		if err := cl.Create(ctx, o); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Skipf("MutatingAdmissionPolicy not available (needs k8s >= 1.36): %v", err)
+		}
+	}
+	time.Sleep(3 * time.Second) // let the policy become active
+
+	_, legacyErr := dyn.Resource(gvr).Namespace("default").
+		Create(ctx, offending("qty-legacy"), metav1.CreateOptions{})
+	_ = cl.Delete(ctx, lb)
+	_ = cl.Delete(ctx, lp)
+
+	if legacyErr == nil || !strings.Contains(legacyErr.Error(), conversionFailure) {
+		t.Fatalf("the #66 premise did not reproduce: under the pre-fix ApplyConfiguration policy "+
+			"this write should be denied by a typed-conversion failure (%q), got: %v\n"+
+			"Until this arm fails in the expected way, the other arm proves nothing about the fix.",
+			conversionFailure, legacyErr)
+	}
+	t.Logf("control: legacy ApplyConfiguration denied the write with a typed-conversion failure: %v", legacyErr)
+
+	// --- the shipped policy must NOT deny it for that reason ----------------------------------
+	if err := ensurePolicy(ctx, cl); err != nil {
+		t.Fatalf("installing the shipped policy: %v", err)
+	}
+	t.Cleanup(func() { deletePolicy(ctx, cl) })
+	time.Sleep(3 * time.Second)
+
+	_, shippedErr := dyn.Resource(gvr).Namespace("default").
+		Create(ctx, offending("qty-shipped"), metav1.CreateOptions{})
+
+	if shippedErr != nil && strings.Contains(shippedErr.Error(), conversionFailure) {
+		t.Fatalf("the JSON Patch form RELOCATED the #66 conversion rather than avoiding it: %v", shippedErr)
+	}
+	t.Logf("shipped: no conversion failure (error, if any, is ordinary validation): %v", shippedErr)
+}
+
+// legacyPolicyObjects rebuilds the pre-#66 ApplyConfiguration policy under a DISTINCT name, used
+// only as the control arm of TestE2E_PolicyDoesNotDenyQuantityStrings. This is the one place a
+// hand-written copy is correct: it is the thing we are proving we moved away from.
+func legacyPolicyObjects() (*unstructured.Unstructured, *unstructured.Unstructured) {
+	const name = "e2e-legacy-composition-version"
 	p := &unstructured.Unstructured{}
 	p.SetAPIVersion("admissionregistration.k8s.io/v1")
 	p.SetKind("MutatingAdmissionPolicy")
-	p.SetName("e2e-compositions-version-policy")
+	p.SetName(name)
 	p.Object["spec"] = map[string]any{
 		"matchConstraints": map[string]any{
 			"matchPolicy": "Exact",
@@ -285,23 +450,7 @@ func policyObjects() (*unstructured.Unstructured, *unstructured.Unstructured) {
 	b := &unstructured.Unstructured{}
 	b.SetAPIVersion("admissionregistration.k8s.io/v1")
 	b.SetKind("MutatingAdmissionPolicyBinding")
-	b.SetName("e2e-compositions-version-binding")
-	b.Object["spec"] = map[string]any{"policyName": "e2e-compositions-version-policy"}
+	b.SetName(name)
+	b.Object["spec"] = map[string]any{"policyName": name}
 	return p, b
-}
-
-func ensurePolicy(ctx context.Context, cl client.Client) error {
-	p, b := policyObjects()
-	for _, o := range []*unstructured.Unstructured{p, b} {
-		if err := cl.Create(ctx, o); err != nil && !apierrors.IsAlreadyExists(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-func deletePolicy(ctx context.Context, cl client.Client) {
-	p, b := policyObjects()
-	_ = cl.Delete(ctx, b)
-	_ = cl.Delete(ctx, p)
 }

@@ -11,6 +11,7 @@ package policy
 
 import (
 	"context"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -139,6 +140,12 @@ func objects() (*unstructured.Unstructured, *unstructured.Unstructured) {
 // The policy is a cluster singleton shared by every composition CRD, so it is
 // intentionally never removed on CompositionDefinition deletion.
 //
+// For REMOTE targets only. On the management cluster the chart owns this object, and
+// creating it from here would leave it without helm's ownership metadata — which makes the
+// next `helm upgrade` fail with "invalid ownership metadata", wedging the umbrella for the
+// sake of an object the chart was going to install anyway. Local callers want
+// UpgradeLegacyCompositionVersionPolicy, which never creates.
+//
 // Requires the GA MutatingAdmissionPolicy API (admissionregistration.k8s.io/v1),
 // i.e. Kubernetes >= 1.36 on the target.
 func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) error {
@@ -150,6 +157,22 @@ func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) err
 		}
 	}
 
+	return upgradeLegacyPolicy(ctx, kube)
+}
+
+// UpgradeLegacyCompositionVersionPolicy migrates an existing pre-#66 policy onto the JSON Patch
+// form WITHOUT creating anything. It is the local-target entry point.
+//
+// The management cluster's policy is helm-owned (on krateo-057: release-name `installer`,
+// namespace `krateo-system`, via the core-provider subchart of the umbrella), so a chart upgrade
+// is what properly repairs it and this is the stopgap for clusters that will not take one soon.
+// Creating is deliberately not on this path and core-provider's ClusterRole grants only get and
+// update on mutatingadmissionpolicies, so the "never create locally" rule is enforced by RBAC
+// rather than only by this comment.
+//
+// Absent policy is not an error. On a local target the chart installs it; if it is missing, that
+// is an incomplete install to be fixed by helm, not by minting an unowned object here.
+func UpgradeLegacyCompositionVersionPolicy(ctx context.Context, kube client.Client) error {
 	return upgradeLegacyPolicy(ctx, kube)
 }
 
@@ -174,6 +197,19 @@ func legacyApplyConfigurationExpression() string {
 // operator's edit, an already-migrated policy, extra mutations — is left untouched, which preserves
 // the original intent of never fighting another field manager. The equality check is the consent:
 // we only overwrite what we can prove is our own previous output.
+//
+// Note precisely what that consent covers: it is consent to replace THE MUTATION, not to take
+// ownership of the object. Only spec.mutations is read and only spec.mutations is written, so on a
+// cluster where someone has edited matchConstraints, failurePolicy or reinvocationPolicy on the
+// live policy, the result is deliberately a HYBRID — their constraints with our mutation. That is
+// the right trade for a stopgap whose job is to stop the admission denials and nothing else; the
+// chart is what makes the whole object ours again on the next upgrade. Widening this to replace the
+// whole spec would silently revert an operator's deliberate edit.
+//
+// A conflict (409) is not retried. The write is idempotent and reconcile-driven, so the next pass
+// re-reads and re-applies; on the local path the caller logs and moves on, and on the remote path
+// the reconcile fails and is retried. Adding RetryOnConflict here would buy nothing a retry does
+// not already provide.
 func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 	existing := &unstructured.Unstructured{}
 	existing.SetAPIVersion(policyAPIVersion)
@@ -181,14 +217,22 @@ func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 
 	if err := kube.Get(ctx, client.ObjectKey{Name: PolicyName}, existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Created above, or removed concurrently. Either way there is nothing to migrate.
+			// Just created by the remote path, removed concurrently, or — on a local target —
+			// never installed by the chart. Nothing to migrate in any of those cases.
 			return nil
 		}
 		return err
 	}
 
 	muts, found, err := unstructured.NestedSlice(existing.Object, "spec", "mutations")
-	if err != nil || !found || len(muts) != 1 {
+	if err != nil {
+		// A malformed spec.mutations is NOT "nothing to migrate". This function exists to recognise
+		// one specific legacy shape, so an object it cannot parse is exactly the case worth hearing
+		// about — and returning nil here would make it indistinguishable from a clean no-op, with no
+		// log line on the local path either. Report it; both callers decide what it costs.
+		return fmt.Errorf("reading spec.mutations of %s: %w", PolicyName, err)
+	}
+	if !found || len(muts) != 1 {
 		return nil
 	}
 	m, ok := muts[0].(map[string]any)
