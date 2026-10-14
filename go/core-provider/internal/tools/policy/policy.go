@@ -11,6 +11,7 @@ package policy
 
 import (
 	"context"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -167,6 +168,19 @@ func legacyApplyConfigurationExpression() string {
 // operator's edit, an already-migrated policy, extra mutations — is left untouched, which preserves
 // the original intent of never fighting another field manager. The equality check is the consent:
 // we only overwrite what we can prove is our own previous output.
+//
+// Note precisely what that consent covers: it is consent to replace THE MUTATION, not to take
+// ownership of the object. Only spec.mutations is read and only spec.mutations is written, so on a
+// cluster where someone has edited matchConstraints, failurePolicy or reinvocationPolicy on the
+// live policy, the result is deliberately a HYBRID — their constraints with our mutation. That is
+// the right trade for a stopgap whose job is to stop the admission denials and nothing else; the
+// chart is what makes the whole object ours again on the next upgrade. Widening this to replace the
+// whole spec would silently revert an operator's deliberate edit.
+//
+// A conflict (409) is not retried. The write is idempotent and reconcile-driven, so the next pass
+// re-reads and re-applies; on the local path the caller logs and moves on, and on the remote path
+// the reconcile fails and is retried. Adding RetryOnConflict here would buy nothing a retry does
+// not already provide.
 func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 	existing := &unstructured.Unstructured{}
 	existing.SetAPIVersion(policyAPIVersion)
@@ -182,7 +196,14 @@ func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 	}
 
 	muts, found, err := unstructured.NestedSlice(existing.Object, "spec", "mutations")
-	if err != nil || !found || len(muts) != 1 {
+	if err != nil {
+		// A malformed spec.mutations is NOT "nothing to migrate". This function exists to recognise
+		// one specific legacy shape, so an object it cannot parse is exactly the case worth hearing
+		// about — and returning nil here would make it indistinguishable from a clean no-op, with no
+		// log line on the local path either. Report it; both callers decide what it costs.
+		return fmt.Errorf("reading spec.mutations of %s: %w", PolicyName, err)
+	}
+	if !found || len(muts) != 1 {
 		return nil
 	}
 	m, ok := muts[0].(map[string]any)
