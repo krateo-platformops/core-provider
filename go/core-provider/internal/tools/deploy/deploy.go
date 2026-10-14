@@ -36,7 +36,9 @@ import (
 const (
 	// Composition label keys re-exported from plumbing/labels — the single shared source of truth with
 	// composition-dynamic-controller (compile-time identical, no cross-repo drift). CompositionVersionLabel
-	// is the served version an instance was written through; CompositionDefinitionName/NamespaceLabel
+	// is the served version an instance was LAST WRITTEN THROUGH — re-stamped on every update, so it is
+	// not an origin version (see policy.versionLabel for what it does and does not mean);
+	// CompositionDefinitionName/NamespaceLabel
 	// identify the OWNING definition, scoping per-version migration so a version bump of one definition
 	// never re-stamps another definition's instances on a shared CRD/Kind.
 	CompositionVersionLabel             = labels.CompositionVersionLabel

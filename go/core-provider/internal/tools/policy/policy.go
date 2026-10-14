@@ -33,6 +33,35 @@ const (
 	// versionLabel must match deploy.CompositionVersionLabel. The policy stamps the
 	// request's served version onto this label so per-version listing and migration keep
 	// working after the vacuum storage version erases the apiVersion.
+	//
+	// What the value MEANS, recorded here because it is routinely read as something stronger
+	// than it is. matchConstraints below matches CREATE *and* UPDATE, so the label is rewritten
+	// on every write: it records the served version an instance was LAST WRITTEN THROUGH. It is
+	// not the version the instance was created at, not the version it "belongs to", and not
+	// evidence of which controller owns it. A CR created at v1-8-70 and touched once after the
+	// CRD was re-pointed reads v1-8-71, and nothing on the object distinguishes it from one that
+	// was always v1-8-71. That reading cost real time during the krateo-057 incident, where a
+	// terminating CR was taken to have been "written at v1-8-71" when it had been written at
+	// v1-8-70 and re-stamped.
+	//
+	// The UPDATE half is load-bearing, not an oversight, so this is not a policy to narrow
+	// casually. Every composition-dynamic-controller ListWatcher carries an EXACT-EQUALITY
+	// requirement on this label against its own --resource-version flag (cdc main.go,
+	// labels.NewRequirement(CompositionVersionLabel, selection.Equals, ...) feeding the
+	// ListWatcher's LabelSelector), so an instance whose label does not match exactly is
+	// never delivered to that controller at all. Without the re-stamp, a CR pruned during a
+	// version bump keeps the old value, no running controller is watching it, and it wedges on
+	// its finalizer with nobody to run its Delete.
+	//
+	// It therefore cannot double as an ORIGIN version. Code that needs to know which version an
+	// object was admitted at — core-provider#168, where a delete arriving mid-bump must be told
+	// apart from a genuine teardown — needs a separate key written by a CREATE-only sibling
+	// policy; this one cannot serve both.
+	//
+	// Not to be confused with krateo.io/composition-installed-version, a different label that
+	// plumbing's LabelsPostRender (helm/utils/postrenderer.go) puts on the rendered CHILDREN of a
+	// release from CompositionGVR.Version. That one means "rendered during a reconcile at that
+	// GVR"; it is not ownership or liveness either, and core-provider reads it nowhere.
 	versionLabel = "krateo.io/composition-version"
 )
 

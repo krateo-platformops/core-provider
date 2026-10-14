@@ -325,7 +325,14 @@ func main() {
 		}
 	}()
 
-	// Create a label requirement for the composition version
+	// Create a label requirement for the composition version.
+	//
+	// EXACT equality, and this is the constraint the whole label exists to satisfy: an instance
+	// whose label does not match this controller's --resource-version is never delivered here at
+	// all. It works only because the MutatingAdmissionPolicy re-stamps on UPDATE as well as
+	// CREATE, which is what moves a CR written at the old version into the new controller's view
+	// after a CRD re-point. That also means the label is NOT an origin version — see
+	// core-provider's internal/tools/policy (versionLabel) for what it does and does not mean.
 	labelreq, err := labels.NewRequirement(meta.CompositionVersionLabel, selection.Equals, []string{*resourceVersion})
 	if err != nil {
 		log.Error(err, "Creating label requirement.")

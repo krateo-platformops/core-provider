@@ -383,11 +383,11 @@ func (g *dynamicGetter) searchCompositionDefinition(gvr schema.GroupVersionResou
 		// that label) could be lowered. It cannot.
 		//
 		// Everything in this function runs DOWNSTREAM of the controller's ListWatcher, which
-		// carries an exact-equality requirement on that same label: see main.go:329
-		// (labels.NewRequirement(CompositionVersionLabel, selection.Equals, ...)) feeding
-		// main.go:376. An instance with no label is never delivered, so this tier never runs for
-		// one. It rescues an instance whose label is present but stale; it cannot rescue an
-		// instance whose label was never written.
+		// carries an exact-equality requirement on that same label: see main.go
+		// (labels.NewRequirement(CompositionVersionLabel, selection.Equals, ...)) feeding the
+		// ListWatcher's LabelSelector. An instance with no label is never delivered, so this
+		// tier never runs for one. It rescues an instance whose label is present but stale; it
+		// cannot rescue an instance whose label was never written.
 		//
 		// Noted here rather than only in helm/core-provider/Chart.yaml because this is where a
 		// reader checking whether the floor is load-bearing actually lands, and the answer this
