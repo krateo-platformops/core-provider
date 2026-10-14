@@ -21,15 +21,6 @@ type Generated struct {
 	Dropped DroppedSummary
 }
 
-// Generate turns a read-set into group-bound RBAC. name is the metadata name for
-// the generated objects (e.g. "<plural>-<version>-restaction"); group is the
-// subject group. Cluster-scoped rows (Namespace=="") produce a ClusterRole;
-// namespaced rows produce one Role per namespace. Within each role, rows are
-// aggregated by (apiGroup, verb) and canonicalised (sorted), so an unchanged
-// read-set yields byte-identical objects (digest stability).
-//
-// Unlike chart rbacgen (one "*" rule per resource bound to the SA), the verb
-// comes from the read-set row — precise least privilege.
 // readVerbs is the complete set this package will ever grant. A RESTAction's generated RBAC exists
 // so the bound group can perform the READS the action performs on its behalf; nothing else belongs
 // in it.
@@ -101,6 +92,15 @@ func summarise(dropped []Resource) DroppedSummary {
 	return out
 }
 
+// Generate turns a read-set into group-bound RBAC. name is the metadata name for
+// the generated objects (e.g. "<plural>-<version>-restaction"); group is the
+// subject group. Cluster-scoped rows (Namespace=="") produce a ClusterRole;
+// namespaced rows produce one Role per namespace. Within each role, rows are
+// aggregated by (apiGroup, verb) and canonicalised (sorted), so an unchanged
+// read-set yields byte-identical objects (digest stability).
+//
+// Unlike chart rbacgen (one "*" rule per resource bound to the SA), the verb
+// comes from the read-set row — precise least privilege.
 func Generate(readSet []Resource, group, name string) Generated {
 	readSet, dropped := partitionGrantable(readSet)
 
