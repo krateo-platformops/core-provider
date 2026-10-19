@@ -355,13 +355,17 @@ func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
 
 	// A CRD whose schema types the field numerically, as a chart's values.schema.json did when
 	// it declared `cpu: {type: number}`, while the real value is a Quantity string.
+	//
+	// Built DIRECTLY rather than through GenerateCRD, and that is the whole fixture. The generator
+	// deliberately rewrites every bare `type: number` to `type: string` (generation.go, 31f1f8d:
+	// controller-gen refuses to emit a float64 field and fails the entire generation otherwise).
+	// So a fixture routed through it cannot hold a numeric field, "200m" is then a perfectly valid
+	// string, and NOTHING about this test fires: the ApplyConfiguration converts cleanly and the
+	// write is admitted. The CRD here is the fixture, not the subject — the subject is the policy
+	// — and generating it was a convenience that silently neutralised the arm it feeds.
 	kind := fmt.Sprintf("Qty%d", time.Now().UnixNano()%100000)
 	gvk := schema.GroupVersionKind{Group: compositionGroup, Version: "v1-0-0", Kind: kind}
-	numeric := []byte(`{"type":"object","properties":{"cpu":{"type":"number"}}}`)
-	crd, err := crdutils.GenerateCRD(numeric, gvk)
-	if err != nil {
-		t.Fatalf("GenerateCRD: %v", err)
-	}
+	crd := numericFieldCRD(gvk)
 	gvr, err := ApplyOrUpdateCRD(ctx, cl, dyn, crd)
 	if err != nil {
 		t.Fatalf("ApplyOrUpdateCRD: %v", err)
@@ -391,12 +395,16 @@ func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
 			t.Skipf("MutatingAdmissionPolicy not available (needs k8s >= 1.36): %v", err)
 		}
 	}
-	time.Sleep(3 * time.Second) // let the policy become active
+	waitPolicyActive(t, dyn, gvr, "legacy")
 
 	_, legacyErr := dyn.Resource(gvr).Namespace("default").
 		Create(ctx, offending("qty-legacy"), metav1.CreateOptions{})
 	_ = cl.Delete(ctx, lb)
 	_ = cl.Delete(ctx, lp)
+	// Deleting the policy objects is not the same as the policy ceasing to apply, and the gap is
+	// long enough to matter: with the legacy policy still in force, the shipped arm below is
+	// measuring the control arm. The old 3-second sleep hid this — it was usually long enough.
+	waitConversionDenialClears(t, dyn, gvr, offending)
 
 	if legacyErr == nil || !strings.Contains(legacyErr.Error(), conversionFailure) {
 		t.Fatalf("the #66 premise did not reproduce: under the pre-fix ApplyConfiguration policy "+
@@ -411,7 +419,7 @@ func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
 		t.Fatalf("installing the shipped policy: %v", err)
 	}
 	t.Cleanup(func() { deletePolicy(ctx, cl) })
-	time.Sleep(3 * time.Second)
+	waitPolicyActive(t, dyn, gvr, "shipped")
 
 	_, shippedErr := dyn.Resource(gvr).Namespace("default").
 		Create(ctx, offending("qty-shipped"), metav1.CreateOptions{})
@@ -420,6 +428,137 @@ func TestE2E_PolicyDoesNotDenyQuantityStrings(t *testing.T) {
 		t.Fatalf("the JSON Patch form RELOCATED the #66 conversion rather than avoiding it: %v", shippedErr)
 	}
 	t.Logf("shipped: no conversion failure (error, if any, is ordinary validation): %v", shippedErr)
+}
+
+const versionLabel = "krateo.io/composition-version"
+
+// numericFieldCRD builds a CRD holding one genuinely numeric field. See the fixture note in
+// TestE2E_PolicyDoesNotDenyQuantityStrings for why this is hand-built: core-provider's generator
+// rewrites `type: number` to `type: string` by design, which is correct for installability and
+// fatal for a fixture whose entire job is to BE numerically typed.
+func numericFieldCRD(gvk schema.GroupVersionKind) *apiextensionsv1.CustomResourceDefinition {
+	plural := strings.ToLower(gvk.Kind) + "s"
+	return &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: plural + "." + gvk.Group},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: gvk.Group,
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   plural,
+				Singular: strings.ToLower(gvk.Kind),
+				Kind:     gvk.Kind,
+				ListKind: gvk.Kind + "List",
+			},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name:    gvk.Version,
+				Served:  true,
+				Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{
+					OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+						Type: "object",
+						Properties: map[string]apiextensionsv1.JSONSchemaProps{
+							"spec": {
+								Type: "object",
+								Properties: map[string]apiextensionsv1.JSONSchemaProps{
+									"cpu": {Type: "number"},
+								},
+							},
+						},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// waitPolicyActive blocks until a mutating admission policy is demonstrably in force on gvr, by
+// writing an object the policy must stamp and reading the stamp back. It then deletes the probe.
+//
+// It replaces a 3-second sleep, and the difference is not patience — it is what the control arm
+// means. The previous version of this test asserted only that the legacy arm's write was denied
+// for a reason matching "failed to convert", and it passed on 2026-10-14 for the WRONG one:
+// the apiserver had no registered type for a CRD created milliseconds earlier
+// ("no corresponding type for composition.krateo.io/v1-0-0, Kind=Qty29221"), which is a race, not
+// the #66 defect. Five days later the race fell the other way and the arm reported the premise
+// had collapsed. A premise check that depends on losing a race is not a premise check.
+//
+// A successful probe rules out both confounders at once: the policy is bound and active (the
+// stamp is there), and the apiserver can type an object of this kind (ApplyConfiguration had to
+// convert it to produce the stamp). Whatever the offending write is then denied for, it is not
+// either of those.
+func waitPolicyActive(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, which string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(60 * time.Second)
+	var last error
+
+	for time.Now().Before(deadline) {
+		probe := &unstructured.Unstructured{}
+		probe.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: gvr.Group, Version: gvr.Version,
+			Kind: strings.ToUpper(gvr.Resource[:1]) + gvr.Resource[1:len(gvr.Resource)-1],
+		})
+		probe.SetName("policy-probe")
+		probe.SetNamespace("default")
+		// A VALID numeric value: the probe must not be rejected by schema validation, or it
+		// could not distinguish an inactive policy from a bad value.
+		_ = unstructured.SetNestedField(probe.Object, float64(1), "spec", "cpu")
+
+		created, err := dyn.Resource(gvr).Namespace("default").Create(ctx, probe, metav1.CreateOptions{})
+		if err == nil {
+			stamped := created.GetLabels()[versionLabel]
+			_ = dyn.Resource(gvr).Namespace("default").Delete(ctx, "policy-probe", metav1.DeleteOptions{})
+			if stamped == gvr.Version {
+				t.Logf("%s policy active: probe stamped %s=%s", which, versionLabel, stamped)
+				return
+			}
+			last = fmt.Errorf("probe admitted but not stamped (label %q = %q)", versionLabel, stamped)
+		} else {
+			last = err
+		}
+		time.Sleep(time.Second)
+	}
+
+	t.Fatalf("the %s policy never became demonstrably active within 60s, so neither arm of this "+
+		"test would mean anything; last probe result: %v", which, last)
+}
+
+// waitConversionDenialClears blocks until the offending write is no longer denied by a typed
+// conversion — i.e. until the legacy control policy has actually stopped applying, which a
+// successful Delete does not by itself establish.
+//
+// The probe is the offending object rather than a valid one, and that is the point: a valid
+// object converts cleanly under the legacy policy too, so it cannot tell a withdrawn policy from
+// a live one. With no policy in force the write is still rejected — by ordinary schema validation,
+// for being a string in a numeric field — so "rejected, but not for a conversion failure" is the
+// signal.
+func waitConversionDenialClears(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource,
+	offending func(string) *unstructured.Unstructured) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(60 * time.Second)
+	var last error
+
+	for i := 0; time.Now().Before(deadline); i++ {
+		name := fmt.Sprintf("qty-clearing-%d", i)
+		_, err := dyn.Resource(gvr).Namespace("default").Create(ctx, offending(name), metav1.CreateOptions{})
+		if err == nil {
+			// Only reachable if the fixture stopped being numerically typed, which the control
+			// arm above has already disproved for this run.
+			_ = dyn.Resource(gvr).Namespace("default").Delete(ctx, name, metav1.DeleteOptions{})
+			t.Fatalf("the offending object was admitted with no policy in force: the CRD fixture is "+
+				"no longer numerically typed, so neither arm of this test means anything (object %q)", name)
+		}
+		if !strings.Contains(err.Error(), conversionFailure) {
+			t.Logf("legacy policy withdrawn: offending write now rejected by validation, not conversion")
+			return
+		}
+		last = err
+		time.Sleep(time.Second)
+	}
+
+	t.Fatalf("the legacy control policy was still denying writes 60s after deletion, so the shipped "+
+		"arm would be measuring the control arm; last denial: %v", last)
 }
 
 // legacyPolicyObjects rebuilds the pre-#66 ApplyConfiguration policy under a DISTINCT name, used
