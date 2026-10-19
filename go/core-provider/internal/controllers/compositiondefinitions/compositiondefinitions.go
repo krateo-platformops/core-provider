@@ -1382,6 +1382,27 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					return fmt.Errorf("error undeploying older version of dynamic controller: %w", err)
 				}
 				log.Debug("Undeployed older versions of dynamic controller", "gvr", oldGVR.String())
+
+				// The ServiceAccount the retired controller ran as has just been deleted, and every
+				// derived `<release>-krateo-rbac` binding for this Kind still names it. Those
+				// bindings are release-scoped and survive the bump; the identity is version-scoped
+				// and does not. Repoint them in the same operation that retires the identity —
+				// leaving it to each composition's next Observe cannot repair a composition whose
+				// CR is not currently present to be observed (#166).
+				repaired, rerr := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
+					DynamicClient: e.dynamic,
+					Namespace:     cr.Namespace,
+					OldGVR:        oldGVR,
+					NewGVR:        gvr,
+				})
+				if rerr != nil {
+					return fmt.Errorf("error re-subjecting derived RBAC from %s to %s: %w",
+						oldGVR.Version, gvr.Version, rerr)
+				}
+				if repaired > 0 {
+					log.Debug("Re-subjected derived RBAC onto the current controller ServiceAccount",
+						"count", repaired, "from", oldGVR.String(), "to", gvr.String())
+				}
 			}
 		}
 	}
