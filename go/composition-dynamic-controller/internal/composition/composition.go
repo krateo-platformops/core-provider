@@ -613,6 +613,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				MaxHistory:   helmMaxHistory,
 			})
 		})
+		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
+		// controller panicked mid-reconcile. Reproduced on a fresh vcluster child, where the portal's
+		// first install outlived pendingOperationGrace, was rolled back, and this upgrade then ran
+		// against a release still locked pending-rollback. Returning the error lets the next
+		// reconcile's Observe clear the lock instead.
+		if err != nil {
+			return fmt.Errorf("upgrading existing helm release: %w", err)
+		}
 	} else {
 		rel, err = helmPhase(log, "install", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
