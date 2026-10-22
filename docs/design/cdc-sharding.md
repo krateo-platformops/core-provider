@@ -431,3 +431,7 @@ a second, gated change.
 - Step 0 (prerequisite, shipped): core-provider PR #43 (`spec.controller`), chart PR #74.
 - Related in-repo: `docs/design/composition-version-management.md` (the served-version /
   MutatingAdmissionPolicy model this builds on), `docs/design/multicluster-compositions.md`.
+- **The mirror of this doc: [[cdc-pooling.md]]** — vertical *consolidation* (many Kinds into one CDC
+  process) where this is horizontal *sharding* (one Kind across many pods). Orthogonal and
+  composable, sharing the `spec.controller` surface; §3.2's three CDC facts constrain both. Note the
+  two are mutually exclusive per Kind: a sharded Kind wants isolation by construction.
