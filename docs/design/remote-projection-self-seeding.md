@@ -83,6 +83,41 @@ Service DNS today) to compute per-composition RBAC → NXDOMAIN on the spoke.
 **Recommendation: D1** — it preserves the "hub credential only at bootstrap; steady state is
 spoke-local" property the whole design rests on.
 
+### E — the version policy's *version* on the spoke (latent today, same shape as the four above)
+
+Not a seed gap in the sense that something is missing — the composition-version
+MutatingAdmissionPolicy does reach a spoke. The gap is that **nothing keeps the spoke's copy in
+step with the hub's**, and this is the fifth thing a self-sufficient projection has to own.
+
+On the hub the policy is applied from the `core-provider` chart and reconciled in code
+(`policy.EnsureCompositionVersionPolicy`, called against the **management** client only —
+`compositiondefinitions.go:440`). On a spoke it arrives from the `core-provider-target` chart,
+whose single template *is* that policy, installed **out of band** by whoever sets the target up
+(`docs/how-to/remote-target-credentials.md`). So a spoke stays on whatever version was installed
+there, indefinitely, with nothing reporting the skew.
+
+**Why it is worth writing down rather than leaving to "upgrade your spokes".** A spoke on a
+pre-2.13.25 target chart is running the policy in its `ApplyConfiguration` form with
+`failurePolicy: Fail`. That is not merely "missing a fix": ApplyConfiguration cannot merge without
+typing the whole object, so it makes an object's *typeability* a precondition for writing it, and
+with `Fail` an unresolvable kind **denies the write** (core-provider#66). On the hub, ten
+composition writes against freshly-minted kinds were observed to survive that configuration without
+a single denial — and the mechanism that protected them has never been identified, so it is a race
+won, not a race that is structurally safe. A spoke would inherit that same unexplained dependency
+on luck, and whoever installs the target chart has no reason to suspect it.
+
+Not reproducible today: krateo-057 has the `kubernetestargets` resource but zero objects, and all
+55 CompositionDefinitions have `status.target.mode` unset — there is no spoke for a stale copy to
+be stale on (verified 2026-10-19 by this session and independently by the installer session). It
+becomes real with the first spoke.
+
+**Direction, not a decision:** the policy belongs in the same seed step as B–D, applied through the
+swapped spoke client and reconciled on every pass so a spoke converges to the hub's form rather
+than to whatever was installed once. That would make `core-provider-target` the bootstrap
+convenience it reads as, instead of the thing silently holding a spoke's admission behaviour at an
+old version. It is explicitly **not** an installer pin: the installer deploys the hub, and pinning
+a chart it never deploys would add a second source of truth for one version.
+
 ## Idempotency, digest, teardown
 
 - Seeded objects (namespace, CD CRD, shadow CD, chart-inspector set) are applied idempotently and
