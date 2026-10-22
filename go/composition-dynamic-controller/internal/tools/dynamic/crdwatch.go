@@ -7,8 +7,8 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
@@ -40,13 +40,34 @@ const crdInvalidateWindow = 2 * time.Second
 //
 // It is a no-op (returns nil) if the mapper does not implement Reset() — e.g. a static
 // mapper in tests. Setup errors are returned; once started it runs until ctx is done.
+//
+// # Why the METADATA client and not the dynamic one
+//
+// This watch is a pure change TRIGGER: the handlers below read nothing but
+// resourceVersion, and the objects themselves are discarded. A dynamic informer would
+// nonetheless cache every CustomResourceDefinition in full, as *unstructured.Unstructured
+// — and CRDs are among the largest objects in a cluster because they carry complete
+// OpenAPI schemas.
+//
+// That was not a theoretical cost. Profiled on krateo-057 (2026-10-22), an IDLE controller
+// — 1m CPU, one composition instance — held 72.33 MiB of live heap, of which 60.23 MiB
+// (83%) was this informer's cache: 540 CRDs, 38 MiB of JSON, inflating to ~60 MiB of
+// decoded maps. Every CDC in the fleet paid it independently, roughly 3.6 GiB cluster-wide,
+// to be told that a CRD changed (krateo-platformops/core-provider#182).
+//
+// metadatainformer caches PartialObjectMetadata instead — name, UID, resourceVersion and
+// labels, which is a superset of what this function reads. meta.Accessor is satisfied by
+// PartialObjectMetadata, so the resync-skip below is unchanged. The apiserver serves this
+// projection natively (as=PartialObjectMetadataList), so the saving is on the wire as well
+// as in memory, and the RBAC requirement is identical: get;list;watch on
+// customresourcedefinitions.apiextensions.k8s.io.
 func WatchCRDsAndInvalidate(ctx context.Context, rc *rest.Config, mapper meta.RESTMapper, log logging.Logger) error {
 	resetter, ok := mapper.(interface{ Reset() })
 	if !ok {
 		return nil
 	}
 
-	dc, err := dynamic.NewForConfig(rc)
+	mc, err := metadata.NewForConfig(rc)
 	if err != nil {
 		return err
 	}
@@ -60,7 +81,7 @@ func WatchCRDsAndInvalidate(ctx context.Context, rc *rest.Config, mapper meta.RE
 		}
 	}
 
-	factory := dynamicinformer.NewDynamicSharedInformerFactory(dc, 10*time.Minute)
+	factory := metadatainformer.NewSharedInformerFactory(mc, 10*time.Minute)
 	informer := factory.ForResource(crdGVR).Informer()
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(any) { signal() },
