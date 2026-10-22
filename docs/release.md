@@ -26,12 +26,29 @@ see the history note in `helm/core-provider/values.yaml`).
    with committed CRDs), chart lint + render smoke
    ([`lint.yaml`](../.github/workflows/lint.yaml)), security scanning, and the
    docs-standard lint.
-2. **Tag with plain semver — `X.Y.Z`, no `v` prefix.** The release workflows trigger
-   on `[0-9]+.[0-9]+.[0-9]+` only; a `v`-prefixed tag ships **nothing**, silently.
+2. **Tag with plain semver — `X.Y.Z`, no `v` prefix — and make it ANNOTATED.** The
+   release workflows trigger on `[0-9]+.[0-9]+.[0-9]+` only; a `v`-prefixed tag ships
+   **nothing**, silently.
 
    ```sh
-   git tag 2.12.5 && git push origin 2.12.5
+   git tag -a 2.12.5 -m "core-provider 2.12.5" && git push origin 2.12.5
    ```
+
+   The `-a` is not decoration. An annotated tag is a real object carrying who tagged
+   it, when, and why, and a consumer verifies a release by peeling it and comparing
+   the result to `main`. A lightweight tag is a bare pointer: `git/ref/tags/X.Y.Z`
+   resolves straight to a commit, `git/tags/<sha>` returns 404, and a reader cannot
+   distinguish "tagged deliberately at this commit" from "tag moved here afterwards".
+   Every platform repo ships annotated release tags and downstream verification steps
+   assume it — this page previously showed the lightweight form, and 2.13.26 shipped
+   lightweight as a result, which the installer session caught during its pre-roll
+   verification.
+
+   **If a tag is already pushed lightweight, leave it.** Re-tagging means deleting and
+   re-pushing the ref, which re-triggers `release-tag` and `release-oci`: the images
+   and charts are rebuilt and republished under the same version, the digests need not
+   match the ones already verified and rolled, and the fleet's deployed artifact stops
+   corresponding to what the registry serves. Fix it on the next tag.
 
 3. **CI builds and publishes**, no manual steps:
    - [`release-tag.yaml`](../.github/workflows/release-tag.yaml) → the shared
