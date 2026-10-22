@@ -34,6 +34,11 @@ timestamp: 2026-10-22T00:00:00Z
    instance *inside* an already-running process is **~4–6 MiB**. So a *process* costs roughly what
    **15–20 instances** cost, and ~95% of the fleet's CDC memory is process floor rather than work.
 
+   **Put sharply: a controller with nothing to do costs the same as one doing real work.** Four
+   CRD-only controllers run at **1 millicore** while holding 136–213 MiB each, and `portals` is 1m
+   CPU for 153 MiB. The idle cohort — page/portal and CRD-only Kinds — is **26 pods and 3 968 MiB,
+   ~38% of all controller memory**, reconciling compositions that are static once installed (§1.3).
+
 3. **The proposal.** Add `spec.controller.pool` — an optional **name**. Absent means today's
    dedicated Deployment, byte-identical (the default never changes). Set, the Kind is served by a
    shared pool CDC that hosts **one controller per member GVR inside one process**.
@@ -97,7 +102,34 @@ Two numbers do the whole argument:
 **Reserved** (`cdc.resources`: `50m` / `128Mi`, limit `512Mi`): 66 × 128 MiB = **8.25 GiB** and
 **3.3 cores** held against the scheduler for 83 instances.
 
-### 1.3 The scaffolding, and the watches
+### 1.3 Cost is uncorrelated with work — the pods spawned for nothing
+
+The floor argument has a sharper form: because a controller's footprint is set by the process rather
+than by what it has to do, **the clearest waste is the controllers that have nothing to do.**
+
+The seven settled CRD-only controllers — serving charts whose content is CustomResourceDefinitions,
+applied once and then static — hold **1 079 MiB between them, and four run at 1 millicore**:
+
+| controller | CPU | memory |
+|---|---|---|
+| `gitprovidercrds-v0-15-6` | 1m | 136 MiB |
+| `oasgenprovidercrds-v0-28-1` | 1m | 144 MiB |
+| `authncrds-v0-27-3` | 1m | 147 MiB |
+| `kagentcrds-v0-1-6` | 1m | 213 MiB |
+
+`portals` is the same shape: **1m CPU for 153 MiB**. Nothing is wrong with these controllers — they
+are idle because their compositions are static — and they are charged a whole process regardless.
+
+Grouped by that shape, the idle cohort is **26 of the 101 controller pods and 3 968 MiB, about 38%
+of all controller memory**: 16 page/portal pods (2 456 MiB) and 10 CRD-only pods (1 512 MiB).
+
+**The nuance that keeps this honest.** It is not that those *Kinds* are useless. Three of the same
+seven CRD-only controllers do real work (14m, 26m and 60m CPU), and a static composition still needs
+a watch so drift and version bumps are caught — deleting the controller is not the answer. What is
+wrong is that **the watch costs a pod.** Pooling keeps every watch and stops paying a process for
+each one.
+
+### 1.4 The scaffolding, and the watches
 
 Per-(resource, version) objects, cluster-wide today: **434** ClusterRoles, **423**
 ClusterRoleBindings, **146** ServiceAccounts, **291** ConfigMaps, **47** Services — and **156 pods
@@ -107,7 +139,7 @@ Each CDC also runs a **cluster-wide CustomResourceDefinition LIST/WATCH**
 (`dynamic.WatchCRDsAndInvalidate`, main.go) to invalidate its discovery cache. That is **66
 cluster-wide CRD watches** for one cluster's worth of CRDs — a cost that collapses to one per pool.
 
-### 1.4 The honest counter-reading
+### 1.5 The honest counter-reading
 
 Not all of the 8–10 GiB is recoverable, and the fleet is *not* idle: `builderpublishes` was
 measured at **1 827m CPU**. Pooling converts per-pod floor into shared floor; it does not reduce
@@ -398,15 +430,24 @@ than "two reconcilers corrupt the release".
 
 ### 6.2 Where to start
 
-The **15 page/frontend Kinds** — 13 `*pages`, plus `frontends` and `portalagents` — are the ideal
-first pool: one instance each, derived rules dominated by near-identical
-`widgets.templates.krateo.io/*` reads, **no `apiRef` and no `statusDataTemplate` on any of them**
-(verified 2026-10-22, so none of §4.5's identity merging applies), and no Helm work in steady state.
+**Pick the first pool by idleness, not by chart family.** The selection criterion falls straight out
+of §1.3: move the Kinds whose controllers are paying the floor and doing nothing with it. Two
+cohorts qualify and they are adjacent:
 
-Their 15 pods were measured at **2 117 MiB** (mean 141 MiB) — all 15 had restarted ~6 minutes
-earlier, so that is the working figure; at the settled floor it is ~1.3 GiB. Either way it collapses
-into one pod of a few hundred MiB, with a union that barely exceeds the baseline every CDC already
-holds.
+| cohort | Kinds | pods | memory | why it qualifies |
+|---|---|---|---|---|
+| page / portal | 15 | 16 | 2 456 MiB | near-identical `widgets.templates.krateo.io/*` reads |
+| CRD-only | 10 | 10 | 1 512 MiB | one `customresourcedefinitions` grant the baseline already carries |
+| **together** | **25** | **26** | **3 968 MiB** | **~38% of all controller memory** |
+
+Both cohorts hold one instance each, carry **no `apiRef` and no `statusDataTemplate`** (verified
+2026-10-22, so none of §4.5's identity merging applies), and have nothing to reconcile once
+installed. Their derived unions barely exceed the baseline every CDC already holds, which makes them
+simultaneously the cheapest Kinds to move and the most expensive ones to leave.
+
+One measurement caveat: the 16 page/portal pods had all restarted ~6 minutes before sampling, so
+2 456 MiB is their working figure; at the settled floor the cohort is ~1.3 GiB. The CRD-only figure
+is from settled pods.
 
 Explicitly **not** first: `installer-platform` (67 pairs), `builderpublishes` (17 instances,
 1 827m CPU), and anything carrying `apiRef`.
@@ -449,7 +490,8 @@ Explicitly **not** first: `installer-platform` (67 pairs), `builderpublishes` (1
 4. **CDC multi-GVR manager** (§5), shipped hosting exactly one GVR — a pure refactor, provable by
    rendering byte-identical Deployments.
 5. **The pool object set + membership watch + ref-counted lifecycle** in core-provider.
-6. **Migrate the 16 page Kinds** (§6.2), measure, and stop there until a second pool is justified.
+6. **Migrate the idle cohort** — the page/portal and CRD-only Kinds (§6.2), 26 pods and 3 968 MiB
+   between them — then measure, and stop there until a second pool is justified.
 
 Steps 0–3 are independently valuable and carry no new failure domain. Step 4 is the bulk of the
 work and is behaviour-preserving. Only steps 5–6 change the failure model, and by then the sizing
