@@ -21,6 +21,13 @@ timestamp: 2026-10-22T00:00:00Z
 
 ---
 
+> **Update (2026-10-22), before reading the rest:** the design's own step 0 — profile the floor —
+> was run, and **83% of an idle controller's heap is a cluster-wide CRD cache that nothing reads**
+> (core-provider#182, §1.5). The floor this proposal is built on is not irreducible. Fixing that is
+> local and risk-free and roughly **halves** what pooling would recover, so #182 lands first and
+> the fleet is re-measured before the pool lifecycle (step 5) is funded. The rest of the design
+> stands as written; its headline saving does not.
+
 ## 0. TL;DR
 
 1. **The shape today.** core-provider provisions **one CDC Deployment per Kind × served version**,
@@ -139,12 +146,42 @@ Each CDC also runs a **cluster-wide CustomResourceDefinition LIST/WATCH**
 (`dynamic.WatchCRDsAndInvalidate`, main.go) to invalidate its discovery cache. That is **66
 cluster-wide CRD watches** for one cluster's worth of CRDs — a cost that collapses to one per pool.
 
-### 1.5 The honest counter-reading
+### 1.5 The floor is not irreducible — and that weakens this proposal
 
-Not all of the 8–10 GiB is recoverable, and the fleet is *not* idle: `builderpublishes` was
-measured at **1 827m CPU**. Pooling converts per-pod floor into shared floor; it does not reduce
-work. The recoverable part is the floor — on these numbers roughly **5×**, not the ~20× the raw
-pod:instance ratio suggests (§4.2 derives the bound).
+Step 0 of §8 was "profile the floor before building anything". It was run, and it found that most
+of the floor is a single wasted cache, which materially reduces what pooling is worth.
+
+Heap profile of `authncrds-v0-27-3-controller` (idle: 1m CPU, 16 h uptime, one instance), taken
+through its own `localhost:6060`:
+
+```
+Type: inuse_space — 72.33 MiB total, 63 goroutines (no leak)
+
+watch.(*StreamWatcher).receive → rest/watch.(*Decoder).Decode
+  → unstructuredJSONScheme.Decode → json.(*decodeState).objectInterface
+                                                    60.23 MiB   83.28%
+unstructured-runtime/pkg/controller.(*Controller).handleObserve
+                                                     4.54 MiB    6.27%
+```
+
+`WatchCRDsAndInvalidate` builds a **dynamic** informer over `customresourcedefinitions`, which
+caches every object in full as `*unstructured.Unstructured`. Its handler reads none of them —
+`AddFunc`/`DeleteFunc` ignore the object, `UpdateFunc` touches only `GetResourceVersion()`. The
+cluster holds **540 CRDs, 38 MiB of JSON**, which inflates to ~60 MiB of decoded maps. Every CDC
+does this independently: **~3.6 GiB fleet-wide to be told that a CRD changed** (core-provider#182).
+
+The fix is a metadata-only informer, is local to one function, and adds no failure domain.
+
+**What that does to the case for pooling.** With the floor at ~45 MiB RSS instead of ~147, the
+fleet's recoverable memory falls from roughly 5.5 GiB to roughly 2.8 GiB. Pooling is still worth
+something — it collapses 66 CRD watches to one per pool, removes ~1 300 RBAC objects and the
+scaffolding, and the floor it shares is a real floor — but **the headline number this design was
+built on halves**, and the honest position is that #182 lands first and the fleet is re-measured
+before step 5 is funded.
+
+Two further caveats stand regardless. Not all of the remainder is recoverable, and the fleet is
+*not* idle: `builderpublishes` was measured at **1 827m CPU**. Pooling converts per-pod floor into
+shared floor; it does not reduce work.
 
 ---
 
@@ -470,9 +507,9 @@ Explicitly **not** first: `installer-platform` (67 pairs), `builderpublishes` (1
 - **Remote targets.** A projected spoke runs its own CDCs ([[remote-projection-self-seeding.md]]).
   Is a pool projected per spoke, and does pool identity survive projection? Untested — there is no
   spoke on 057 to try it on.
-- **Does the floor itself come down?** ~88 MiB for an idle Go controller with one informer is worth
-  a profile before building anything: a metadata-only or status-stripping cache transform is
-  orthogonal to pooling and might recover a large share of the same memory with far less risk.
+- **Does the floor itself come down?** — **answered, yes** (§1.5, core-provider#182): a
+  metadata-only CRD informer recovers most of it, orthogonally to pooling and with far less risk.
+  What remains open is how much of the *residual* ~45 MiB is reachable.
   [[cdc-sharding.md]] §10 notes the catch — the informer's `UpdateFunc` diffs the cached **spec**,
   so stripping spec breaks HighPriority-update detection.
 
@@ -482,8 +519,11 @@ Explicitly **not** first: `installer-platform` (67 pairs), `builderpublishes` (1
 
 **Build it, in the order below, and only as far as the measurements justify.**
 
-0. **Profile the 88 MiB floor** (§7, last question). If most of it is recoverable in-process, that is
-   a smaller change with no new failure domain, and it changes how much pooling is worth.
+0. **Profile the 88 MiB floor** — **DONE (2026-10-22), and it changed the answer.** 83% of an idle
+   controller's heap is a CRD cache nothing reads (§1.5, core-provider#182). **Fix that first, then
+   re-measure the fleet**: it is local, adds no failure domain, and roughly halves what pooling
+   would recover. Steps 1–4 below remain worth doing on their own merits; step 5 should not be
+   funded until the post-#182 numbers are in.
 1. **`spec.controller.pool`, inert** — field, validation, status surface. No render change.
 2. **The reconcile-time ownership guard** (§6.1), inert. Ship before anything can mis-sequence.
 3. **Per-controller telemetry attribution** (§4.7). A blocking prerequisite, independently correct.
