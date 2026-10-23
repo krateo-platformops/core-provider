@@ -187,8 +187,18 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	if err != nil {
 		return gvr, fmt.Errorf("error comparing CRD status: %w", err)
 	}
+	// The status change and the version bump are INDEPENDENT: a single reconcile can carry
+	// both (a statusDataTemplate edit landing in the same generation as a chart version bump,
+	// or a core-provider upgrade that changes the embedded status.schema.json for every
+	// definition at once). They were previously exclusive — the status branch returned before
+	// the append could run, so ApplyOrUpdateCRD reported the new GVR with err == nil having
+	// never added that version to the CRD, and the caller went on to build a CDC
+	// Deployment/SA for it and migrate instances through an endpoint the apiserver does not
+	// serve (#190). Both mutations are now accumulated and applied once.
+	mutated := false
+
 	if !statusEqual {
-		log.Debug("CRD status differs, updating status only", "crd", crd.Name, "version", gvr.Version)
+		log.Debug("CRD status differs, updating status", "crd", crd.Name, "version", gvr.Version)
 		// To avoid issues with changed in the dynamically generated part of the CRD (the spec), we only update the static part (the status) to any version that already exists
 		err = generation.UpdateStatus(crd, newcrd.Spec.Versions[0])
 		if err != nil {
@@ -197,46 +207,40 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		// Backfill the VERSION printer column onto any pre-existing served versions on the live CRD
 		// (versions created before this feature only got it on new appends otherwise). Idempotent.
 		generation.AddCompositionVersionColumn(crd)
-		err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
-		if err != nil {
-			return gvr, fmt.Errorf("error applying CRD status update: %w", err)
-		}
-
-		err = watcher.NewWatcher(
-			dyn,
-			apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"),
-			1*time.Minute,
-			IsReady).WatchResource(ctx, "", crd.Name)
-		if err != nil {
-			return gvr, fmt.Errorf("error waiting for CRD to be established: %w", err)
-		}
-		return gvr, nil
+		mutated = true
 	}
+
 	if generation.GVKExists(crd, schema.GroupVersionKind{
 		Group:   newcrd.Spec.Group,
 		Kind:    newcrd.Spec.Names.Kind,
 		Version: gvr.Version,
 	}) {
+		log.Debug("CRD version already present, skipping append", "crd", crd.Name, "version", gvr.Version)
+	} else {
+		crd, err = generation.AppendVersion(*crd, *newcrd)
+		if err != nil {
+			return gvr, fmt.Errorf("error appending version to CRD: %w", err)
+		}
+
+		// The generated CRD's served versions are all schema-passthrough (the old conversion
+		// webhook only copied metadata/spec/status verbatim), so the built-in None converter
+		// is equivalent and needs no webhook to reach. Lossless storage across heterogeneous
+		// version schemas is provided by the permissive "vacuum" storage version, not by
+		// conversion. This works identically for local and remote targets.
+		setNoneConversion(crd)
+
+		generation.SetServedStorage(crd, gvr.Version, true, false)
+		mutated = true
+	}
+
+	if !mutated {
 		log.Debug("CRD version exists and is equal, skipping update", "crd", crd.Name, "version", gvr.Version)
 		return gvr, nil
 	}
 
-	crd, err = generation.AppendVersion(*crd, *newcrd)
-	if err != nil {
-		return gvr, fmt.Errorf("error appending version to CRD: %w", err)
-	}
-
-	// The generated CRD's served versions are all schema-passthrough (the old conversion
-	// webhook only copied metadata/spec/status verbatim), so the built-in None converter
-	// is equivalent and needs no webhook to reach. Lossless storage across heterogeneous
-	// version schemas is provided by the permissive "vacuum" storage version, not by
-	// conversion. This works identically for local and remote targets.
-	setNoneConversion(crd)
-
-	generation.SetServedStorage(crd, gvr.Version, true, false)
 	err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
 	if err != nil {
-		return gvr, fmt.Errorf("error setting properties on CRD: %w", err)
+		return gvr, fmt.Errorf("error applying CRD update: %w", err)
 	}
 
 	err = watcher.NewWatcher(
