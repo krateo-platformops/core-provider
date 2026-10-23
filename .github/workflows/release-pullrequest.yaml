@@ -114,9 +114,28 @@ jobs:
           set -euo pipefail
           export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           kubectl version -o json | jq -r '"server: " + .serverVersion.gitVersion'
-          kubectl api-resources --api-group=admissionregistration.k8s.io \
-            | grep -q mutatingadmissionpolicies \
-            || { echo "::error::MutatingAdmissionPolicy (GA) missing - the policy e2e test would SKIP, not pass"; exit 1; }
+          # POLL, do not single-shot. Discovery is not populated the instant kind reports ready, so
+          # one `api-resources` call conflates "not served by this apiserver" with "not listed yet"
+          # — opposite findings, and the second one is transient. Read as the former it failed 4 of
+          # the last 12 runs on unrelated branches, including a DOCS-ONLY one that cannot affect
+          # which APIs the apiserver serves, each passing on a plain re-run.
+          #
+          # The check itself stays strict: the suite's policy test calls t.Skipf when
+          # MutatingAdmissionPolicy is unavailable, so a wrong node image must still fail this job
+          # rather than produce a green run that proved nothing. Only the verdict is deferred until
+          # discovery has had a fair chance to answer.
+          deadline=$((SECONDS + 120))
+          until kubectl api-resources --api-group=admissionregistration.k8s.io 2>/dev/null \
+                  | grep -q mutatingadmissionpolicies; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::MutatingAdmissionPolicy (GA) still absent from admissionregistration.k8s.io after 120s - the policy e2e test would SKIP, not pass"
+              kubectl api-resources --api-group=admissionregistration.k8s.io || true
+              exit 1
+            fi
+            echo "waiting for admissionregistration.k8s.io discovery to list mutatingadmissionpolicies..."
+            sleep 5
+          done
+          echo "MutatingAdmissionPolicy is served; the policy e2e test will run rather than skip"
 
       - name: Run e2e suite
         working-directory: go/core-provider
