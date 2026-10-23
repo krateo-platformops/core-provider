@@ -78,6 +78,33 @@ see the history note in `helm/core-provider/values.yaml`).
    `helm upgrade` on a standalone install. Existing CDCs re-roll to the release's CDC
    image on their definitions' next reconcile (digest change — expected, fleet-wide).
 
+   **If you capture the live values first, pass `-o yaml`.** `helm get values` defaults
+   to `table`, which prefixes the YAML with a `USER-SUPPLIED VALUES:` heading. The
+   heading has no indented body, so YAML parses it as a top-level key with a null
+   value, sitting *beside* the real keys rather than above them — the values themselves
+   are preserved and nothing is shadowed. The problem is the extra key: `core-provider`
+   and `core-provider-crds` both set root `additionalProperties: false` in their
+   `values.schema.json`, so `helm upgrade -f` on the captured file is rejected outright:
+
+   ```
+   Error: values don't meet the specifications of the schema(s) in the following chart(s):
+   core-provider:
+   - at '': additional properties 'USER-SUPPLIED VALUES' not allowed
+   ```
+
+   The failure is loud and self-diagnosing — it names the offending key. `-o yaml` emits
+   the values alone:
+
+   ```sh
+   helm --kube-context=$CTX get values <release> -n <ns> -o yaml > live-values.yaml
+   #                                                       ^^^^^^^^ not optional
+   ```
+
+   (Verified on helm v3.19.0 against the published 2.13.27 charts. `target-chart` ships
+   no `values.schema.json`, and there the stray null key is simply ignored and the render
+   succeeds with every value intact — so `-o yaml` is hygiene plus a guard for the strict
+   charts, not a defence against value loss.)
+
 ## CRD changes
 
 The two owned CRDs are generated from the Go types (`make generate` in
