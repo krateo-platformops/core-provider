@@ -531,6 +531,40 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 	if crd == nil {
 		return nil, nil, nil
 	}
+
+	// #189: every check below selects instances BY LABEL, and so does the migration that is
+	// supposed to have rewritten them. An instance whose krateo.io/composition-version label is
+	// absent — the policy-absence gap — or names a version the CRD no longer carries is invisible
+	// to both: never rewritten, and never counted as a reason to keep the version it may still be
+	// ENCODED at.
+	//
+	// Pruning a version that still has objects encoded at it is not recoverable by the apiserver:
+	// the prune first trims status.storedVersions, which is the very interlock that would
+	// otherwise refuse the removal ("must remain in spec.versions until a storage migration
+	// ensures no data remains persisted"), and every read of the Kind then fails with
+	// "request to convert CR from an invalid group/version". So when ANY instance is unaccounted
+	// for, prune nothing — a CRD carrying a stale served version is harmless next to a Kind that
+	// cannot be read.
+	var knownVersions []string
+	for _, v := range crd.Spec.Versions {
+		knownVersions = append(knownVersions, v.Name)
+	}
+	unaccounted, err := getters.GetUnaccountedCompositions(ctx, e.dynamic, gvr, knownVersions)
+	if err != nil {
+		return nil, nil, fmt.Errorf("checking for compositions with no usable version label: %w", err)
+	}
+	if unaccounted != nil && len(unaccounted.Items) > 0 {
+		names := make([]string, 0, len(unaccounted.Items))
+		for i := range unaccounted.Items {
+			if i == 3 {
+				names = append(names, fmt.Sprintf("...and %d more", len(unaccounted.Items)-3))
+				break
+			}
+			names = append(names, unaccounted.Items[i].GetNamespace()+"/"+unaccounted.Items[i].GetName())
+		}
+		return nil, []string{fmt.Sprintf("ALL:unaccounted-instances=%d:%v", len(unaccounted.Items), names)}, nil
+	}
+
 	for _, v := range crd.Spec.Versions {
 		if v.Name == "vacuum" || v.Name == gvk.Version {
 			continue // never the storage version or the current served version
@@ -1087,9 +1121,40 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 
 	// Mirror the spoke's finalized version set (schemas, served/storage flags, printer columns) onto
 	// the hub in one shot: this both drops the pruned versions and adds any the hub was missing.
-	hubCRD.Spec.Versions = make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(spokeCRD.Spec.Versions))
+	//
+	// "vacuum" is carried over from the HUB when the spoke has none. A spoke CRD on its first
+	// version has no vacuum at all — GenerateCRD emits a single storage version and AppendVersion
+	// only introduces vacuum on the second — so a wholesale copy would drop the hub's vacuum.
+	// Measured against kind v1.36.4, the apiserver then REJECTS the update outright
+	// ("vacuum was previously a storage version, and must remain in spec.versions until a storage
+	// migration ensures no data remains persisted"), which would wedge this sync on every
+	// reconcile rather than corrupt anything — but wedged is not a state worth shipping, and the
+	// hub is where mirrored Compositions are stored at vacuum.
+	var hubVacuum *apiextensionsv1.CustomResourceDefinitionVersion
+	for i := range hubCRD.Spec.Versions {
+		if hubCRD.Spec.Versions[i].Name == "vacuum" {
+			hubVacuum = hubCRD.Spec.Versions[i].DeepCopy()
+			break
+		}
+	}
+	hubCRD.Spec.Versions = make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(spokeCRD.Spec.Versions)+1)
+	spokeHasVacuum := false
 	for i := range spokeCRD.Spec.Versions {
+		if spokeCRD.Spec.Versions[i].Name == "vacuum" {
+			spokeHasVacuum = true
+		}
 		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *spokeCRD.Spec.Versions[i].DeepCopy())
+	}
+	if !spokeHasVacuum && hubVacuum != nil {
+		// Exactly one storage version is allowed, and the retained vacuum must be it — otherwise
+		// the single spoke version arrives as storage=true and the apiserver sees two.
+		for i := range hubCRD.Spec.Versions {
+			hubCRD.Spec.Versions[i].Storage = false
+		}
+		hubVacuum.Served = false
+		hubVacuum.Storage = true
+		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *hubVacuum)
+		e.log.Info("Retained hub vacuum storage version absent from the spoke", "gvr", gr.String())
 	}
 	// Keep None conversion and the composition-version printer column explicit (idempotent): the spoke
 	// versions already carry both, but this guards a spoke CRD that predates either.
