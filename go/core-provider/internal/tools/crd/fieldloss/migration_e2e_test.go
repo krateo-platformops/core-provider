@@ -43,8 +43,24 @@ import (
 )
 
 const (
-	versionLabel     = "krateo.io/composition-version"
-	compositionGroup = "composition.krateo.io"
+	versionLabel = "krateo.io/composition-version"
+
+	// A DEDICATED api group, deliberately not composition.krateo.io.
+	//
+	// The crd package's TestE2E_PolicyDoesNotDenyQuantityStrings installs a cluster-scoped
+	// MutatingAdmissionPolicy over apiGroups: [composition.krateo.io], resources: [*], with
+	// failurePolicy: Fail and patchType: ApplyConfiguration, as its control arm. Go runs package
+	// test binaries in PARALLEL against the one shared cluster, so while that policy is alive it
+	// intercepts creates in this package too — and ApplyConfiguration cannot type a Kind the
+	// apiserver has only just learned, so the create is DENIED:
+	//
+	//	failed to convert patch object to typed object: no corresponding type for
+	//	composition.krateo.io/v1-0-0, Kind=Widening
+	//
+	// Nothing here depends on the group: UpdateCompositionsVersion takes a GVR, and the version
+	// label is a plain constant. Using our own group removes the coupling rather than racing it.
+	// Anything added to this tree that creates composition.krateo.io CRs shares the hazard.
+	compositionGroup = "fieldloss.krateo.io"
 )
 
 // e2eClients mirrors the helper in internal/tools/crd/e2e_test.go, which is unexported and in a
