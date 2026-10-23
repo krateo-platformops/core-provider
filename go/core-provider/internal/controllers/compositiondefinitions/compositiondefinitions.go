@@ -465,13 +465,6 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
-// prunableServedVersions inspects the live CRD and returns the served versions that are safe to
-// prune: not the current version (gvk.Version), not "vacuum" (the storage version), not referenced
-// by any OTHER CompositionDefinition, and with no Composition carrying their
-// krateo.io/composition-version label. SHARED by Observe (to report not-up-to-date so Update
-// re-runs the prune to completion) and pruneStaleServedVersions — using the SAME predicate for the
-// drive condition and the actual prune is what prevents an Observe<->Update ping-pong. `kept` is the
-// per-version keep reasons (logging only).
 // migrationLossOptions arms the #188 field-loss detection for one transition.
 //
 // The version migration can only move an instance's krateo.io/composition-version label by
@@ -523,6 +516,13 @@ func (e *external) migrationLossOptions(ctx context.Context, gvr schema.GroupVer
 	}
 }
 
+// prunableServedVersions inspects the live CRD and returns the served versions that are safe to
+// prune: not the current version (gvk.Version), not "vacuum" (the storage version), not referenced
+// by any OTHER CompositionDefinition, and with no Composition carrying their
+// krateo.io/composition-version label. SHARED by Observe (to report not-up-to-date so Update
+// re-runs the prune to completion) and pruneStaleServedVersions — using the SAME predicate for the
+// drive condition and the actual prune is what prevents an Observe<->Update ping-pong. `kept` is the
+// per-version keep reasons (logging only).
 func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) (prunable, kept []string, err error) {
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
