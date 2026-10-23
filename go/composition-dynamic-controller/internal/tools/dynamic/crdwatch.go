@@ -67,13 +67,24 @@ const crdInvalidateWindow = 2 * time.Second
 //	~11h    otelcollectordaemonsets     1       149 MiB    1m   55.53     82.1
 //	~11h    installers                  1       186 MiB   13m   58.11     74.7
 //
+// The first row carries the argument on its own: a controller with ZERO composition
+// instances, reconciling nothing at all, pays 51.70 MiB — 88% of its live heap — for a
+// cache it never reads.
+//
 // The cost is a FIXED one, which is what makes the saving falsifiable rather than merely
 // plausible. Instance population (0–2), working set (80→251 MiB) and CPU (1m→170m) all vary
-// several-fold without moving it; the zero-instance controller pays 51.70 MiB, 88% of its
-// live heap, to reconcile nothing at all. Nor does age explain it: the oldest cohort alone
-// spans 50.22–63.38, bracketing every value from the younger two, so the within-cohort
-// spread exceeds the between-cohort spread. A drop measured after this rolls therefore
-// cannot be attributed to the fleet having been restarted.
+// several-fold without moving it. Nor does age explain it: the oldest cohort alone spans
+// 50.22–63.38, bracketing every value from the younger two, so the within-cohort spread
+// exceeds the between-cohort spread. A drop measured after this rolls therefore cannot be
+// attributed to the fleet having been restarted.
+//
+// (StreamWatcher.receive covers every watch in the process, not only this one, so on a busy
+// pod part of it could in principle be composition instances rather than CRDs. Instance
+// counts across the seven are 0,1,2,1,1,1,1 — too small a range to account for the ~13 MiB
+// spread, and composition CRs are small objects. The two demo-system controllers are the
+// structurally busiest CDCs on krateo-057, sitting in the namespace with the permanent
+// KCC-versus-helm spec-write fight; if a future measurement finds those two worse than the
+// rest, that is the likely reason rather than a regression here.)
 //
 // (An earlier revision of this comment said "38 MiB of JSON". That was `kubectl get crd
 // -o json | wc -c` — kubectl indents by 4 spaces, inflating the file 2.46x over what the
