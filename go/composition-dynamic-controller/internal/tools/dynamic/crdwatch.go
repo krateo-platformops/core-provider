@@ -51,25 +51,37 @@ const crdInvalidateWindow = 2 * time.Second
 //
 // That was not a theoretical cost. Profiled on krateo-057 (2026-10-22), an IDLE controller
 // — 1m CPU, one composition instance — held 72.33 MiB of live heap, of which 60.23 MiB
-// (83%) was this informer's cache. Re-measured across 5 pods in 3 age cohorts (2026-10-23,
-// all on 2.13.26): the watch path held 49.88–58.11 MiB in every one, 66–88% of live heap.
-// 540 CRDs arrive as ~15.5 MiB of compact JSON and inflate ~3.3x into decoded
-// map[string]interface{}. Every CDC in the fleet paid it independently — 66 CDC pods on
-// krateo-057, so roughly 3.4 GiB cluster-wide — to be told that a CRD changed
+// (83%) was this informer's cache. Re-measured 2026-10-23 across 7 pods spanning all 3 age
+// cohorts of the then-uniform 2.13.26 fleet: the watch path held 49.88–63.38 MiB in every
+// one, 66–88% of live heap. 540 CRDs arrive as ~15.5 MiB of compact JSON and inflate
+// ~3.2–4.1x into decoded map[string]interface{}. All 68 CDC pods on krateo-057 paid it
+// independently, ~3.7 GiB cluster-wide, to be told that a CRD changed
 // (krateo-platformops/core-provider#182).
 //
-// The cost is flat in BOTH confounds, which is what makes the saving falsifiable rather
-// than merely plausible. Across pods whose working set spanned 80→251 MiB and whose CPU
-// spanned 1m→358m, and across pod ages spanning 11h→35h, the cache stayed within ±8% of
-// 53 MiB. If anything the YOUNGEST pods held slightly more, so a drop observed after this
-// rolls cannot be explained by the fleet having been restarted.
+//	cohort  controller          instances  working set   CPU    cache    % heap
+//	~35h    rdscharts                   0        80 MiB    3m   51.70     88.0
+//	~35h    agentgatewaycontrollers     1       251 MiB    1m   50.22     66.1
+//	~35h    eventsites (demo)           2       170 MiB  170m   60.14     71.0
+//	~35h    meetupsites (demo)          1       161 MiB   56m   63.38     78.9
+//	~21h    alertprovidercrds           1       136 MiB   18m   49.88     79.8
+//	~11h    otelcollectordaemonsets     1       149 MiB    1m   55.53     82.1
+//	~11h    installers                  1       186 MiB   13m   58.11     74.7
+//
+// The cost is a FIXED one, which is what makes the saving falsifiable rather than merely
+// plausible. Instance population (0–2), working set (80→251 MiB) and CPU (1m→170m) all vary
+// several-fold without moving it; the zero-instance controller pays 51.70 MiB, 88% of its
+// live heap, to reconcile nothing at all. Nor does age explain it: the oldest cohort alone
+// spans 50.22–63.38, bracketing every value from the younger two, so the within-cohort
+// spread exceeds the between-cohort spread. A drop measured after this rolls therefore
+// cannot be attributed to the fleet having been restarted.
 //
 // (An earlier revision of this comment said "38 MiB of JSON". That was `kubectl get crd
 // -o json | wc -c` — kubectl indents by 4 spaces, inflating the file 2.46x over what the
 // apiserver actually sends, and it also strips managedFields that the informer receives.
 // The heap figures came from pprof and were never affected; only the wire number was wrong,
-// and it understated the decode inflation as 1.6x when it is ~3.3x. The 2.13.27 tag message
-// carries the bad figure and cannot be corrected without re-tagging a published release.)
+// and it understated the decode inflation as 1.6x when it is ~3.2–4.1x. The 2.13.27 tag
+// message carries the bad figure and cannot be corrected without re-tagging a published
+// release.)
 //
 // metadatainformer caches PartialObjectMetadata instead — name, UID, resourceVersion and
 // labels, which is a superset of what this function reads. meta.Accessor is satisfied by
