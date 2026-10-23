@@ -607,10 +607,12 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics = metrics.NewHelmMetrics(ctx)
 	if rel != nil {
 		log.Debug("Release already exists, upgrading instead of installing.")
-		rel, err = helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-				ActionConfig: actionConfig,
-				MaxHistory:   helmMaxHistory,
+		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
+			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
+				return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
+					ActionConfig: actionConfig,
+					MaxHistory:   helmMaxHistory,
+				})
 			})
 		})
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
@@ -761,19 +763,21 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	postrenderLabels.WithTraceparent(tpCarrier[meta.AnnotationKeyTraceparent], tpCarrier[meta.AnnotationKeyTracestate])
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
-	upgradedRel, err := helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-		return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-			ActionConfig: &helmconfig.ActionConfig{
-				ChartVersion:          pkg.Version,
-				ChartName:             pkg.Repo,
-				Username:              pkg.Auth.Username,
-				Password:              pkg.Auth.Password,
-				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-				Values:                values,
-				PostRenderer:          postrenderLabels,
-				TakeOwnership:         true,
-			},
-			MaxHistory: helmMaxHistory,
+	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
+		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
+			return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
+				ActionConfig: &helmconfig.ActionConfig{
+					ChartVersion:          pkg.Version,
+					ChartName:             pkg.Repo,
+					Username:              pkg.Auth.Username,
+					Password:              pkg.Auth.Password,
+					InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+					Values:                values,
+					PostRenderer:          postrenderLabels,
+					TakeOwnership:         true,
+				},
+				MaxHistory: helmMaxHistory,
+			})
 		})
 	})
 	if err != nil {
