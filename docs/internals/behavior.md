@@ -86,6 +86,47 @@ changed, it **undeploys the CDC for the old version** (keeping the CRD,
 endpoint so the new label-scoped controller selects them). Under Manual/Paused the
 old version's controller is kept so coexisting instances stay served.
 
+#### Narrowing transitions discard spec fields, and say so (#188)
+
+The `krateo.io/composition-version` label is written by the cluster-wide
+`krateo-composition-version` `MutatingAdmissionPolicy`, which fires on CREATE and
+UPDATE and unconditionally sets it to the request's version. The label therefore
+*means* "the served version this object was last written through", so the only way
+to move an instance onto a version is to **write it through that version's
+endpoint** — and the apiserver prunes every `spec` field the request version's
+schema does not declare. When the target schema is **narrower**, the relabel
+deletes data.
+
+This is not confined to downgrades. Composition CRD schemas are generated from each
+chart's `values.schema.json`, so an *upgrade* narrows too whenever a chart author
+removes or tightens a values property. The predicate is schema containment, not
+version ordering.
+
+The transition is **allowed** — the usual narrowing transition is a rollback, and
+blocking it would turn a recovery path into a dead end at the worst moment — but it
+is no longer silent. Before the write, the instance is re-read through the *source*
+version's endpoint and run through the apiserver's own pruner
+(`structuralpruning.PruneWithOptions`, so the prediction cannot disagree with the
+write), and the doomed subtree is recorded **in the same update that discards it**:
+
+| where | what |
+| --- | --- |
+| `krateo.io/pruned-fields` annotation | the dropped subtree as JSON, **with its values**, so it can be re-applied by hand |
+| `krateo.io/pruned-fields-truncated` | `"true"` when the subtree exceeded 16 KiB and only the paths were stored |
+| `CompositionFieldsPruned` Event (Warning) | on the composition instance, naming the paths |
+| controller log (Warn) | always carries the full subtree, including when the annotation could not |
+
+Annotations are used rather than Events alone because Events expire, and this is
+the only remaining copy of the data. They are safe for it: the pruner skips
+`ObjectMeta` at the resource root, so the annotation survives the write that prunes
+the spec.
+
+Reads are pruned too, not only writes — an object fetched through a narrower served
+version comes back already missing the undeclared fields, even though the data is
+still in storage (`vacuum` preserves it) and still visible through the wider
+endpoint. That is why detection re-reads through the source version rather than
+reusing the object the migration already listed.
+
 ### Delete (`external.Delete`)
 
 Sets `Deleting`. If this is the **last** `CompositionDefinition` for that version,

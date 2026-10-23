@@ -2,6 +2,7 @@ package getters
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,8 +13,10 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/retry"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/crd/fieldloss"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +31,27 @@ const (
 	compositionRetryAttempts     = 5
 	compositionRetryInitialDelay = 250 * time.Millisecond
 	compositionRetryMaximumDelay = 2 * time.Second
+)
+
+const (
+	// PrunedFieldsAnnotation carries the spec subtree a version transition discarded, as JSON,
+	// written in the SAME update that discards it (#188).
+	//
+	// An annotation and not only an Event, because Events expire — typically within the hour —
+	// and this is the only remaining copy of the user's data. Annotations are safe to use for
+	// it: the apiserver's pruner skips ObjectMeta at the resource root, so a value written here
+	// survives the very write that prunes the spec.
+	PrunedFieldsAnnotation = "krateo.io/pruned-fields"
+
+	// PrunedFieldsTruncatedAnnotation is set to "true" when the dropped subtree did not fit and
+	// PrunedFieldsAnnotation holds only the field paths. The full subtree is always logged.
+	PrunedFieldsTruncatedAnnotation = "krateo.io/pruned-fields-truncated"
+
+	// maxPrunedAnnotationBytes keeps the stash well inside the apiserver's ~256KB budget for ALL
+	// annotations on an object. Exceeding that budget would make the Update fail, which would
+	// turn a feature that exists to make migration safer into the thing that breaks it — so an
+	// oversized report degrades to paths, and then to nothing, rather than risking the write.
+	maxPrunedAnnotationBytes = 16 * 1024
 )
 
 var retryWait = retry.Wait
@@ -107,7 +131,7 @@ func compositionSelector(versionLabel string, owner DefinitionRef) (string, erro
 // the explicit relabel; the explicit label set in updateCompositionWithRetry also covers
 // clusters where the policy is not installed. Owner scoping ensures a version bump of one
 // definition never re-stamps another definition's instances that legitimately share the CRD.
-func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, fromVersion, toVersion string, owner DefinitionRef) error {
+func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, fromVersion, toVersion string, owner DefinitionRef, opts MigrationOptions) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
 	if fromVersion == toVersion {
@@ -124,13 +148,101 @@ func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr s
 		return nil
 	}
 
+	sourceGVR := gvr
+	sourceGVR.Version = fromVersion
+
 	for _, u := range ul.Items {
-		if err := updateCompositionWithRetry(ctx, dyn, gvr, u.GetNamespace(), u.GetName(), toVersion, log); err != nil {
+		rep := predictLoss(ctx, dyn, sourceGVR, u.GetNamespace(), u.GetName(), opts, log)
+		if err := updateCompositionWithRetry(ctx, dyn, gvr, u.GetNamespace(), u.GetName(), toVersion, rep, opts, log); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// MigrationOptions carries the #188 field-loss detection into the migration. The zero value
+// disables detection entirely, so the migration behaves exactly as it did before.
+type MigrationOptions struct {
+	// TargetSchema is the structural schema of the version being migrated TO. Build it once per
+	// transition with fieldloss.Structural; nil disables detection.
+	TargetSchema *structuralschema.Structural
+
+	// OnLoss, when set, is called once per instance that will lose data, BEFORE the write that
+	// loses it. stashed reports whether the full subtree made it into the annotation. It must
+	// not block for long: it runs inline in the reconcile.
+	OnLoss func(obj *unstructured.Unstructured, rep fieldloss.Report, stashed bool)
+}
+
+// predictLoss reads the instance through the SOURCE version's endpoint and reports what the
+// migration write is about to discard.
+//
+// Why a second read, when the caller already listed these objects: reads through a narrow
+// endpoint are pruned too, not only writes (measured against kind v1.36.4 — see the fieldloss
+// package comment). The listed copies came through the TARGET endpoint and are therefore
+// already missing exactly the fields this is trying to find.
+//
+// Every failure here is swallowed into "no prediction". Detection is a diagnostic bolted onto a
+// migration that must still run: it is better to migrate without a report than to refuse to
+// migrate because the report could not be produced. The source version is normally still served
+// at this point (the served-version prune runs later in the same reconcile), but it is not
+// guaranteed to be — another definition may have pruned it, or the policy-absence gap may mean
+// the instance was never labelled at it.
+func predictLoss(ctx context.Context, dyn dynamic.Interface, sourceGVR schema.GroupVersionResource,
+	namespace, name string, opts MigrationOptions, log logging.Logger) fieldloss.Report {
+	if opts.TargetSchema == nil {
+		return fieldloss.Report{}
+	}
+
+	cur, err := dyn.Resource(sourceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		log.Debug("Field-loss prediction skipped: could not read through the source version",
+			"composition", compositionKey(namespace, name), "sourceGVR", sourceGVR.String(), "error", err.Error())
+		return fieldloss.Report{}
+	}
+
+	rep, err := fieldloss.Predict(cur.Object, opts.TargetSchema)
+	if err != nil {
+		log.Debug("Field-loss prediction failed",
+			"composition", compositionKey(namespace, name), "error", err.Error())
+		return fieldloss.Report{}
+	}
+	return rep
+}
+
+// stashPrunedFields records the doomed subtree in annotations on the object about to be written.
+// Returns whether the FULL subtree was stored (false means only the paths were, or nothing).
+//
+// The write itself must never fail because of this, so an oversized payload degrades instead of
+// growing: full subtree -> paths only -> nothing.
+func stashPrunedFields(u *unstructured.Unstructured, rep fieldloss.Report, log logging.Logger) bool {
+	payload, err := rep.JSON()
+	if err != nil || payload == "" {
+		return false
+	}
+
+	ann := u.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+
+	if len(payload) <= maxPrunedAnnotationBytes {
+		ann[PrunedFieldsAnnotation] = payload
+		delete(ann, PrunedFieldsTruncatedAnnotation)
+		u.SetAnnotations(ann)
+		return true
+	}
+
+	pathsOnly, err := json.Marshal(map[string]any{"paths": rep.Paths})
+	if err != nil || len(pathsOnly) > maxPrunedAnnotationBytes {
+		log.Warn("Pruned fields too large to record on the object; see the log line above for the full subtree",
+			"composition", compositionKey(u.GetNamespace(), u.GetName()), "bytes", len(payload))
+		return false
+	}
+	ann[PrunedFieldsAnnotation] = string(pathsOnly)
+	ann[PrunedFieldsTruncatedAnnotation] = "true"
+	u.SetAnnotations(ann)
+	return false
 }
 
 func getCompositionsWithRetry(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, versionLabel string, owner DefinitionRef, log logging.Logger) (*unstructured.UnstructuredList, error) {
@@ -153,7 +265,7 @@ func getCompositionsWithRetry(ctx context.Context, dyn dynamic.Interface, gvr sc
 	return ul, nil
 }
 
-func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, namespace, name, newVersion string, log logging.Logger) error {
+func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, namespace, name, newVersion string, rep fieldloss.Report, opts MigrationOptions, log logging.Logger) error {
 	compositionName := compositionKey(namespace, name)
 	_, err := retry.Do[struct{}](ctx, retry.Config[struct{}]{
 		Attempts:     compositionRetryAttempts,
@@ -188,6 +300,22 @@ func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr 
 		labelmap[deploy.CompositionVersionLabel] = newVersion
 		if err := unstructured.SetNestedStringMap(u.Object, labelmap, "metadata", "labels"); err != nil {
 			return struct{}{}, fmt.Errorf("error setting labels on composition %s: %w", compositionName, err)
+		}
+
+		// #188: this write is about to discard every spec field the target version's schema does
+		// not declare — a narrowing transition, which a rollback usually is and an upgrade can
+		// also be. The data cannot be preserved (the version label MEANS "the endpoint this was
+		// last written through", so the write has to go through the narrower one), but it can be
+		// recorded in the same breath, in metadata the pruner does not touch.
+		stashed := false
+		if !rep.Empty() {
+			stashed = stashPrunedFields(u, rep, log)
+			log.Warn("Version transition is discarding spec fields the target version does not declare",
+				"composition", compositionName, "toVersion", newVersion, "paths", rep.Paths,
+				"recoverFrom", PrunedFieldsAnnotation, "fullSubtreeRecorded", stashed)
+			if opts.OnLoss != nil {
+				opts.OnLoss(u, rep, stashed)
+			}
 		}
 
 		if _, err := dyn.Resource(gvr).Namespace(namespace).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
