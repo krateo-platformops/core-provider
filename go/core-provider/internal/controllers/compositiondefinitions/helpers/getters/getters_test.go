@@ -40,7 +40,7 @@ func TestUpdateCompositionsVersion(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestUpdateCompositionsVersionRetriesTransientListError(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestUpdateCompositionsVersionRetriesTransientUpdateError(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestUpdateCompositionsVersionRetriesUnknownUpdateError(t *testing.T) {
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestUpdateCompositionsVersionSkipsUpdateWhenAlreadyOnTargetVersion(t *testi
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestUpdateCompositionsVersionRecoversWhenFirstWriteSucceedsButReturnsTransi
 		return true, nil, fmt.Errorf("storage is (re)initializing")
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestUpdateCompositionsVersionRetriesConflictsWithFreshReads(t *testing.T) {
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestUpdateCompositionsVersionSkipsCompositionDeletedAfterListing(t *testing
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestUpdateCompositionsVersionFailsFastOnPermanentUpdateError(t *testing.T) 
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -412,7 +412,7 @@ func TestUpdateCompositionsVersionStopsRetryWhenContextCanceled(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(ctx, dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
+	err := UpdateCompositionsVersion(ctx, dyn, gvr, "v0-3-0", "v2", DefinitionRef{}, MigrationOptions{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -670,7 +670,7 @@ func TestUpdateCompositionsVersion_ScopesToOwningDefinition(t *testing.T) {
 	}, mine, theirs)
 	gvr := testCompositionGVR()
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{Name: "cd-a", Namespace: "default"})
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{Name: "cd-a", Namespace: "default"}, MigrationOptions{})
 	if err != nil {
 		t.Fatalf("UpdateCompositionsVersion failed: %v", err)
 	}

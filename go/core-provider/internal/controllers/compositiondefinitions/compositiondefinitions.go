@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -20,6 +21,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
+	"github.com/krateo-platformops/core-provider/internal/tools/crd/fieldloss"
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +44,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -469,6 +472,57 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 // re-runs the prune to completion) and pruneStaleServedVersions — using the SAME predicate for the
 // drive condition and the actual prune is what prevents an Observe<->Update ping-pong. `kept` is the
 // per-version keep reasons (logging only).
+// migrationLossOptions arms the #188 field-loss detection for one transition.
+//
+// The version migration can only move an instance's krateo.io/composition-version label by
+// WRITING the instance through that version's endpoint — the admission policy stamps the
+// request's version on every write, so there is no other way to set it. When the target
+// version's schema is narrower than the one the instance was authored at, that write discards
+// every spec field the target does not declare. The transition is allowed to proceed (a
+// rollback must not be blocked, and the discarded fields usually mean nothing to the version
+// being rolled back to), but it is no longer silent: the dropped subtree is recorded on the
+// object itself and surfaced as an Event.
+//
+// Returns the zero value — detection off, migration unchanged — when the target schema cannot
+// be read. This is a diagnostic; it must never be the reason a migration fails.
+func (e *external) migrationLossOptions(ctx context.Context, gvr schema.GroupVersionResource, log logging.Logger) getters.MigrationOptions {
+	live, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if err != nil || live == nil {
+		log.Debug("Field-loss detection disabled: CRD unreadable", "gvr", gvr.String())
+		return getters.MigrationOptions{}
+	}
+
+	var target *apiextensionsv1.JSONSchemaProps
+	for _, v := range live.Spec.Versions {
+		if v.Name == gvr.Version && v.Schema != nil {
+			target = v.Schema.OpenAPIV3Schema
+			break
+		}
+	}
+	st, err := fieldloss.Structural(target)
+	if err != nil {
+		log.Debug("Field-loss detection disabled: target schema unusable",
+			"gvr", gvr.String(), "error", err.Error())
+		return getters.MigrationOptions{}
+	}
+
+	return getters.MigrationOptions{
+		TargetSchema: st,
+		OnLoss: func(obj *unstructured.Unstructured, rep fieldloss.Report, stashed bool) {
+			if e.rec == nil {
+				return
+			}
+			detail := "the dropped values are recorded in the " + getters.PrunedFieldsAnnotation + " annotation"
+			if !stashed {
+				detail = "the dropped values were too large to record on the object and appear only in the controller log"
+			}
+			e.rec.Eventf(obj, nil, corev1.EventTypeWarning, "CompositionFieldsPruned", "VersionMigration",
+				"Migration to %s discarded spec fields the target version does not declare: %s — %s",
+				gvr.Version, strings.Join(rep.Paths, ", "), detail)
+		},
+	}
+}
+
 func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) (prunable, kept []string, err error) {
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
@@ -1416,6 +1470,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if migrate {
 		log.Debug("Migrating Compositions to current version", "gvr", gvr.String())
 		owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+		migrateOpts := e.migrationLossOptions(ctx, gvr, log)
 		for _, vi := range cr.Status.Managed.VersionInfo {
 			if vi.Version == gvk.Version {
 				continue
@@ -1425,7 +1480,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 			// so writing via the current endpoint makes it agree with the relabel instead of
 			// re-stamping the old version. Scoped to THIS definition so a shared CRD's other
 			// definitions (legitimately on an older version) are never touched.
-			if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner); err != nil {
+			if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner, migrateOpts); err != nil {
 				return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
 			}
 		}
