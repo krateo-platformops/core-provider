@@ -100,6 +100,60 @@ func GetOwnedCompositionsByVersionLabel(ctx context.Context, dyn dynamic.Interfa
 	return ul, nil
 }
 
+// GetUnaccountedCompositions lists compositions served at gvr whose krateo.io/composition-version
+// label does NOT name one of knownVersions — either because the label is absent entirely, or
+// because it names a version the CRD no longer carries.
+//
+// Such instances are invisible to every per-version check: the migration selects by label and
+// never rewrites them, and the served-version prune's eligibility test selects by label and so
+// never sees them as a reason to keep a version. An unlabelled instance can still be ENCODED at
+// a version nobody is accounting for, and pruning that version makes the whole Kind unreadable
+// (#189). The policy-absence gap is the common cause: on a cluster where the
+// krateo-composition-version MutatingAdmissionPolicy is not installed (Kubernetes < 1.36, or the
+// policy simply missing), nothing stamps the label at all.
+//
+// Listed across ALL owning definitions deliberately: an instance this definition does not own
+// still blocks the prune, because the prune edits a CRD that every definition of the Kind shares.
+func GetUnaccountedCompositions(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, knownVersions []string) (*unstructured.UnstructuredList, error) {
+	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+
+	out := &unstructured.UnstructuredList{}
+	for _, sel := range unaccountedSelectors(knownVersions) {
+		ul, err := dyn.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: sel})
+		if err != nil {
+			log.Debug("Error listing unaccounted compositions", "selector", sel, "error", err)
+			return nil, fmt.Errorf("error listing unaccounted compositions: %w", err)
+		}
+		out.Items = append(out.Items, ul.Items...)
+	}
+	return out, nil
+}
+
+// unaccountedSelectors returns the label selectors matching instances no per-version check can
+// see. Two queries rather than one because "label missing" and "label naming something else" are
+// different requirement types and cannot be ORed in a single label selector.
+func unaccountedSelectors(knownVersions []string) []string {
+	missing := labels.NewSelector()
+	if req, err := labels.NewRequirement(deploy.CompositionVersionLabel, selection.DoesNotExist, nil); err == nil {
+		missing = missing.Add(*req)
+	}
+	out := []string{missing.String()}
+
+	// NotIn also matches objects WITHOUT the label, so it would double-count against the query
+	// above; it is only added when there is a version set to exclude, and duplicates are harmless
+	// here because the caller only counts.
+	if len(knownVersions) > 0 {
+		unknown := labels.NewSelector()
+		exists, errE := labels.NewRequirement(deploy.CompositionVersionLabel, selection.Exists, nil)
+		notIn, errN := labels.NewRequirement(deploy.CompositionVersionLabel, selection.NotIn, knownVersions)
+		if errE == nil && errN == nil {
+			unknown = unknown.Add(*exists, *notIn)
+			out = append(out, unknown.String())
+		}
+	}
+	return out
+}
+
 // compositionSelector builds the label selector for the composition-version label plus, when
 // owner is set, the composition-definition-name/-namespace ownership labels.
 func compositionSelector(versionLabel string, owner DefinitionRef) (string, error) {
