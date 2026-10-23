@@ -51,9 +51,25 @@ const crdInvalidateWindow = 2 * time.Second
 //
 // That was not a theoretical cost. Profiled on krateo-057 (2026-10-22), an IDLE controller
 // — 1m CPU, one composition instance — held 72.33 MiB of live heap, of which 60.23 MiB
-// (83%) was this informer's cache: 540 CRDs, 38 MiB of JSON, inflating to ~60 MiB of
-// decoded maps. Every CDC in the fleet paid it independently, roughly 3.6 GiB cluster-wide,
-// to be told that a CRD changed (krateo-platformops/core-provider#182).
+// (83%) was this informer's cache. Re-measured across 5 pods in 3 age cohorts (2026-10-23,
+// all on 2.13.26): the watch path held 49.88–58.11 MiB in every one, 66–88% of live heap.
+// 540 CRDs arrive as ~15.5 MiB of compact JSON and inflate ~3.3x into decoded
+// map[string]interface{}. Every CDC in the fleet paid it independently — 66 CDC pods on
+// krateo-057, so roughly 3.4 GiB cluster-wide — to be told that a CRD changed
+// (krateo-platformops/core-provider#182).
+//
+// The cost is flat in BOTH confounds, which is what makes the saving falsifiable rather
+// than merely plausible. Across pods whose working set spanned 80→251 MiB and whose CPU
+// spanned 1m→358m, and across pod ages spanning 11h→35h, the cache stayed within ±8% of
+// 53 MiB. If anything the YOUNGEST pods held slightly more, so a drop observed after this
+// rolls cannot be explained by the fleet having been restarted.
+//
+// (An earlier revision of this comment said "38 MiB of JSON". That was `kubectl get crd
+// -o json | wc -c` — kubectl indents by 4 spaces, inflating the file 2.46x over what the
+// apiserver actually sends, and it also strips managedFields that the informer receives.
+// The heap figures came from pprof and were never affected; only the wire number was wrong,
+// and it understated the decode inflation as 1.6x when it is ~3.3x. The 2.13.27 tag message
+// carries the bad figure and cannot be corrected without re-tagging a published release.)
 //
 // metadatainformer caches PartialObjectMetadata instead — name, UID, resourceVersion and
 // labels, which is a superset of what this function reads. meta.Accessor is satisfied by
