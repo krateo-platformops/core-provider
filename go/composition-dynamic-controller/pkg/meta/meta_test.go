@@ -482,3 +482,58 @@ func TestCalculateReleaseName(t *testing.T) {
 		})
 	}
 }
+
+// The origin stamp is only useful if it cannot move. Every reconcile after a chart-version bump
+// delivers the object at the NEW version, so a SetOriginVersion that overwrote would record the
+// very value the stamp exists to avoid trusting (#168).
+func TestSetOriginVersion_WriteOnce(t *testing.T) {
+	t.Run("stamps when absent", func(t *testing.T) {
+		o := &unstructured.Unstructured{}
+		if !SetOriginVersion(o, "v1-8-70") {
+			t.Fatal("SetOriginVersion reported no change on a bare object")
+		}
+		if got := GetOriginVersion(o); got != "v1-8-70" {
+			t.Errorf("origin = %q, want v1-8-70", got)
+		}
+	})
+
+	t.Run("never overwrites an existing stamp", func(t *testing.T) {
+		o := &unstructured.Unstructured{}
+		SetOriginVersion(o, "v1-8-70")
+		if SetOriginVersion(o, "v1-8-71") {
+			t.Error("SetOriginVersion reported a change when a stamp was already present")
+		}
+		if got := GetOriginVersion(o); got != "v1-8-70" {
+			t.Errorf("origin was overwritten to %q; the stamp must be immutable", got)
+		}
+	})
+
+	t.Run("an empty version is not stamped", func(t *testing.T) {
+		o := &unstructured.Unstructured{}
+		if SetOriginVersion(o, "") {
+			t.Error("an empty version should not be written")
+		}
+		if _, ok := o.GetAnnotations()[AnnotationKeyOriginVersion]; ok {
+			t.Error("an empty version must not create the annotation — an empty stamp would be " +
+				"indistinguishable from an un-stamped object and must fall back, not lock in")
+		}
+	})
+
+	t.Run("preserves other annotations", func(t *testing.T) {
+		o := &unstructured.Unstructured{}
+		o.SetAnnotations(map[string]string{"krateo.io/gracefully-paused": "true"})
+		SetOriginVersion(o, "v1-8-70")
+		if o.GetAnnotations()["krateo.io/gracefully-paused"] != "true" {
+			t.Error("SetOriginVersion clobbered an unrelated annotation")
+		}
+		if GetOriginVersion(o) != "v1-8-70" {
+			t.Error("stamp not written alongside existing annotations")
+		}
+	})
+
+	t.Run("an un-stamped object reads empty, not a zero version", func(t *testing.T) {
+		if got := GetOriginVersion(&unstructured.Unstructured{}); got != "" {
+			t.Errorf("GetOriginVersion on a bare object = %q, want \"\"", got)
+		}
+	})
+}
