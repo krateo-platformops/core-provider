@@ -379,11 +379,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// Self-healing "apply-if-changed" reconcile. Observe is no longer read-only nor an
 	// unconditional live Upgrade (the old behaviour created an identical revision every ~60s cycle
 	// even at steady state — infinite revision churn and needless API-server load, upstream
-	// composition-dynamic-controller#184). Reconcile runs helm's 3-way merge (KubeClient.Update)
-	// through the EXPORTED helm API every cycle: it recreates children deleted out-of-band and
-	// patches drifted fields, converging the cluster — but only writes a new helm revision + runs
-	// hooks when the live cluster was ACTUALLY mutated (a create, delete, or non-empty patch,
-	// detected via resourceVersion bumps rather than helm's over-eager Result.Updated). At steady
+	// composition-dynamic-controller#184). Reconcile runs helm's 3-way merge
+	// (KubeClient.UpdateThreeWayMerge) through the EXPORTED helm API every cycle: it recreates
+	// children deleted out-of-band and patches drifted fields, converging the cluster — but only
+	// writes a new helm revision + runs hooks when the live cluster was ACTUALLY mutated.
+	//
+	// "Actually mutated" is decided by comparing each child's content BEFORE and AFTER the merge
+	// with write-volatile and server-owned fields stripped — explicitly NOT a resourceVersion
+	// delta and NOT len(Result.Updated), both of which over-counted server-owned no-op re-applies
+	// and churned a revision every cycle at steady state (plumbing helm/v3/reconcile.go steps 4-6).
+	// An earlier version of this comment claimed the RV-delta WAS the gate; it was replaced
+	// precisely because it over-counted, so do not build a prediction on it. At steady
 	// state it is a no-op: no revision, no hooks. ResourceUpToDate reflects whether the cluster
 	// already matched the desired state; the digest below is computed for STATUS REPORTING only,
 	// not as an up-to-date gate.
