@@ -67,6 +67,20 @@ func main() {
 		"absolute path to the kubeconfig file")
 	debug := flag.Bool("debug",
 		env.Bool("COMPOSITION_CONTROLLER_DEBUG", false), "dump verbose output")
+	// The literal defaults below are NOT what runs on a cluster. core-provider's own chart ships
+	// cdc.env with COMPOSITION_CONTROLLER_WORKERS=10 and _RESYNC_INTERVAL=60s
+	// (helm/core-provider/values.yaml, rationale in docs/configuration.md); the per-controller
+	// configmap is templated from cdc.env (assets/cdc/configmap.yaml) and reached through
+	// envFrom.configMapRef (assets/cdc/deployment.yaml). Both values therefore land on EVERY
+	// chart install, not as a cluster-local override — 1 worker and 3m only ever apply to a
+	// hand-run binary.
+	//
+	// Precedence, because it is the opposite way round from most flag/env wiring: the env var is
+	// the flag's DEFAULT, so an explicit -workers/-resync-interval arg WINS over the configmap and
+	// the configmap wins otherwise. A per-composition override is therefore an arg on the spawned
+	// Deployment, not an env edit.
+	//
+	// Read the configmap, not this line, when reasoning about reconcile concurrency or tick rate.
 	workers := flag.Int("workers", env.Int("COMPOSITION_CONTROLLER_WORKERS", 1), "number of workers")
 	resyncInterval := flag.Duration("resync-interval",
 		env.Duration("COMPOSITION_CONTROLLER_RESYNC_INTERVAL", time.Minute*3), "resync interval")
