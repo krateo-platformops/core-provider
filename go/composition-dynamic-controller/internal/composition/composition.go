@@ -499,6 +499,12 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 
 	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
+	// Freeze this CR's origin version (#168). At FIRST reconcile the delivered apiVersion is the
+	// version the object was actually written at, so this is the one moment it can be captured
+	// truthfully; after a chart-version bump re-points the CRD the apiVersion no longer says
+	// anything about where the object came from. Write-once, so a later reconcile through a
+	// re-pointed endpoint cannot overwrite it.
+	compositionMeta.SetOriginVersion(mg, mg.GroupVersionKind().Version)
 	releaseName := compositionMeta.GetReleaseName(mg)
 	mg, err = tools.Update(ctx, mg, updateOpts)
 	if err != nil {
@@ -725,6 +731,15 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		Namespace: pkg.CompositionDefinitionInfo.Namespace,
 		GVR:       pkg.CompositionDefinitionInfo.GVR,
 	})
+	// Backfill the origin stamp for compositions that predate it (#168), so the fleet stops
+	// depending on the old race within one reconcile rather than only at its next bump.
+	//
+	// The value written here is the delivered apiVersion, which for an object mid-bump may be the
+	// NEW version rather than its true origin. That is not a regression: an un-stamped object
+	// already falls back to exactly this value, so the worst case reproduces today's behaviour
+	// for the bump in flight and is correct for every bump after it. Write-once means a correct
+	// stamp can never be spoiled by a later one.
+	compositionMeta.SetOriginVersion(mg, mg.GroupVersionKind().Version)
 	if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
 		return fmt.Errorf("stamping composition-definition labels: %w", err)
 	}
@@ -1115,17 +1130,43 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 //   - CD version != this CR's version: the definition already advanced to the new version while
 //     this old-version CR is pruned -> handover (skip uninstall).
 //
-// This is race-free because the CompositionDefinition's version is advanced before the old CR is
-// pruned. Crucially it is fail-safe: a failed install that never stamped the composition-definition-*
-// labels no longer bails to "uninstall" — the owning CD is still resolved from the package info, so a
-// version bump is detected and the destructive uninstall is skipped. When the owning CD genuinely
-// cannot be resolved the package getter fails UPSTREAM (Delete returns an error and is retried)
-// rather than reaching this check, so a version bump can never trigger a destructive uninstall.
+// # Where this CR's "own version" comes from, and why not the apiVersion (#168)
+//
+// The delivered apiVersion is NOT this CR's origin. core-provider re-points the composition CRD to
+// serve a single version, so after a bump an object written at v1-8-70 reads back as v1-8-71 —
+// and when that re-point lands before the old-version controller has processed the Delete, the
+// comparison below degenerates to cdVersion == crVersion and the DESTRUCTIVE branch runs on what
+// was only a version bump. Both outcomes were observed on krateo-057: `frontend` 1.8.1 -> 1.8.2
+// won the race and was handed over correctly; `portal` 1.8.70 -> 1.8.71 lost it and the release
+// was uninstalled. An earlier revision of this comment claimed the detection was "race-free". It
+// was not: it was race-DEPENDENT, and silent when it lost, which is why it looked correct for so
+// long.
+//
+// So the origin is read from the krateo.io/composition-origin-version annotation, stamped once at
+// first reconcile and never rewritten. krateo.io/composition-version cannot serve this purpose —
+// the version MutatingAdmissionPolicy re-stamps it on every write, by design.
+//
+// Objects that predate the stamp fall back to the delivered apiVersion, i.e. to the old
+// race-dependent behaviour, because the alternative — treating "no annotation" as a handover —
+// would leak a release on every genuine deletion of an un-stamped composition. The fallback is
+// narrow and self-closing: Create and Update stamp the annotation, so an object keeps the old
+// behaviour only until its next reconcile.
+//
+// Fail-safe in the other direction too: a failed install that never stamped the
+// composition-definition-* labels does not bail to "uninstall" — the owning CD is still resolved
+// from the package info, so a version bump is still detected. When the owning CD genuinely cannot
+// be resolved the package getter fails UPSTREAM (Delete returns an error and is retried) rather
+// than reaching this check.
 func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info) bool {
 	if pkg == nil || pkg.Version == "" {
 		return false
 	}
-	crVersion := mg.GroupVersionKind().Version
+	// The origin stamp when present; the delivered apiVersion only as a fallback for objects
+	// written before the stamp existed.
+	crVersion := compositionMeta.GetOriginVersion(mg)
+	if crVersion == "" {
+		crVersion = mg.GroupVersionKind().Version
+	}
 	if crVersion == "" {
 		return false
 	}

@@ -34,7 +34,49 @@ const (
 	// that indicates the time when the reconciliation was gracefully paused.
 	// This is used to track how long the resource has been paused.
 	AnnotationKeyReconciliationGracefullyPausedTime = "krateo.io/gracefully-paused-time"
+
+	// AnnotationKeyOriginVersion records the served version this composition was FIRST
+	// reconciled at, in the CR's own version form ("v1-8-70").
+	//
+	// It exists because nothing else on the object survives a chart-version bump to say where
+	// the object came from (#168). The apiVersion is whatever the CRD serves NOW — core-provider
+	// re-points the composition CRD to a single served version, so a CR written at v1-8-70 reads
+	// back as v1-8-71 after the bump — and krateo.io/composition-version is deliberately
+	// re-stamped on every write by the version MutatingAdmissionPolicy, which is what makes it
+	// useless as an origin.
+	//
+	// Written ONCE and never updated (see SetOriginVersion): its whole value is that it does not
+	// move when everything else does. An annotation rather than a label because nothing selects
+	// on it and it must not widen any informer's selector.
+	AnnotationKeyOriginVersion = "krateo.io/composition-origin-version"
 )
+
+// GetOriginVersion returns the served version this composition was first reconciled at, or ""
+// when the object predates the stamp.
+func GetOriginVersion(o metav1.Object) string {
+	return o.GetAnnotations()[AnnotationKeyOriginVersion]
+}
+
+// SetOriginVersion stamps version as this composition's origin, and is a NO-OP when the stamp is
+// already present. Write-once is the entire point: a value that can be rewritten tells you only
+// what the CRD serves today, which is the bug it exists to fix. Mirrors SetReleaseName.
+//
+// It reports whether it changed the object, so the caller can skip a needless write.
+func SetOriginVersion(o metav1.Object, version string) bool {
+	if version == "" {
+		return false
+	}
+	ann := o.GetAnnotations()
+	if _, ok := ann[AnnotationKeyOriginVersion]; ok {
+		return false
+	}
+	if ann == nil {
+		ann = make(map[string]string)
+	}
+	ann[AnnotationKeyOriginVersion] = version
+	o.SetAnnotations(ann)
+	return true
+}
 
 // CalculateReleaseName generates a release name for the Helm chart based on the name and UID of the resource.
 // If safeReleaseName is false, it will not append a random suffix to the release name, which can lead to collisions but is necessary for certain complex charts that have issues with long release names.
