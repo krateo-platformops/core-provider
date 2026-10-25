@@ -371,8 +371,23 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return controller.ExternalObservation{}, fmt.Errorf("creating label post renderer: %w", err)
 	}
 	// Stamp the active reconcile trace onto every child manifest (krateo.io/traceparent) so the
-	// child composition's controller continues the same distributed trace. No-op when tracing is
-	// off; excluded from the release digest (processor.ComputeReleaseDigest) so it never churns.
+	// child composition's controller continues the same distributed trace. Excluded from the
+	// release digest (processor.ComputeReleaseDigest) so it never churns.
+	//
+	// NOT a no-op when tracing is disabled, despite what you would expect — an earlier version of
+	// this comment claimed it was, and a rollout was planned on that claim. telemetry.SetupTracing
+	// installs the W3C propagator UNCONDITIONALLY, before its disabled return, so that an inbound
+	// trace is honoured regardless of this process's export config; StartReconcileSpan extracts
+	// krateo.io/traceparent from the object into ctx either way; and OTel's no-op tracer preserves
+	// a valid REMOTE span context. So with tracing off:
+	//
+	//	object carries no traceparent  -> nothing injected, nothing stamped
+	//	object carries a traceparent   -> it IS injected and children ARE stamped
+	//
+	// The second case propagates: children of a composition are themselves compositions, so one
+	// traceparent entering anywhere walks down the whole tree through controllers that have
+	// tracing disabled. Treat "no stamping" as a property of the fleet carrying no traceparent,
+	// measurable at any time, and never as a consequence of the export config.
 	tpCarrier := map[string]string{}
 	telemetry.InjectTraceparent(ctx, tpCarrier)
 	postrenderLabels.WithTraceparent(tpCarrier[meta.AnnotationKeyTraceparent], tpCarrier[meta.AnnotationKeyTracestate])
