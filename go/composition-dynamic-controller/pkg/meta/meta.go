@@ -49,7 +49,44 @@ const (
 	// move when everything else does. An annotation rather than a label because nothing selects
 	// on it and it must not widen any informer's selector.
 	AnnotationKeyOriginVersion = "krateo.io/composition-origin-version"
+
+	// AnnotationKeyHelmReleaseName is helm's own ownership annotation, present on any object helm
+	// created or adopted. On a composition it means the composition was rendered as a child of
+	// ANOTHER release — the umbrella or a parent composition — rather than created directly.
+	AnnotationKeyHelmReleaseName = "meta.helm.sh/release-name"
+
+	// ParentCompositionNameLabel names the composition that RENDERED this one, stamped by the helm
+	// post-renderer on every child manifest (plumbing/helm/utils, LabelsPostRender.Run). Its
+	// presence means this object has a parent composition; its absence means nothing renders it.
+	//
+	// Distinct from CompositionDefinitionNameLabel, which names the owning CompositionDefinition
+	// and is present on EVERY composition. This one is about having a parent, not a definition.
+	ParentCompositionNameLabel = "krateo.io/composition-name"
 )
+
+// IsParentRendered reports whether this composition is rendered by something else — a parent helm
+// release (the umbrella) or a parent composition — as opposed to standing alone.
+//
+// It matters at teardown (#199). A parent-rendered composition is DELETED AND RECREATED when its
+// chart version is bumped: the parent re-renders its children at the new GVK, so helm removes the
+// old-GVK object and creates a new one. That delete is a handover, not a teardown. A standalone
+// composition has nothing to re-render it, so a chart bump re-points its CRD underneath the object
+// it already has (verified on krateo-057: the Installer composition created 2026-08-24, generation
+// 374, same uid across many versions). It is therefore never deleted by a bump, and every delete it
+// does receive — a user removing it, or core-provider tearing down its CompositionDefinition —
+// genuinely wants the release uninstalled.
+//
+// Two independent signals, and EITHER one being present means parent-rendered. Measured on all 83
+// compositions of krateo-057 they agree exactly (59 parent-rendered, 24 standalone, empty symmetric
+// difference), but they are required to agree in the safe direction only: a missing helm annotation
+// alone must not be enough to conclude "standalone", because concluding that wrongly during a real
+// handover is what destroys a release.
+func IsParentRendered(o metav1.Object) bool {
+	if o.GetAnnotations()[AnnotationKeyHelmReleaseName] != "" {
+		return true
+	}
+	return o.GetLabels()[ParentCompositionNameLabel] != ""
+}
 
 // GetOriginVersion returns the served version this composition was first reconciled at, or ""
 // when the object predates the stamp.

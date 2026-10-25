@@ -956,9 +956,14 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// destroy the release and its stateful children (e.g. ClickHouse/Keeper -> a fresh reinstall
 	// that re-rolls them into ZK-auth staleness). Instead, detect the handover and skip the
 	// uninstall: the new-version controller's Reconcile is install-or-upgrade, so it upgrades the
-	// surviving release IN PLACE (helm upgrade, not uninstall+install). We detect it race-free via
-	// the owning CompositionDefinition (resolved into pkg), whose spec.chart.version is bumped to the
-	// new version BEFORE the old CR is pruned: CD.version != this CR's apiVersion version => migration.
+	// surviving release IN PLACE (helm upgrade, not uninstall+install).
+	//
+	// Note "the umbrella prunes": this whole scenario requires a PARENT that re-renders. A
+	// standalone composition is never deleted by a bump, so it cannot reach the handover branch —
+	// see isVersionMigrationHandover. An earlier version of this comment called the detection
+	// "race-free" via the CD's chart version; it was not, it was race-DEPENDENT on whether the CRD
+	// re-point beat the Delete, and silent when it lost (portal 1.8.70 -> 1.8.71 lost it and the
+	// release was uninstalled). The origin stamp is what makes the outcome the same either way.
 	if isVersionMigrationHandover(mg, pkg) {
 		log.Info("GVK version-migration handover detected; skipping uninstall so the new-version controller upgrades the release in place", "release", releaseName)
 		h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("GVK migration: release %s handed over to the new version for in-place helm upgrade; uninstall skipped", releaseName)))
@@ -1170,8 +1175,26 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 // Objects that predate the stamp fall back to the delivered apiVersion, i.e. to the old
 // race-dependent behaviour, because the alternative — treating "no annotation" as a handover —
 // would leak a release on every genuine deletion of an un-stamped composition. The fallback is
-// narrow and self-closing: Create and Update stamp the annotation, so an object keeps the old
-// behaviour only until its next reconcile.
+// narrow: Create and Update stamp the annotation, so a parent-rendered object keeps the old
+// behaviour only until its next reconcile. (It is NOT self-closing in general, as an earlier
+// version of this comment claimed: the runtime routes to Update only when Observe reports drift,
+// so a composition sitting at steady state is never stamped at all.)
+//
+// # Why a standalone composition returns early (#199)
+//
+// The stamp is write-once while the CD's chart version keeps moving, so on a long-lived object the
+// comparison below eventually reads "different" permanently and skips EVERY genuine uninstall,
+// orphaning the release and all its children. That staleness can only build up where nothing
+// recreates the object, which is exactly where a handover is impossible — so the fix is not a
+// cleverer version comparison but declining to make one. See compositionMeta.IsParentRendered.
+//
+// Three shapes were tried and rejected before this one, each fixing one case by breaking the
+// other: cd != origin leaks on a long-lived standalone object; cd != delivered restores the
+// destructive uninstall; and making the stamp track the last reconcile instead of the first
+// reintroduces the race, because the new-version controller can advance it before the old
+// controller processes the Delete. No arrangement of origin/delivered/cd satisfies both
+// requirements at once — a frozen value cannot pass a steady-state equality test, and a moving one
+// cannot be trusted during the window where it moves.
 //
 // Fail-safe in the other direction too: a failed install that never stamped the
 // composition-definition-* labels does not bail to "uninstall" — the owning CD is still resolved
@@ -1180,6 +1203,21 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 // than reaching this check.
 func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info) bool {
 	if pkg == nil || pkg.Version == "" {
+		return false
+	}
+	// A handover requires something to hand over TO, and only a parent-rendered composition has
+	// one: its parent re-renders at the new GVK, so helm deletes this object and creates the
+	// replacement. A standalone composition is never deleted by a bump — the CRD is re-pointed
+	// underneath the object it already has — so every delete it receives is a real teardown and
+	// must uninstall (#199). See compositionMeta.IsParentRendered for the evidence.
+	//
+	// This is also what keeps the origin stamp honest. The stamp is written once and never moves,
+	// while the CD's chart version keeps advancing, so on a long-lived object the comparison below
+	// eventually reads "different" forever and would skip every genuine uninstall. That staleness
+	// can only accumulate on a standalone object, because a parent-rendered one is recreated at
+	// each bump and re-stamped at Create. Returning early here means the stale value is never the
+	// value consulted.
+	if !compositionMeta.IsParentRendered(mg) {
 		return false
 	}
 	// The origin stamp when present; the delivered apiVersion only as a fallback for objects
