@@ -842,6 +842,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		log.Debug("CompositionDefinition was deleted, CRD still resolves; continuing observation", "gvr", gvr.String())
 	}
 
+	// A definition being deleted while another live definition takes its Kind+version over owns
+	// nothing that outlives the hand-over: the CRD, the instances and the shared RBAC are the
+	// successor's. Once its own controller is gone from its namespace, its external resource is
+	// gone, and reporting that is what lets the reconciler remove the finalizer; reporting the
+	// surviving CRD as "exists" would re-run Delete forever.
+	if deleted {
+		gone, err := e.handedOver(ctx, cr, chartGVK, gvr)
+		if err != nil {
+			return reconciler.ExternalObservation{}, err
+		}
+		if gone {
+			log.Debug("Composition controller handed over; nothing of this definition remains", "gvr", gvr.String())
+			return reconciler.ExternalObservation{ResourceExists: false}, nil
+		}
+	}
+
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error getting CRD: %w", err)

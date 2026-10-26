@@ -7,9 +7,11 @@ import (
 
 	"github.com/krateo-platformops/core-provider/apis"
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlevent "sigs.k8s.io/controller-runtime/pkg/event"
 )
@@ -179,5 +181,51 @@ func TestControllerOwner_IsPerVersion(t *testing.T) {
 	got, err := e.controllerOwner(context.Background(), newerSameVersion, gvk("v1-0-0"))
 	if err != nil || ownerName(got) != "team-a/fw" {
 		t.Fatalf("a newer definition on v1-0-0 must follow team-a/fw, got %s (err %v)", ownerName(got), err)
+	}
+}
+
+// A deleting definition is finished once a live successor holds its Kind+version and no
+// controller of its own is left; until then (or with no successor at all) the delete is not done.
+// Reporting "gone" is what lets the reconciler remove the finalizer, since the CRD survives a
+// hand-over by design.
+func TestHandedOver(t *testing.T) {
+	sc := runtime.NewScheme()
+	if err := apis.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	v1 := func(cd compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.CompositionDefinition {
+		cd.Status.ApiVersion = "composition.krateo.io/v1-0-0"
+		cd.Status.Kind = "FireworksApp"
+		return &cd
+	}
+	gvk := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v1-0-0", Kind: "FireworksApp"}
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"}
+	leaving := v1(ownerCD("krateo-system", "fw", 0))
+	successor := v1(ownerCD("krateo-bp-fw", "fw", 1))
+	ownController := &appsv1.Deployment{}
+	ownController.SetNamespace("krateo-system")
+	ownController.SetName("fireworksapps-v1-0-0-controller")
+
+	check := func(objs ...client.Object) bool {
+		t.Helper()
+		cli := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(objs...).WithStatusSubresource(leaving, successor).Build()
+		got, err := (&external{mgmt: cli, kube: cli}).handedOver(context.Background(), leaving, gvk, gvr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	if check(leaving) {
+		t.Error("no successor: the last definition's delete is not a hand-over")
+	}
+	if check(leaving, successor, ownController) {
+		t.Error("own controller still running: hand-over not finished")
+	}
+	if !check(leaving, successor) {
+		t.Error("successor present and own controller gone: the definition must be reported gone")
 	}
 }

@@ -181,6 +181,28 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 	return nil
 }
 
+// handedOver reports whether a definition being deleted has finished handing its Kind+version
+// over: a live local successor exists and no controller of this definition's own is left in its
+// namespace (two definitions in the same namespace share one controller, which is the
+// successor's from the start).
+func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) (bool, error) {
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		return false, nil
+	}
+	successor, err := e.controllerSuccessor(ctx, cr, gvk)
+	if err != nil || successor == nil {
+		return false, err
+	}
+	if successor.Namespace == cr.Namespace {
+		return true, nil
+	}
+	own, err := e.controllerDeployedIn(ctx, cr.Namespace, gvr)
+	if err != nil {
+		return false, err
+	}
+	return !own, nil
+}
+
 func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
 	return rtv1.Available().WithMessage(fmt.Sprintf(
 		"composition controller for %s is run by CompositionDefinition %s/%s", gvr.String(), owner.Namespace, owner.Name))
