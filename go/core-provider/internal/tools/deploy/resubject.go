@@ -29,11 +29,17 @@ import (
 const DerivedRBACNameSuffix = "-krateo-rbac"
 
 // ResubjectOptions describes one controller-identity rotation: the per-version ServiceAccount being
-// retired, and the one taking over. Namespace is where both live — the CompositionDefinition's
-// namespace — not the namespace of the bindings, which follow their compositions and may be anywhere.
+// retired, and the one taking over. Namespace is where the retired one lives — the
+// CompositionDefinition's namespace — not the namespace of the bindings, which follow their
+// compositions and may be anywhere.
+//
+// NewNamespace is where the one taking over lives, when that differs: the shared controller of a
+// Kind+version moving to another CompositionDefinition's namespace keeps its ServiceAccount NAME
+// and changes only its namespace. Empty means the same namespace as the retired one.
 type ResubjectOptions struct {
 	DynamicClient dynamic.Interface
 	Namespace     string
+	NewNamespace  string
 	OldGVR        schema.GroupVersionResource
 	NewGVR        schema.GroupVersionResource
 }
@@ -64,7 +70,11 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 
 	oldSA := resourceNamer(opts.OldGVR.Resource, opts.OldGVR.Version)
 	newSA := resourceNamer(opts.NewGVR.Resource, opts.NewGVR.Version)
-	if oldSA == newSA {
+	newNamespace := opts.NewNamespace
+	if newNamespace == "" {
+		newNamespace = opts.Namespace
+	}
+	if oldSA == newSA && opts.Namespace == newNamespace {
 		return 0, nil
 	}
 
@@ -92,7 +102,7 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 				continue
 			}
 
-			rewritten, err := rewriteServiceAccountSubject(&obj, oldSA, newSA, opts.Namespace)
+			rewritten, err := rewriteServiceAccountSubject(&obj, oldSA, newSA, opts.Namespace, newNamespace)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("reading subjects of %s %s/%s: %w",
 					kind.gvr.Resource, obj.GetNamespace(), obj.GetName(), err))
@@ -114,21 +124,22 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 			repaired++
 			log.Debug("Re-subjected derived RBAC after a controller identity rotation",
 				"kind", kind.gvr.Resource, "name", obj.GetName(), "namespace", obj.GetNamespace(),
-				"from", oldSA, "to", newSA)
+				"from", opts.Namespace+"/"+oldSA, "to", newNamespace+"/"+newSA)
 		}
 	}
 
 	return repaired, errors.Join(errs...)
 }
 
-// rewriteServiceAccountSubject replaces the retired ServiceAccount wherever the binding names it,
+// rewriteServiceAccountSubject replaces the retired ServiceAccount (oldSA in saNamespace) with newSA
+// in newNamespace wherever the binding names it,
 // and reports whether anything changed. A binding naming some other identity, or already naming the
 // new one, is left untouched — so a re-run after a partial failure is a no-op on what it repaired.
 //
 // Subjects are matched on (kind, namespace, name) together: a ServiceAccount name is unique only
 // within its namespace, and the controller identities of two CompositionDefinitions in different
 // namespaces can collide by name.
-func rewriteServiceAccountSubject(obj *unstructured.Unstructured, oldSA, newSA, saNamespace string) (bool, error) {
+func rewriteServiceAccountSubject(obj *unstructured.Unstructured, oldSA, newSA, saNamespace, newNamespace string) (bool, error) {
 	subjects, found, err := unstructured.NestedSlice(obj.Object, "subjects")
 	if err != nil {
 		return false, err
@@ -147,6 +158,7 @@ func rewriteServiceAccountSubject(obj *unstructured.Unstructured, oldSA, newSA, 
 			continue
 		}
 		subject["name"] = newSA
+		subject["namespace"] = newNamespace
 		changed = true
 	}
 	if !changed {

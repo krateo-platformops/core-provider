@@ -515,6 +515,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessRehomeFollower(ctx, t, cfg, r)
 	}).Assess("Test Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// r, err := resources.New(cfg.Client().RESTConfig())
 		// if err != nil {
@@ -545,6 +547,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Test Re-home: deleting the original hands the controller over", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessRehomeHandover(ctx, t, cfg, r)
 	}).Feature()
 
 	testenv.Test(t, f)
@@ -649,8 +653,10 @@ func ResolveAPINames(gvk schema.GroupVersionKind) (Info, error) {
 	rc, err := rest.InClusterConfig()
 	if err != nil {
 		if errors.Is(err, rest.ErrNotInCluster) {
-			// For testing purposes, use default kubeconfig
-			rc, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+			// For testing purposes, use the default kubeconfig loading rules: $KUBECONFIG when set
+			// (a run against a disposable cluster that must not touch ~/.kube), else ~/.kube/config.
+			rc, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
 			if err != nil {
 				return Info{}, err
 			}

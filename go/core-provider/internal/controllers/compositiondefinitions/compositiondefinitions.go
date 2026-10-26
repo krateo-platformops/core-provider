@@ -51,6 +51,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	record "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -170,6 +171,11 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		// Re-reconcile CompositionDefinitions when the KubernetesTarget they reference
 		// changes (e.g. its kubeconfigRef is repointed).
 		Watches(&compositiondefinitionsv1alpha1.KubernetesTarget{}, handler.EnqueueRequestsFromMapFunc(enqueueForKubernetesTarget(cli))).
+		// Wake the other definitions on the same Kind when one is deleted or changes version, so the
+		// next owner of a shared per-version controller takes it over at once (controllerowner.go).
+		Watches(&compositiondefinitionsv1alpha1.CompositionDefinition{},
+			handler.EnqueueRequestsFromMapFunc(enqueueSiblingDefinitions(cli)),
+			builder.WithPredicates(siblingHandoverPredicate())).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
@@ -836,6 +842,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		log.Debug("CompositionDefinition was deleted, CRD still resolves; continuing observation", "gvr", gvr.String())
 	}
 
+	// A definition being deleted while another live definition takes its Kind+version over owns
+	// nothing that outlives the hand-over: the CRD, the instances and the shared RBAC are the
+	// successor's. Once its own controller is gone from its namespace, its external resource is
+	// gone, and reporting that is what lets the reconciler remove the finalizer; reporting the
+	// surviving CRD as "exists" would re-run Delete forever.
+	if deleted {
+		gone, err := e.handedOver(ctx, cr, chartGVK, gvr)
+		if err != nil {
+			return reconciler.ExternalObservation{}, err
+		}
+		if gone {
+			log.Debug("Composition controller handed over; nothing of this definition remains", "gvr", gvr.String())
+			return reconciler.ExternalObservation{ResourceExists: false}, nil
+		}
+	}
+
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error getting CRD: %w", err)
@@ -862,6 +884,19 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			ResourceExists:   true,
 			ResourceUpToDate: false,
 		}, nil
+	}
+
+	// A follower defers the CRD, the controller and the migrations of this Kind+version to the
+	// definition that owns them (controllerowner.go). A definition being deleted takes the normal
+	// path, so Delete still runs.
+	if !deleted {
+		owner, err := e.controllerOwner(ctx, cr, chartGVK)
+		if err != nil {
+			return reconciler.ExternalObservation{}, err
+		}
+		if owner != nil {
+			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
+		}
 	}
 
 	genCRD, err := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
@@ -1195,6 +1230,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// Create runs only while this Kind+version has no CRD version yet. If another definition
+	// already owns it, that one is establishing it: wait for it rather than apply a second copy.
+	if owner, err := e.controllerOwner(ctx, cr, gvk); err != nil {
+		return err
+	} else if owner != nil {
+		return fmt.Errorf("waiting for CompositionDefinition %s/%s to establish %s", owner.Namespace, owner.Name, gvk.String())
+	}
+
 	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
@@ -1390,64 +1433,23 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error injecting declared status fields: %w", err)
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
+	// A follower leaves this Kind+version's CRD and controller to the definition that owns them
+	// (controllerowner.go) and hands over any controller of its own. Everything below still runs for
+	// it: retiring its old-version controllers, migrating its OWN instances and pruning are per
+	// definition, and no other definition does them on its behalf.
+	owner, err := e.controllerOwner(ctx, cr, gvk)
 	if err != nil {
-		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-
-	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
-	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
-	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
 		return err
 	}
-
-	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
-		return err
+	var gvr schema.GroupVersionResource
+	if owner != nil {
+		gvr, err = e.yieldController(ctx, cr, gvk, owner, log)
+	} else {
+		gvr, err = e.deployController(ctx, cr, gvk, crd, specSchemaBytes, log)
 	}
-
-	// Seed the remote target BEFORE deploying the cdc (namespace must exist for the cdc; shadow
-	// CompositionDefinition must exist for the cdc's package getter). No-op for local deployments.
-	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
-		return err
-	}
-
-	opts := deploy.DeployOptions{
-		RBACFolderPath:         CDCrbacConfigFolder,
-		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
-		KubeClient:             e.kube,
-		Namespace:              cr.Namespace,
-		GVR:                    gvr,
-		Spec:                   cr.Spec.Chart.DeepCopy(),
-		Controller:             cr.Spec.Controller.DeepCopy(),
-		DeploymentTemplatePath: CDCtemplateDeploymentPath,
-		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
-		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
-		ServiceTemplatePath:    ServiceTemplatePath,
-		JsonSchemaBytes:        specSchemaBytes,
-		DynClient:              e.dynamic,
-		StatusDataTemplate:     encodeStatusDataTemplate(cr),
-		ApiRefName:             apiRefName(cr),
-		ApiRefNamespace:        apiRefNamespace(cr),
-		ApiRefExtras:           encodeApiRefExtras(cr),
-		AuthnNamespace:         AuthnNamespace,
-		SnowplowURL:            SnowplowURL,
-		AuthnURL:               AuthnURL,
-		SelfSAName:             SelfSAName,
-		SelfSANamespace:        SelfSANamespace,
-		SelfGroup:              SelfGroup,
-	}
-
-	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
-		return fmt.Errorf("error deploying dynamic controller: %w", err)
+		return err
 	}
-
-	cr.Status.Digest = dig
-
-	log.Debug("Dynamic Controller successfully updated",
-		"gvr", gvr.String(),
-		"namespace", cr.Namespace,
-	)
 
 	oldGVK := cr.Status.CurrentGVK()
 	oldGVR := cr.Status.CurrentGVR()
@@ -1479,6 +1481,19 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					return fmt.Errorf("error checking references for version %s: %w", vi.Version, refErr)
 				}
 				if referenced {
+					// The version lives on in another definition. Only one controller runs per
+					// Kind+version, so if it was ours, hand it to that definition rather than
+					// leaving it running here; the shared RBAC and the CRD version stay.
+					oldVerGVK := schema.GroupVersionKind{Group: oldGVK.Group, Kind: oldGVK.Kind, Version: vi.Version}
+					successor, serr := e.controllerSuccessor(ctx, cr, oldVerGVK)
+					if serr != nil {
+						return serr
+					}
+					if successor != nil && vi.Chart != nil {
+						if herr := e.handOverController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart), oldGVR, successor, log); herr != nil {
+							return herr
+						}
+					}
 					log.Debug("Skipping controller retirement: version still referenced by another CompositionDefinition", "version", vi.Version)
 					continue
 				}
@@ -1508,9 +1523,16 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 				// and does not. Repoint them in the same operation that retires the identity —
 				// leaving it to each composition's next Observe cannot repair a composition whose
 				// CR is not currently present to be observed (#166).
+				// The current version's controller runs in the owner's namespace when this
+				// definition follows (controllerowner.go).
+				newControllerNamespace := cr.Namespace
+				if owner != nil {
+					newControllerNamespace = owner.Namespace
+				}
 				repaired, rerr := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
 					DynamicClient: e.dynamic,
 					Namespace:     cr.Namespace,
+					NewNamespace:  newControllerNamespace,
 					OldGVR:        oldGVR,
 					NewGVR:        gvr,
 				})
@@ -1586,6 +1608,71 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	return nil
 }
 
+// deployController is Update's apply of this definition's CRD version and composition controller,
+// for the definition that owns its Kind+version (controllerowner.go).
+func (e *external) deployController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, crd *apiextensionsv1.CustomResourceDefinition, specSchemaBytes []byte, log logging.Logger) (schema.GroupVersionResource, error) {
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
+	if err != nil {
+		return gvr, fmt.Errorf("error applying or updating CRD: %w", err)
+	}
+
+	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
+	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
+	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
+		return gvr, err
+	}
+
+	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
+		return gvr, err
+	}
+
+	// Seed the remote target BEFORE deploying the cdc (namespace must exist for the cdc; shadow
+	// CompositionDefinition must exist for the cdc's package getter). No-op for local deployments.
+	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
+		return gvr, err
+	}
+
+	opts := deploy.DeployOptions{
+		RBACFolderPath:         CDCrbacConfigFolder,
+		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
+		KubeClient:             e.kube,
+		Namespace:              cr.Namespace,
+		GVR:                    gvr,
+		Spec:                   cr.Spec.Chart.DeepCopy(),
+		Controller:             cr.Spec.Controller.DeepCopy(),
+		DeploymentTemplatePath: CDCtemplateDeploymentPath,
+		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
+		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
+		ServiceTemplatePath:    ServiceTemplatePath,
+		JsonSchemaBytes:        specSchemaBytes,
+		DynClient:              e.dynamic,
+		StatusDataTemplate:     encodeStatusDataTemplate(cr),
+		ApiRefName:             apiRefName(cr),
+		ApiRefNamespace:        apiRefNamespace(cr),
+		ApiRefExtras:           encodeApiRefExtras(cr),
+		AuthnNamespace:         AuthnNamespace,
+		SnowplowURL:            SnowplowURL,
+		AuthnURL:               AuthnURL,
+		SelfSAName:             SelfSAName,
+		SelfSANamespace:        SelfSANamespace,
+		SelfGroup:              SelfGroup,
+	}
+
+	dig, err := deploy.Deploy(ctx, e.kube, opts)
+	if err != nil {
+		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
+	}
+
+	cr.Status.Digest = dig
+
+	log.Debug("Dynamic Controller successfully updated",
+		"gvr", gvr.String(),
+		"namespace", cr.Namespace,
+	)
+
+	return gvr, nil
+}
+
 // statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
 // at deploy time (apiVersion + resource). For a remote target this is the source of truth, since the
 // generated CRD is not visible to the management-cluster pluralizer. ok is false until status records it.
@@ -1656,7 +1743,25 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// remote CD whose status GVK the management-cluster counting may not see during termination —
 		// which left the spoke's instance and generated CRD orphaned. Force the cleanup when remote.
 		remote := clusterkube.IsRemote(cr.Spec.Deploy)
-		if remote || len(lst) == 1 {
+
+		// The live local definition that takes this Kind+version's controller over once this one is
+		// gone (controllerowner.go). While there is one, this delete is a hand-over: instances, the
+		// CRD and the shared cluster-scoped RBAC all stay, and only what lives in this definition's
+		// namespace is removed. This is what makes moving a definition with live instances to another
+		// namespace (create the new one, then delete the old) safe.
+		var successor *compositiondefinitionsv1alpha1.CompositionDefinition
+		if !remote {
+			successor, err = e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{
+				Group:   gvk.Group,
+				Kind:    gvk.Kind,
+				Version: gvk.Version,
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		if successor == nil && (remote || len(lst) == 1) {
 			log.Debug("Deleting Compositions of this version", "gvk", gvk.String(), "remote", remote)
 
 			// Delete compositions of this version manually
@@ -1718,6 +1823,19 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				continue
 			}
 			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
+			// An old version another live definition still targets is handed over, not torn down.
+			if !remote {
+				oldSuccessor, serr := e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{Group: gvk.Group, Kind: gvk.Kind, Version: vi.Version})
+				if serr != nil {
+					return serr
+				}
+				if oldSuccessor != nil {
+					if herr := e.handOverController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart), oldVerGVR, oldSuccessor, log); herr != nil {
+						log.Debug("Best-effort hand-over of coexisting old-version controller on delete failed", "version", vi.Version, "error", herr.Error())
+					}
+					continue
+				}
+			}
 			if uerr := deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
 				DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 				Spec:                   (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
@@ -1735,6 +1853,13 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}); uerr != nil && !errors.Is(uerr, deploy.ErrCompositionStillExist) {
 				log.Debug("Best-effort retire of coexisting old-version controller on delete failed", "version", vi.Version, "error", uerr.Error())
 			}
+		}
+
+		if successor != nil {
+			if err := e.handOverController(ctx, cr, cr.Spec.Chart.DeepCopy(), gvr, successor, log); err != nil {
+				return err
+			}
+			return e.teardownRemoteSeedIfNeeded(ctx, cr)
 		}
 
 		opts := deploy.UndeployOptions{
