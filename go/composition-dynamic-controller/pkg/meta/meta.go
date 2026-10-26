@@ -78,9 +78,31 @@ const (
 //
 // Two independent signals, and EITHER one being present means parent-rendered. Measured on all 83
 // compositions of krateo-057 they agree exactly (59 parent-rendered, 24 standalone, empty symmetric
-// difference), but they are required to agree in the safe direction only: a missing helm annotation
-// alone must not be enough to conclude "standalone", because concluding that wrongly during a real
-// handover is what destroys a release.
+// difference, confirmed in both directions by a second session).
+//
+// The disjunction is LOAD-BEARING, not belt-and-braces, and each half covers a real shape:
+//
+//   - helm annotation present, label absent: a plain Helm chart that itself declares a Composition
+//     CR, installed as a component rather than rendered by a parent composition. Helm stamps
+//     release-name on everything it renders; nothing stamps the parent-composition label, because
+//     there is no parent composition. True is CORRECT here — that chart does re-render it on a
+//     bump. An AND would call this standalone and uninstall it mid-bump, which is #168's
+//     destruction recreated somewhere new.
+//
+//   - label present, helm annotation absent: a composition child that was hand-applied, re-applied
+//     from a dumped manifest, or restored from a backup that dropped Helm's ownership metadata.
+//     The label lives in the object's own metadata and survives; the annotation does not. True is
+//     WRONG here — nothing will recreate it, so its delete really is a teardown — but it is wrong
+//     in the chosen direction: the release is ORPHANED rather than DESTROYED. An orphan can be
+//     adopted or cleaned up by hand; a destroyed release and its children cannot. Recorded as a
+//     deliberate trade rather than left to be discovered as a gap, and note that hand-applying a
+//     chart's CRs is a known way to strip exactly that annotation.
+//
+// One precision note. This reads ParentCompositionNameLabel as a LABEL only, which is where the
+// post-renderer writes it. A census that accepts it as a label OR an annotation selects the same
+// objects today (nothing carries it as an annotation), so the two agree — but they would diverge if
+// anything ever wrote it as an annotation, and the symptom would be a surprise uninstall. The
+// measured 24 should therefore not be treated as re-derivable from a looser check.
 func IsParentRendered(o metav1.Object) bool {
 	if o.GetAnnotations()[AnnotationKeyHelmReleaseName] != "" {
 		return true
