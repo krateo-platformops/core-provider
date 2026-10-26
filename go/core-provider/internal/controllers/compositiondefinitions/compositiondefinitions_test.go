@@ -515,6 +515,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessRehomeFollower(ctx, t, cfg, r)
 	}).Assess("Test Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// r, err := resources.New(cfg.Client().RESTConfig())
 		// if err != nil {
@@ -545,6 +547,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Test Re-home: deleting the original hands the controller over", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessRehomeHandover(ctx, t, cfg, r)
 	}).Feature()
 
 	testenv.Test(t, f)

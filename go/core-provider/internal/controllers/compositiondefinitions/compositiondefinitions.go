@@ -51,6 +51,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	record "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -170,6 +171,11 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		// Re-reconcile CompositionDefinitions when the KubernetesTarget they reference
 		// changes (e.g. its kubeconfigRef is repointed).
 		Watches(&compositiondefinitionsv1alpha1.KubernetesTarget{}, handler.EnqueueRequestsFromMapFunc(enqueueForKubernetesTarget(cli))).
+		// Wake the other definitions on the same Kind when one is deleted or changes version, so the
+		// next owner of a shared per-version controller takes it over at once (controllerowner.go).
+		Watches(&compositiondefinitionsv1alpha1.CompositionDefinition{},
+			handler.EnqueueRequestsFromMapFunc(enqueueSiblingDefinitions(cli)),
+			builder.WithPredicates(siblingHandoverPredicate())).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
@@ -864,6 +870,19 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
+	// A follower defers the CRD, the controller and the migrations of this Kind+version to the
+	// definition that owns them (controllerowner.go). A definition being deleted takes the normal
+	// path, so Delete still runs.
+	if !deleted {
+		owner, err := e.controllerOwner(ctx, cr, chartGVK)
+		if err != nil {
+			return reconciler.ExternalObservation{}, err
+		}
+		if owner != nil {
+			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
+		}
+	}
+
 	genCRD, err := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error generating CRD: %w", err)
@@ -1195,6 +1214,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// Another definition already runs this Kind+version's controller: deploy nothing and do not
+	// re-apply its CRD, only record the status the delete path counts definitions by.
+	if owner, err := e.controllerOwner(ctx, cr, gvk); err != nil {
+		return err
+	} else if owner != nil {
+		return e.settleFollower(ctx, cr, gvk, owner)
+	}
+
 	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
@@ -1375,6 +1402,14 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// A follower retires any controller it deployed before ownership was elected, and otherwise
+	// leaves the CRD, controller and migrations of this Kind+version to the owner.
+	if owner, err := e.controllerOwner(ctx, cr, gvk); err != nil {
+		return err
+	} else if owner != nil {
+		return e.settleFollower(ctx, cr, gvk, owner)
+	}
+
 	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
@@ -1479,6 +1514,19 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					return fmt.Errorf("error checking references for version %s: %w", vi.Version, refErr)
 				}
 				if referenced {
+					// The version lives on in another definition. Only one controller runs per
+					// Kind+version, so if it was ours, hand it to that definition rather than
+					// leaving it running here; the shared RBAC and the CRD version stay.
+					oldVerGVK := schema.GroupVersionKind{Group: oldGVK.Group, Kind: oldGVK.Kind, Version: vi.Version}
+					successor, serr := e.controllerSuccessor(ctx, cr, oldVerGVK)
+					if serr != nil {
+						return serr
+					}
+					if successor != nil && vi.Chart != nil {
+						if herr := e.handOverController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart), oldGVR, successor, log); herr != nil {
+							return herr
+						}
+					}
 					log.Debug("Skipping controller retirement: version still referenced by another CompositionDefinition", "version", vi.Version)
 					continue
 				}
@@ -1656,7 +1704,25 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// remote CD whose status GVK the management-cluster counting may not see during termination —
 		// which left the spoke's instance and generated CRD orphaned. Force the cleanup when remote.
 		remote := clusterkube.IsRemote(cr.Spec.Deploy)
-		if remote || len(lst) == 1 {
+
+		// The live local definition that takes this Kind+version's controller over once this one is
+		// gone (controllerowner.go). While there is one, this delete is a hand-over: instances, the
+		// CRD and the shared cluster-scoped RBAC all stay, and only what lives in this definition's
+		// namespace is removed. This is what makes moving a definition with live instances to another
+		// namespace (create the new one, then delete the old) safe.
+		var successor *compositiondefinitionsv1alpha1.CompositionDefinition
+		if !remote {
+			successor, err = e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{
+				Group:   gvk.Group,
+				Kind:    gvk.Kind,
+				Version: gvk.Version,
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		if successor == nil && (remote || len(lst) == 1) {
 			log.Debug("Deleting Compositions of this version", "gvk", gvk.String(), "remote", remote)
 
 			// Delete compositions of this version manually
@@ -1718,6 +1784,19 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				continue
 			}
 			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
+			// An old version another live definition still targets is handed over, not torn down.
+			if !remote {
+				oldSuccessor, serr := e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{Group: gvk.Group, Kind: gvk.Kind, Version: vi.Version})
+				if serr != nil {
+					return serr
+				}
+				if oldSuccessor != nil {
+					if herr := e.handOverController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart), oldVerGVR, oldSuccessor, log); herr != nil {
+						log.Debug("Best-effort hand-over of coexisting old-version controller on delete failed", "version", vi.Version, "error", herr.Error())
+					}
+					continue
+				}
+			}
 			if uerr := deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
 				DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 				Spec:                   (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
@@ -1735,6 +1814,13 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}); uerr != nil && !errors.Is(uerr, deploy.ErrCompositionStillExist) {
 				log.Debug("Best-effort retire of coexisting old-version controller on delete failed", "version", vi.Version, "error", uerr.Error())
 			}
+		}
+
+		if successor != nil {
+			if err := e.handOverController(ctx, cr, cr.Spec.Chart.DeepCopy(), gvr, successor, log); err != nil {
+				return err
+			}
+			return e.teardownRemoteSeedIfNeeded(ctx, cr)
 		}
 
 		opts := deploy.UndeployOptions{

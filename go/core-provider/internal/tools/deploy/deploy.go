@@ -71,6 +71,13 @@ type UndeployOptions struct {
 	// deploy is removed on undeploy. AuthnNamespace is the authn operator namespace it lives in.
 	ApiRefName     string
 	AuthnNamespace string
+	// KeepShared leaves in place every object another CompositionDefinition's controller for the
+	// same Kind+version also uses: the cluster-scoped ClusterRole/ClusterRoleBinding and apiRef RBAC
+	// (named {resource}-{apiVersion}, with no namespace in the name), and the credentials
+	// Role/RoleBinding when they live outside this definition's namespace. Only the objects in
+	// Namespace are removed. Set it whenever the version is still referenced by another definition:
+	// deleting the shared objects would strip the surviving controller of its permissions.
+	KeepShared bool
 }
 
 // (UndeployOptions needs no SnowplowURL: the apiRef ClusterRole + binding are deleted by name.)
@@ -313,24 +320,29 @@ func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole
 	return nil
 }
 
-func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount) error {
+func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, keepClusterScoped bool) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	err := kubecli.Uninstall(ctx, dyn, clusterRoleGVR, &clusterrole, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "Error uninstalling clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
-		return err
-	}
-	log.Debug("ClusterRole successfully uninstalled", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
+	if keepClusterScoped {
+		log.Debug("Keeping shared cluster-scoped RBAC: another definition still uses this controller version",
+			"clusterrole", clusterrole.Name, "clusterrolebinding", clusterrolebinding.Name)
+	} else {
+		err := kubecli.Uninstall(ctx, dyn, clusterRoleGVR, &clusterrole, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "Error uninstalling clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
+			return err
+		}
+		log.Debug("ClusterRole successfully uninstalled", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 
-	err = kubecli.Uninstall(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "Error uninstalling clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
-		return err
+		err = kubecli.Uninstall(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "Error uninstalling clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
+			return err
+		}
+		log.Debug("ClusterRoleBinding successfully uninstalled", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 	}
-	log.Debug("ClusterRoleBinding successfully uninstalled", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 
-	err = kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
+	err := kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
 		return err
@@ -674,7 +686,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 	log.Debug("Configmap successfully uninstalled", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace)
 
-	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa)
+	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.KeepShared)
 	if err != nil {
 		return err
 	}
@@ -686,10 +698,13 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
-	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated.
-	err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
-	if err != nil {
-		return err
+	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
+	// no namespace in it, so it is shared with any other definition on this Kind+version.
+	if !opts.KeepShared {
+		err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = os.Stat(opts.ServiceTemplatePath)
@@ -709,7 +724,12 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		log.Debug("Service successfully uninstalled", "gvr", opts.GVR.String(), "name", svc.Name, "namespace", svc.Namespace)
 	}
 
-	if opts.Spec != nil && opts.Spec.Credentials != nil {
+	// The credentials Role/RoleBinding live in the Secret's namespace under the shared
+	// {resource}-{apiVersion} name; outside this definition's namespace another definition on the
+	// same version may be using them.
+	keepCredentialsRBAC := opts.KeepShared && opts.Spec != nil && opts.Spec.Credentials != nil &&
+		opts.Spec.Credentials.PasswordRef.Namespace != opts.Namespace
+	if opts.Spec != nil && opts.Spec.Credentials != nil && !keepCredentialsRBAC {
 		role := rbacv1.Role{}
 		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), "secretName", opts.Spec.Credentials.PasswordRef.Name)
 		if err != nil {
@@ -964,4 +984,13 @@ func getServiceNN(nn types.NamespacedName) types.NamespacedName {
 		Namespace: nn.Namespace,
 		Name:      nn.Name + "-service",
 	}
+}
+
+// ControllerDeploymentKey is the namespace/name of the composition-dynamic-controller Deployment
+// Deploy creates for gvr in namespace.
+func ControllerDeploymentKey(namespace string, gvr schema.GroupVersionResource) types.NamespacedName {
+	return getCDCDeploymentNN(types.NamespacedName{
+		Namespace: namespace,
+		Name:      resourceNamer(gvr.Resource, gvr.Version),
+	})
 }

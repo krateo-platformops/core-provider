@@ -181,3 +181,47 @@ func TestDerivedRBACSuffixMatchesRBACGen(t *testing.T) {
 			"matching the objects cdc generates", got, DerivedRBACNameSuffix)
 	}
 }
+
+// Moving a Kind+version's controller to another definition's namespace keeps the ServiceAccount
+// NAME and changes its namespace: every derived binding naming the old identity must follow it,
+// and a binding naming the same SA name in a third namespace (another identity) must not.
+func TestResubjectDerivedRBAC_FollowsANamespaceMove(t *testing.T) {
+	const movedNS = "krateo-bp-portal"
+	dyn := rbacDyn(
+		binding("RoleBinding", "demo-system", "portal-krateo-rbac", oldSA, saNS),
+		binding("ClusterRoleBinding", "", "portal-krateo-rbac", oldSA, saNS),
+		binding("RoleBinding", "other-system", "tenant-portal-krateo-rbac", oldSA, "other-system"),
+	)
+
+	repaired, err := ResubjectDerivedRBAC(context.Background(), ResubjectOptions{
+		DynamicClient: dyn,
+		Namespace:     saNS,
+		NewNamespace:  movedNS,
+		OldGVR:        oldPortalGVR,
+		NewGVR:        oldPortalGVR,
+	})
+	if err != nil {
+		t.Fatalf("ResubjectDerivedRBAC: %v", err)
+	}
+	if repaired != 2 {
+		t.Errorf("repaired = %d, want 2", repaired)
+	}
+
+	subjectNS := func(gvr schema.GroupVersionResource, namespace, name string) string {
+		got, err := dyn.Resource(gvr).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting %s %s/%s: %v", gvr.Resource, namespace, name, err)
+		}
+		subjects, _, _ := unstructured.NestedSlice(got.Object, "subjects")
+		return subjects[0].(map[string]any)["namespace"].(string)
+	}
+	if got := subjectNS(roleBindingGVR, "demo-system", "portal-krateo-rbac"); got != movedNS {
+		t.Errorf("derived RoleBinding subject namespace = %q, want %q", got, movedNS)
+	}
+	if got := subjectNS(clusterRoleBindingGVR, "", "portal-krateo-rbac"); got != movedNS {
+		t.Errorf("derived ClusterRoleBinding subject namespace = %q, want %q", got, movedNS)
+	}
+	if got := subjectNS(roleBindingGVR, "other-system", "tenant-portal-krateo-rbac"); got != "other-system" {
+		t.Errorf("another identity's binding was moved to %q", got)
+	}
+}
