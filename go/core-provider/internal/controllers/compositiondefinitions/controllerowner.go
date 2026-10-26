@@ -7,10 +7,8 @@ import (
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
-	"github.com/krateo-platformops/core-provider/internal/tools/chart/chartfs"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
-	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -44,6 +42,8 @@ import (
 // broken by namespace, then name, so every reconcile of every definition elects the same one).
 // The others are followers: they deploy nothing, retire any controller they deployed before this
 // rule existed, and keep their status current so the delete path's reference counting sees them.
+// They still migrate their OWN instances between versions; only the CRD and the controller are
+// the owner's.
 // A definition being deleted never owns, so the next-oldest takes over the moment deletion starts.
 //
 // creationTimestamp is the sort key on purpose: it is immutable. generation/resourceVersion are
@@ -187,22 +187,47 @@ func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefiniti
 }
 
 // observeFollower is Observe for a definition that does not own its Kind+version's controller.
-// It is up to date once no controller of its own is left in its namespace (one deployed before
-// ownership was elected is retired by settleFollower); its status is refreshed every time, because
-// the delete path counts definitions by the GVK on their status.
+// It is up to date once Update has moved its status onto this version, no controller of its own is
+// left in its namespace (one deployed before ownership was elected), and none of ITS instances
+// still wait for a version migration: a follower still migrates its own instances, because no other
+// definition does that for it, and an unmigrated instance would hold every served-version prune of
+// the Kind back for good. The CRD's status shape is the owner's, so it is not compared here.
 func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind, packageURL string, owner *compositiondefinitionsv1alpha1.CompositionDefinition) (reconciler.ExternalObservation, error) {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+	notUpToDate := reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: false}
+
+	if cr.Status.CurrentGVK() != gvk {
+		log.Debug("Follower status not yet on this version", "status", cr.Status.CurrentGVK().String(), "chart", gvk.String())
+		return notUpToDate, nil
+	}
 	if owner.Namespace != cr.Namespace {
 		own, err := e.controllerDeployedIn(ctx, cr.Namespace, gvr)
 		if err != nil {
 			return reconciler.ExternalObservation{}, err
 		}
 		if own {
-			log.Debug("Follower still runs its own composition controller; retiring it",
+			log.Debug("Follower still runs its own composition controller; handing it over",
 				"gvr", gvr.String(), "owner", owner.Namespace+"/"+owner.Name)
-			return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: false}, nil
+			return notUpToDate, nil
 		}
 	}
+	if cr.MigrationApproved(gvr.Version) {
+		self := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+		for _, vi := range cr.Status.Managed.VersionInfo {
+			if vi.Version == gvr.Version {
+				continue
+			}
+			stale, err := getters.GetOwnedCompositionsByVersionLabel(ctx, e.dynamic, gvr, vi.Version, self)
+			if err != nil {
+				return reconciler.ExternalObservation{}, fmt.Errorf("error checking compositions on version %s: %w", vi.Version, err)
+			}
+			if len(stale.Items) > 0 {
+				log.Debug("Follower's compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				return notUpToDate, nil
+			}
+		}
+	}
+
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, packageURL); err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
@@ -211,39 +236,21 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }
 
-// settleFollower is Create/Update for a definition that does not own its Kind+version's
-// controller: it hands over any controller it still runs in its own namespace and records the
-// status the delete path counts definitions by. It never applies the CRD, deploys a controller or
-// migrates instances; the owner does.
-func (e *external) settleFollower(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, owner *compositiondefinitionsv1alpha1.CompositionDefinition) error {
-	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-
+// yieldController is Update's step for a definition that does not own its Kind+version's
+// controller: instead of applying the CRD and deploying a controller, it hands over any controller
+// it still runs in its own namespace. The owner established the CRD version this definition is on,
+// so the pluralizer resolves it.
+func (e *external) yieldController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, owner *compositiondefinitionsv1alpha1.CompositionDefinition, log logging.Logger) (schema.GroupVersionResource, error) {
 	gvr, err := e.pluralizer.GVKtoGVR(gvk)
 	if err != nil {
-		return fmt.Errorf("waiting for CompositionDefinition %s/%s to establish %s: %w", owner.Namespace, owner.Name, gvk.String(), err)
+		return gvr, fmt.Errorf("waiting for CompositionDefinition %s/%s to establish %s: %w", owner.Namespace, owner.Name, gvk.String(), err)
 	}
 	if err := e.handOverController(ctx, cr, cr.Spec.Chart.DeepCopy(), gvr, owner, log); err != nil {
-		return err
-	}
-
-	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
-	if err != nil {
-		return fmt.Errorf("error getting CRD: %w", err)
-	}
-	if crd == nil {
-		return fmt.Errorf("waiting for CompositionDefinition %s/%s to establish the %s CRD", owner.Namespace, owner.Name, gvr.GroupResource().String())
-	}
-	pkgFS, err := chartfs.ForSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
-	if err != nil {
-		return err
-	}
-	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, pkgFS.PackageURL()); err != nil {
-		return fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
+		return gvr, err
 	}
 	cr.Status.Digest = ""
-	cr.SetConditions(followerCondition(owner, gvr))
-	log.Debug("Follower settled", "gvr", gvr.String(), "owner", owner.Namespace+"/"+owner.Name)
-	return nil
+	log.Debug("Composition controller run by another definition", "gvr", gvr.String(), "owner", owner.Namespace+"/"+owner.Name)
+	return gvr, nil
 }
 
 // siblingHandoverPredicate passes the CompositionDefinition events after which another definition

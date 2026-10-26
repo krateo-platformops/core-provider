@@ -653,8 +653,10 @@ func ResolveAPINames(gvk schema.GroupVersionKind) (Info, error) {
 	rc, err := rest.InClusterConfig()
 	if err != nil {
 		if errors.Is(err, rest.ErrNotInCluster) {
-			// For testing purposes, use default kubeconfig
-			rc, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+			// For testing purposes, use the default kubeconfig loading rules: $KUBECONFIG when set
+			// (a run against a disposable cluster that must not touch ~/.kube), else ~/.kube/config.
+			rc, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
 			if err != nil {
 				return Info{}, err
 			}

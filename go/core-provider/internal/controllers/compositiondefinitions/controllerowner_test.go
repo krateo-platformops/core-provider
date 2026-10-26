@@ -1,11 +1,16 @@
 package compositiondefinitions
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/krateo-platformops/core-provider/apis"
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlevent "sigs.k8s.io/controller-runtime/pkg/event"
 )
 
@@ -139,5 +144,40 @@ func TestSiblingHandoverPredicate(t *testing.T) {
 	bumped.Status.ApiVersion = "composition.krateo.io/v1-1-0"
 	if !p.Update(ctrlevent.UpdateEvent{ObjectOld: &base, ObjectNew: bumped}) {
 		t.Error("a version move must wake siblings")
+	}
+}
+
+// The election is per Kind+VERSION. Two definitions on the same Kind at different versions are not
+// siblings: each owns its own version's controller and applies its own CRD version, so neither
+// version can be lost to the other's CRD apply (#192's invariant).
+func TestControllerOwner_IsPerVersion(t *testing.T) {
+	sc := runtime.NewScheme()
+	if err := apis.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	onVersion := func(cd compositiondefinitionsv1alpha1.CompositionDefinition, version string) *compositiondefinitionsv1alpha1.CompositionDefinition {
+		cd.Status.ApiVersion = "composition.krateo.io/" + version
+		cd.Status.Kind = "FireworksApp"
+		return &cd
+	}
+	older := onVersion(ownerCD("team-a", "fw", 0), "v1-0-0")
+	newerOtherVersion := onVersion(ownerCD("team-b", "fw", 1), "v2-0-0")
+	newerSameVersion := onVersion(ownerCD("team-c", "fw", 2), "v1-0-0")
+
+	e := &external{mgmt: clientfake.NewClientBuilder().WithScheme(sc).
+		WithObjects(older, newerOtherVersion, newerSameVersion).WithStatusSubresource(older, newerOtherVersion, newerSameVersion).Build()}
+
+	gvk := func(version string) schema.GroupVersionKind {
+		return schema.GroupVersionKind{Group: "composition.krateo.io", Version: version, Kind: "FireworksApp"}
+	}
+	if got, err := e.controllerOwner(context.Background(), newerOtherVersion, gvk("v2-0-0")); err != nil || got != nil {
+		t.Fatalf("the only definition on v2-0-0 must own it, got follower of %s (err %v)", ownerName(got), err)
+	}
+	if got, err := e.controllerOwner(context.Background(), older, gvk("v1-0-0")); err != nil || got != nil {
+		t.Fatalf("the oldest definition on v1-0-0 must own it, got follower of %s (err %v)", ownerName(got), err)
+	}
+	got, err := e.controllerOwner(context.Background(), newerSameVersion, gvk("v1-0-0"))
+	if err != nil || ownerName(got) != "team-a/fw" {
+		t.Fatalf("a newer definition on v1-0-0 must follow team-a/fw, got %s (err %v)", ownerName(got), err)
 	}
 }

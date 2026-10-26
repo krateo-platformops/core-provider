@@ -1214,12 +1214,12 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
-	// Another definition already runs this Kind+version's controller: deploy nothing and do not
-	// re-apply its CRD, only record the status the delete path counts definitions by.
+	// Create runs only while this Kind+version has no CRD version yet. If another definition
+	// already owns it, that one is establishing it: wait for it rather than apply a second copy.
 	if owner, err := e.controllerOwner(ctx, cr, gvk); err != nil {
 		return err
 	} else if owner != nil {
-		return e.settleFollower(ctx, cr, gvk, owner)
+		return fmt.Errorf("waiting for CompositionDefinition %s/%s to establish %s", owner.Namespace, owner.Name, gvk.String())
 	}
 
 	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
@@ -1402,14 +1402,6 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
-	// A follower retires any controller it deployed before ownership was elected, and otherwise
-	// leaves the CRD, controller and migrations of this Kind+version to the owner.
-	if owner, err := e.controllerOwner(ctx, cr, gvk); err != nil {
-		return err
-	} else if owner != nil {
-		return e.settleFollower(ctx, cr, gvk, owner)
-	}
-
 	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
@@ -1425,64 +1417,23 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error injecting declared status fields: %w", err)
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
+	// A follower leaves this Kind+version's CRD and controller to the definition that owns them
+	// (controllerowner.go) and hands over any controller of its own. Everything below still runs for
+	// it: retiring its old-version controllers, migrating its OWN instances and pruning are per
+	// definition, and no other definition does them on its behalf.
+	owner, err := e.controllerOwner(ctx, cr, gvk)
 	if err != nil {
-		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-
-	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
-	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
-	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
 		return err
 	}
-
-	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
-		return err
+	var gvr schema.GroupVersionResource
+	if owner != nil {
+		gvr, err = e.yieldController(ctx, cr, gvk, owner, log)
+	} else {
+		gvr, err = e.deployController(ctx, cr, gvk, crd, specSchemaBytes, log)
 	}
-
-	// Seed the remote target BEFORE deploying the cdc (namespace must exist for the cdc; shadow
-	// CompositionDefinition must exist for the cdc's package getter). No-op for local deployments.
-	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
-		return err
-	}
-
-	opts := deploy.DeployOptions{
-		RBACFolderPath:         CDCrbacConfigFolder,
-		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
-		KubeClient:             e.kube,
-		Namespace:              cr.Namespace,
-		GVR:                    gvr,
-		Spec:                   cr.Spec.Chart.DeepCopy(),
-		Controller:             cr.Spec.Controller.DeepCopy(),
-		DeploymentTemplatePath: CDCtemplateDeploymentPath,
-		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
-		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
-		ServiceTemplatePath:    ServiceTemplatePath,
-		JsonSchemaBytes:        specSchemaBytes,
-		DynClient:              e.dynamic,
-		StatusDataTemplate:     encodeStatusDataTemplate(cr),
-		ApiRefName:             apiRefName(cr),
-		ApiRefNamespace:        apiRefNamespace(cr),
-		ApiRefExtras:           encodeApiRefExtras(cr),
-		AuthnNamespace:         AuthnNamespace,
-		SnowplowURL:            SnowplowURL,
-		AuthnURL:               AuthnURL,
-		SelfSAName:             SelfSAName,
-		SelfSANamespace:        SelfSANamespace,
-		SelfGroup:              SelfGroup,
-	}
-
-	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
-		return fmt.Errorf("error deploying dynamic controller: %w", err)
+		return err
 	}
-
-	cr.Status.Digest = dig
-
-	log.Debug("Dynamic Controller successfully updated",
-		"gvr", gvr.String(),
-		"namespace", cr.Namespace,
-	)
 
 	oldGVK := cr.Status.CurrentGVK()
 	oldGVR := cr.Status.CurrentGVR()
@@ -1556,9 +1507,16 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 				// and does not. Repoint them in the same operation that retires the identity —
 				// leaving it to each composition's next Observe cannot repair a composition whose
 				// CR is not currently present to be observed (#166).
+				// The current version's controller runs in the owner's namespace when this
+				// definition follows (controllerowner.go).
+				newControllerNamespace := cr.Namespace
+				if owner != nil {
+					newControllerNamespace = owner.Namespace
+				}
 				repaired, rerr := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
 					DynamicClient: e.dynamic,
 					Namespace:     cr.Namespace,
+					NewNamespace:  newControllerNamespace,
 					OldGVR:        oldGVR,
 					NewGVR:        gvr,
 				})
@@ -1632,6 +1590,71 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	}
 
 	return nil
+}
+
+// deployController is Update's apply of this definition's CRD version and composition controller,
+// for the definition that owns its Kind+version (controllerowner.go).
+func (e *external) deployController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, crd *apiextensionsv1.CustomResourceDefinition, specSchemaBytes []byte, log logging.Logger) (schema.GroupVersionResource, error) {
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
+	if err != nil {
+		return gvr, fmt.Errorf("error applying or updating CRD: %w", err)
+	}
+
+	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
+	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
+	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
+		return gvr, err
+	}
+
+	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
+		return gvr, err
+	}
+
+	// Seed the remote target BEFORE deploying the cdc (namespace must exist for the cdc; shadow
+	// CompositionDefinition must exist for the cdc's package getter). No-op for local deployments.
+	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
+		return gvr, err
+	}
+
+	opts := deploy.DeployOptions{
+		RBACFolderPath:         CDCrbacConfigFolder,
+		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
+		KubeClient:             e.kube,
+		Namespace:              cr.Namespace,
+		GVR:                    gvr,
+		Spec:                   cr.Spec.Chart.DeepCopy(),
+		Controller:             cr.Spec.Controller.DeepCopy(),
+		DeploymentTemplatePath: CDCtemplateDeploymentPath,
+		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
+		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
+		ServiceTemplatePath:    ServiceTemplatePath,
+		JsonSchemaBytes:        specSchemaBytes,
+		DynClient:              e.dynamic,
+		StatusDataTemplate:     encodeStatusDataTemplate(cr),
+		ApiRefName:             apiRefName(cr),
+		ApiRefNamespace:        apiRefNamespace(cr),
+		ApiRefExtras:           encodeApiRefExtras(cr),
+		AuthnNamespace:         AuthnNamespace,
+		SnowplowURL:            SnowplowURL,
+		AuthnURL:               AuthnURL,
+		SelfSAName:             SelfSAName,
+		SelfSANamespace:        SelfSANamespace,
+		SelfGroup:              SelfGroup,
+	}
+
+	dig, err := deploy.Deploy(ctx, e.kube, opts)
+	if err != nil {
+		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
+	}
+
+	cr.Status.Digest = dig
+
+	log.Debug("Dynamic Controller successfully updated",
+		"gvr", gvr.String(),
+		"namespace", cr.Namespace,
+	)
+
+	return gvr, nil
 }
 
 // statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
