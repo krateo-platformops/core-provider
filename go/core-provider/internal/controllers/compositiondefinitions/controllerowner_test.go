@@ -228,4 +228,11 @@ func TestHandedOver(t *testing.T) {
 	if !check(leaving, successor) {
 		t.Error("successor present and own controller gone: the definition must be reported gone")
 	}
+
+	// Same namespace: the controller in it IS the successor's (shared {resource}-{apiVersion}
+	// objects), so the leaving definition is done at once, and must not wait for, or remove, it.
+	sameNS := v1(ownerCD("krateo-system", "fw-moved", 1))
+	if !check(leaving, sameNS, ownController) {
+		t.Error("same-namespace successor: the shared controller is the successor's; the leaving definition is gone")
+	}
 }

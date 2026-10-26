@@ -183,8 +183,19 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 
 // handedOver reports whether a definition being deleted has finished handing its Kind+version
 // over: a live local successor exists and no controller of this definition's own is left in its
-// namespace (two definitions in the same namespace share one controller, which is the
-// successor's from the start).
+// namespace.
+//
+// Ordering: it can only become true AFTER Delete's handOverController has removed this
+// definition's controller (the first Observe of a deletion still finds it, returns "exists", and
+// Delete runs), so it never short-circuits the hand-over it depends on.
+//
+// Same namespace: true at once, with no Delete, by construction. Every controller object is named
+// {resource}-{apiVersion} in the definition's namespace, so two definitions there on one version
+// share ONE ServiceAccount, Deployment and ConfigMap, and the shared ClusterRoleBinding's subject is
+// that same ServiceAccount whichever of them deployed last. Nothing belongs to the leaving
+// definition alone, and nothing it could remove would leave the successor's controller without a
+// live identity. The successor redeploys its own configuration on its next reconcile (its status
+// digest is empty while it follows, so its Observe reports not up to date).
 func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) (bool, error) {
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
 		return false, nil
