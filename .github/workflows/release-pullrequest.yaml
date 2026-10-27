@@ -103,6 +103,52 @@ jobs:
       test_args: -count=1 -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
+  envtest-cdc:
+    # The composition-dynamic-controller's envtest-tagged tests had NO runner. They prove the
+    # cache-staleness fix end to end — WatchCRDsAndInvalidate keeping the long-lived
+    # DeferredDiscoveryRESTMapper fresh when a CRD is registered mid-run — and they carry their own
+    # negative control: an UNWATCHED mapper must stay stale until an explicit Reset().
+    #
+    # A test with a built-in control that nothing executes is the worst of both worlds: it reads as
+    # coverage and gates nothing. This is the same gap as krateo-platformops/plumbing#51 finding 1,
+    # in this repo.
+    #
+    # envtest rather than kind: these need a real kube-apiserver and nothing else — no cluster, no
+    # CNI, no operators — so this job is a fraction of the e2e job's cost.
+    name: envtest (real apiserver, cdc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
+      # Pinned to the controller-runtime 0.22 line, matching sigs.k8s.io/controller-runtime v0.22.3
+      # in the cdc's go.mod. Do NOT use @latest: newer setup-envtest requires a toolchain this
+      # module does not use, and the failure is an unhelpful version error at install time.
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
+
+      - name: Run the cdc envtest suite
+        working-directory: go/composition-dynamic-controller
+        run: |
+          set -euo pipefail
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.36.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS"
+
+          # -count=1: these read nothing outside the module today, but the suite is cheap and a
+          # cached pass here would be indistinguishable from a real one.
+          go test -tags envtest -count=1 -timeout 15m -v ./... 2>&1 | tee /tmp/envtest.log
+
+          # The tests SKIP when KUBEBUILDER_ASSETS is unset, so a misconfigured job would go green
+          # having executed nothing. Fail on any skip: in this suite a skip means the apiserver
+          # assets were not resolved, which is a broken job rather than an inapplicable test.
+          if grep -q -- "--- SKIP" /tmp/envtest.log; then
+            echo "::error::an envtest test SKIPPED - KUBEBUILDER_ASSETS was not resolved, so this job proved nothing"
+            grep -- "--- SKIP" /tmp/envtest.log
+            exit 1
+          fi
+
   e2e:
     # The e2e suite (internal/tools/crd/*_e2e_test.go, `//go:build e2e`) needs a REAL apiserver and
     # was therefore behind a build tag that nothing passed. It proves things the unit tests cannot:
