@@ -62,6 +62,107 @@ func SetServedStorage(crd *apiextensionsv1.CustomResourceDefinition, version str
 	}
 }
 
+// VacuumVersionName is the non-served, permissive storage version every multi-version composition
+// CRD carries. Several served versions with narrow schemas share it, so an object written at any of
+// them round-trips through storage without losing fields the others do not declare.
+const VacuumVersionName = "vacuum"
+
+// vacuumVersion returns the synthesized vacuum storage version. Synthesized rather than derived
+// from a chart, which is what makes it the one version core-provider can recreate from nothing —
+// see RestoreOrphanedVacuum.
+//
+// Single-sourced deliberately: AppendVersion and RestoreOrphanedVacuum must produce byte-identical
+// versions, or a repaired CRD would differ from a freshly built one and each reconcile would fight
+// the last.
+func vacuumVersion() apiextensionsv1.CustomResourceDefinitionVersion {
+	preserve := true
+	return apiextensionsv1.CustomResourceDefinitionVersion{
+		Name:    VacuumVersionName,
+		Served:  false,
+		Storage: true,
+		Schema: &apiextensionsv1.CustomResourceValidation{
+			OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+				Type:        "object",
+				Description: "This is a vacuum version to storage different versions",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"apiVersion": {
+						Type:        "string",
+						Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+					},
+					"kind": {
+						Type: "string",
+					},
+					"metadata": {
+						Type: "object",
+					},
+					"spec": {
+						Type:                   "object",
+						XPreserveUnknownFields: &preserve,
+					},
+					"status": {
+						Type:                   "object",
+						XPreserveUnknownFields: &preserve,
+					},
+				},
+			},
+		},
+	}
+}
+
+// RestoreOrphanedVacuum re-adds the vacuum storage version when status.storedVersions still names
+// it but spec.versions no longer does, and reports whether it changed the CRD (#207).
+//
+// # Why this condition and not "vacuum is missing"
+//
+// A missing vacuum is NOT damage. vacuum is injected only when a SECOND version is appended, so a
+// CRD that has never been bumped legitimately has none: one version, simultaneously served and
+// storage. Measured on krateo-057, 9 of 68 composition CRDs are in exactly that state and healthy.
+// Repairing on absence alone would demote each of their only versions to storage:false and put
+// vacuum into status.storedVersions, which the apiserver will not release without a storage
+// migration — permanent damage to healthy objects, for a state that occurred zero times there.
+//
+// The damage is an ORPHANED stored version: objects encoded at a version the CRD no longer
+// declares. Every read of the Kind then fails with "invalid group/version", and core-provider could
+// not previously recover because the only vacuum injection site sits behind two "version not
+// present" guards — so a CRD already carrying the version being reconciled was never repaired.
+//
+// vacuum is the only orphan this can fix, because its schema is synthesized rather than derived
+// from a chart. An orphaned chart version cannot be reconstructed and is left alone.
+//
+// # The invariant this must not break
+//
+// The apiserver permits exactly one storage version. Re-adding vacuum with Storage:true therefore
+// has to clear every other version's claim in the same object, which is why this does not simply
+// append.
+func RestoreOrphanedVacuum(crd *apiextensionsv1.CustomResourceDefinition) bool {
+	if crd == nil {
+		return false
+	}
+	storedVacuum := false
+	for _, v := range crd.Status.StoredVersions {
+		if v == VacuumVersionName {
+			storedVacuum = true
+			break
+		}
+	}
+	if !storedVacuum {
+		return false
+	}
+	for _, v := range crd.Spec.Versions {
+		if v.Name == VacuumVersionName {
+			return false // present and accounted for: nothing to repair
+		}
+	}
+
+	crd.Spec.Versions = append(crd.Spec.Versions, vacuumVersion())
+	for i := range crd.Spec.Versions {
+		if crd.Spec.Versions[i].Name != VacuumVersionName {
+			crd.Spec.Versions[i].Storage = false
+		}
+	}
+	return true
+}
+
 // AppendVersion appends the version of the toadd CRD to the crd CRD and sets the Storage and Served fields in the last version of the crd CRD.
 func AppendVersion(crd apiextensionsv1.CustomResourceDefinition, toadd apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
 	for _, el2 := range toadd.Spec.Versions {
@@ -83,41 +184,11 @@ func AppendVersion(crd apiextensionsv1.CustomResourceDefinition, toadd apiextens
 		if !exist {
 			crd.Spec.Versions = append(crd.Spec.Versions, el2)
 			if !vacuum {
-				crd.Spec.Versions = append(crd.Spec.Versions, apiextensionsv1.CustomResourceDefinitionVersion{
-					Name:    "vacuum",
-					Served:  false,
-					Storage: true,
-					Schema: &apiextensionsv1.CustomResourceValidation{
-						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
-							Type:        "object",
-							Description: "This is a vacuum version to storage different versions",
-							Properties: map[string]apiextensionsv1.JSONSchemaProps{
-								"apiVersion": {
-									Type:        "string",
-									Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-								},
-								"kind": {
-									Type: "string",
-								},
-								"metadata": {
-									Type: "object",
-								},
-								"spec": {
-									Type:                   "object",
-									XPreserveUnknownFields: &[]bool{true}[0],
-								},
-								"status": {
-									Type:                   "object",
-									XPreserveUnknownFields: &[]bool{true}[0],
-								},
-							},
-						},
-					},
-				})
+				crd.Spec.Versions = append(crd.Spec.Versions, vacuumVersion())
 			}
 			for i := range crd.Spec.Versions {
 				// if different from vacuum served: false and storage: true
-				if crd.Spec.Versions[i].Name != "vacuum" {
+				if crd.Spec.Versions[i].Name != VacuumVersionName {
 					crd.Spec.Versions[i].Served = true
 					crd.Spec.Versions[i].Storage = false
 				}

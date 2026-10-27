@@ -197,6 +197,25 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	// serve (#190). Both mutations are now accumulated and applied once.
 	mutated := false
 
+	// #207: repair a CRD whose vacuum storage version is gone from spec.versions while
+	// status.storedVersions still names it — objects encoded at a version the CRD no longer
+	// declares, so every read of the Kind fails with "invalid group/version".
+	//
+	// BEFORE the append below, deliberately. The append is the only other place vacuum is created,
+	// and it is unreachable for a CRD that already carries the version being reconciled — which is
+	// exactly the damaged CRD's situation. Repairing first means the single-storage-version
+	// bookkeeping is settled before anything else touches spec.versions.
+	//
+	// A no-op in every state but that one. In particular it does NOT fire on a CRD that simply has
+	// no vacuum: a never-bumped CRD legitimately has one version that is both served and storage,
+	// and injecting vacuum there would demote it and strand vacuum in storedVersions. See
+	// generation.RestoreOrphanedVacuum.
+	if generation.RestoreOrphanedVacuum(crd) {
+		log.Debug("restored the vacuum storage version orphaned in status.storedVersions",
+			"crd", crd.Name, "storedVersions", crd.Status.StoredVersions)
+		mutated = true
+	}
+
 	if !statusEqual {
 		log.Debug("CRD status differs, updating status", "crd", crd.Name, "version", gvr.Version)
 		// To avoid issues with changed in the dynamically generated part of the CRD (the spec), we only update the static part (the status) to any version that already exists
