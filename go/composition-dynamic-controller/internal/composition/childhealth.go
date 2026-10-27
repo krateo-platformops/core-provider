@@ -132,6 +132,28 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			converging: converging,
 			total:      len(managed),
 		}
+	case unevaluated == len(managed):
+		// ZERO EVIDENCE (#165). Nothing was evaluated, so "Available" is a claim about an empty
+		// set. The caveat already said so in the message and the condition said Available anyway,
+		// which is the combination nobody reads as a warning.
+		//
+		// Unknown, NOT False. Zero evidence is a steady state, not a transient one — a blueprint
+		// whose children are all custom resources never becomes interpretable on its own — so
+		// False would block every consumer gating on readiness, indefinitely, on a composition
+		// that is as far as anyone knows fine. That is the wedge this file already documents four
+		// times over (#72's snowplow, #112's CronJob), and the one direction that turns an
+		// honesty fix into an outage.
+		//
+		// Deliberately ONLY the all-or-nothing case. 32 of 33 compositions carrying the caveat on
+		// krateo-057 are partial, the largest at 142 of 145, and those keep reporting Available:
+		// evidence from three children is thin but it is not nothing, and there is no principled
+		// threshold between 142/145 and 5/5 that is not just a number someone picked.
+		return healthVerdict{
+			ready: false, reason: "ZeroEvidence",
+			message:     zeroEvidenceMessage(len(managed)),
+			unevaluated: unevaluated,
+			total:       len(managed),
+		}
 	default:
 		// Green — but say so honestly. If some children could not be assessed, "up-to-date" is a
 		// claim about the ones we could read, and silently omitting that is what let 0 of 44
@@ -143,6 +165,13 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			total:       len(managed),
 		}
 	}
+}
+
+// zeroEvidenceMessage says what is and is not known, without implying the composition is broken.
+// It must not read as a failure: an operator seeing it has a coverage gap, not an outage.
+func zeroEvidenceMessage(total int) string {
+	return fmt.Sprintf("Composition health is unknown: none of its %d managed children could be "+
+		"health-evaluated (no readiness semantics this controller knows how to read)", total)
 }
 
 // availableMessage qualifies the healthy message when some children could not be assessed, so the
@@ -207,6 +236,20 @@ func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v hea
 		return readyOutcome{reason: "Unavailable", message: v.message}
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
+	case "ZeroEvidence":
+		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
+		// the author's health RESTAction IS evidence, and it is better evidence than the generic
+		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
+		// only reached when projPresent is false or projReady is true, and in the latter case the
+		// author has told us it is healthy.
+		if projPresent && projReady {
+			msg := projMsg
+			if msg == "" {
+				msg = defaultMsg
+			}
+			return readyOutcome{reason: "Available", message: msg}
+		}
+		return readyOutcome{reason: "ZeroEvidence", message: v.message}
 	}
 	// Available. The base is the phase message the caller supplied ("Composition is up-to-date",
 	// "Composition values updated"), or the author's projected message when they wrote one — NOT
@@ -373,6 +416,21 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
+		case stringField(cm, "reason") == "ZeroEvidence":
+			// The child says its own health is UNKNOWN, not bad (#165). Propagate ignorance as
+			// ignorance: counting it converging would hold this parent Ready=False for as long as
+			// the child stays unevaluable, which is indefinitely.
+			//
+			// This is load-bearing, not symmetry. On krateo-057 the Installer composition lists
+			// modelconfigs/model-configs among its managed children, and model-configs is one of
+			// the two compositions at zero evidence. Without this branch, emitting the condition
+			// would put the Installer composition — the root of the install — at Ready=False
+			// permanently the moment it shipped.
+			//
+			// Keyed on the REASON, never on bare Unknown: a genuinely converging child also
+			// reports a non-True Ready and must keep holding the parent back. That transient is
+			// what the converging branch exists for.
+			return childUnevaluated
 		default:
 			return childConverging
 		}
