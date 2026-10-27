@@ -38,6 +38,12 @@ const (
 func TestMain(m *testing.M) {
 	xenv.SetTestMode(true)
 
+	// Every cluster-starting suite pins KUBECONFIG first: kind writes to AND switches
+	// ~/.kube/config otherwise, and DestroyCluster then removes that context again, leaving the
+	// developer pointed at nothing. Invisible on CI, where there is no kubeconfig worth
+	// clobbering. See e2e.PinKubeconfig.
+	restore := e2e.PinKubeconfig("cp-crd")
+
 	namespace = "demo-system"
 	clusterName = "krateo"
 	testenv = env.New()
@@ -88,7 +94,9 @@ func TestMain(m *testing.M) {
 		envfuncs.DestroyCluster(clusterName),
 	)
 
-	os.Exit(testenv.Run(m))
+	code := testenv.Run(m)
+	restore() // not deferred: os.Exit does not run defers
+	os.Exit(code)
 }
 func TestLookup(t *testing.T) {
 	os.Setenv("DEBUG", "1")
