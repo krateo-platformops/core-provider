@@ -1767,6 +1767,10 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// which left the spoke's instance and generated CRD orphaned. Force the cleanup when remote.
 		remote := clusterkube.IsRemote(cr.Spec.Deploy)
 
+		// NOTE: adopter (below) and successor answer different questions. successor is about the
+		// CONTROLLER for this exact Kind+version; adopter is about who inherits the INSTANCES,
+		// which can be a definition on another version of the same Kind.
+		//
 		// The live local definition that takes this Kind+version's controller over once this one is
 		// gone (controllerowner.go). While there is one, this delete is a hand-over: instances, the
 		// CRD and the shared cluster-scoped RBAC all stay, and only what lives in this definition's
@@ -1784,7 +1788,16 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}
 		}
 
-		if successor == nil && (remote || len(lst) == 1) {
+		// #218: instances that another live definition will adopt are that definition's to
+		// migrate, not this one's to destroy. Version-specific gates alone cannot see this: a
+		// move that also bumps the chart leaves nothing targeting the old version, so both of
+		// them say "last definition" while the instances have a successor waiting.
+		adopter, err := e.instancesWillBeAdopted(ctx, cr, gvk, gvr)
+		if err != nil {
+			return fmt.Errorf("error checking whether %s compositions will be adopted: %w", gvr.String(), err)
+		}
+
+		if deletesInstances(successor, adopter, remote, len(lst)) {
 			log.Debug("Deleting Compositions of this version", "gvk", gvk.String(), "remote", remote)
 
 			// Delete compositions of this version manually
