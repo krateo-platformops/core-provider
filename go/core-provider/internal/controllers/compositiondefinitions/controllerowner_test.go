@@ -9,8 +9,10 @@ import (
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlevent "sigs.k8s.io/controller-runtime/pkg/event"
@@ -209,10 +211,37 @@ func TestHandedOver(t *testing.T) {
 	ownController.SetNamespace("krateo-system")
 	ownController.SetName("fireworksapps-v1-0-0-controller")
 
+	// handedOver also asks the Kind-level question (#205) when no same-version successor exists,
+	// and that read is deliberately UNCACHED (liveDefinitions -> mgmtDynamic), so the fixture has
+	// to supply a dynamic client holding the same definitions. Building it from the same objs
+	// keeps the two views consistent; letting them diverge would make this test assert something
+	// the controller never sees.
 	check := func(objs ...client.Object) bool {
 		t.Helper()
 		cli := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(objs...).WithStatusSubresource(leaving, successor).Build()
-		got, err := (&external{mgmt: cli, kube: cli}).handedOver(context.Background(), leaving, gvk, gvr)
+		var cds []runtime.Object
+		for _, o := range objs {
+			cd, ok := o.(*compositiondefinitionsv1alpha1.CompositionDefinition)
+			if !ok {
+				continue
+			}
+			u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj := &unstructured.Unstructured{Object: u}
+			obj.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: compositionDefinitionsGVR.Group, Version: compositionDefinitionsGVR.Version,
+				Kind: "CompositionDefinition",
+			})
+			cds = append(cds, obj)
+		}
+		// A FRESH scheme, not sc: handed the typed one, the fake tries to convert each item back
+		// into a CompositionDefinition and fails. Unstructured in, unstructured out, which is what
+		// liveDefinitions decodes.
+		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{compositionDefinitionsGVR: "CompositionDefinitionList"}, cds...)
+		got, err := (&external{mgmt: cli, kube: cli, mgmtDynamic: dyn}).handedOver(context.Background(), leaving, gvk, gvr)
 		if err != nil {
 			t.Fatal(err)
 		}
