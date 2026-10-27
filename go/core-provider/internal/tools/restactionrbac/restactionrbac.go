@@ -20,7 +20,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
+	"sort"
+	"strings"
 	"time"
+
+	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // ErrIncomplete is returned when snowplow answers 422 — at least one api[] stage
@@ -46,6 +52,64 @@ type Resource struct {
 	// at decode and the verb was copied into a generated Role verbatim, turning a permission CHECK
 	// into a permission GRANT.
 	NonReadVerb bool `json:"nonReadVerb,omitempty"`
+	// NamespaceUnknown is snowplow's marker that this row reads a NAMESPACED resource whose
+	// namespace is not yet determined (snowplow 1.12.38). That is the normal case for this
+	// endpoint's caller: core-provider asks BEFORE any composition instance exists, so the stage's
+	// namespace interpolation has nothing to resolve against.
+	//
+	// It exists because an empty Namespace is byte-identical to a genuinely CLUSTER-SCOPED row, and
+	// snowplow's dedupe keys on that field, so the two merged and nothing downstream could tell
+	// them apart. Generate must therefore NOT read Namespace == "" as "cluster-scoped" on its own
+	// — see the deferral there (#164).
+	NamespaceUnknown bool `json:"namespaceUnknown,omitempty"`
+}
+
+// readSetFields is every JSON key this package models on a read-set row, derived from the struct
+// rather than listed by hand so it cannot drift from it.
+func readSetFields() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(Resource{})
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		if name, _, _ := strings.Cut(tag, ","); name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// unknownReadSetFields returns the read-set keys snowplow sent that this package does not model.
+//
+// This is the instrument the NonReadVerb and NamespaceUnknown gaps both needed and neither had.
+// Twice now snowplow has shipped a field that this struct did not decode, and both times the flag
+// was dropped in silence and found later by reading the code — once after it had already turned a
+// permission CHECK into a permission GRANT (snowplow#179), once before Phase 3 could widen a
+// namespaced read to a ClusterRole (#164). Nothing failed, because dropping an unknown JSON key is
+// exactly what encoding/json is specified to do.
+//
+// So the drop is made observable instead of silent. It deliberately does NOT fail the call:
+// snowplow adding a field must stay backward compatible, and refusing to decode would turn their
+// additive change into our outage. A log line is the right severity — it costs nothing when there
+// is nothing to say, and it names the field the next time this happens.
+func unknownReadSetFields(raw []byte) []string {
+	var probe struct {
+		ReadSet []map[string]json.RawMessage `json:"readSet"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil // the typed decode reports the real error
+	}
+	known, seen := readSetFields(), map[string]bool{}
+	var out []string
+	for _, row := range probe.ReadSet {
+		for k := range row {
+			if !known[k] && !seen[k] {
+				seen[k] = true
+				out = append(out, k)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // response is snowplow's GET /rbac 200 body.
@@ -154,9 +218,18 @@ func (c *Client) Inspect(ctx context.Context, params Params) ([]Resource, error)
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("restactionrbac: reading /rbac response: %w", err)
+		}
 		var body response
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, fmt.Errorf("restactionrbac: decoding /rbac response: %w", err)
+		}
+		if extra := unknownReadSetFields(raw); len(extra) > 0 {
+			contexttools.LoggerFromCtx(ctx, logging.NewNopLogger()).Info(
+				"snowplow /rbac sent read-set fields this build does not model; they are being dropped at decode",
+				"fields", strings.Join(extra, ","), "apiRef", params.APIRefNamespace+"/"+params.APIRefName)
 		}
 		return body.ReadSet, nil
 	case http.StatusUnprocessableEntity:

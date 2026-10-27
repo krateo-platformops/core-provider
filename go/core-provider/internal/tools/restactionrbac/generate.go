@@ -19,6 +19,11 @@ type Generated struct {
 	// Dropped reports read-set rows refused as non-read, so a caller can tell an author why a
 	// userAccessFilter check produced no grant. Resource and verb only, never a user identity.
 	Dropped DroppedSummary
+	// Deferred reports grantable READS that no object could be minted for yet, because snowplow
+	// marked their namespace as not-yet-determined. Kept apart from Dropped on purpose: Dropped
+	// means "refused, this must never be granted", Deferred means "owed, once the namespace is
+	// known". Collapsing them would lose exactly the distinction #164 is about.
+	Deferred DeferredSummary
 }
 
 // readVerbs is the complete set this package will ever grant. A RESTAction's generated RBAC exists
@@ -77,6 +82,19 @@ type DroppedSummary struct {
 	Resources []string
 }
 
+// DeferredSummary describes grantable reads Generate could not place, because their namespace was
+// not yet determined. Same shape as DroppedSummary and deliberately a distinct type: a caller that
+// treats "owed" as "refused" (or the reverse) should not compile.
+type DeferredSummary struct {
+	Count     int
+	Resources []string
+}
+
+func summariseDeferred(deferred []Resource) DeferredSummary {
+	d := summarise(deferred)
+	return DeferredSummary{Count: d.Count, Resources: d.Resources}
+}
+
 func summarise(dropped []Resource) DroppedSummary {
 	seen := map[string]bool{}
 	out := DroppedSummary{Count: len(dropped)}
@@ -104,9 +122,19 @@ func summarise(dropped []Resource) DroppedSummary {
 func Generate(readSet []Resource, group, name string) Generated {
 	readSet, dropped := partitionGrantable(readSet)
 
-	var clusterRows []Resource
+	var clusterRows, deferred []Resource
 	byNamespace := map[string][]Resource{}
 	for _, r := range readSet {
+		// A namespaced row whose namespace is not yet known is NOT cluster-scoped, however
+		// identical it looks. Minting a ClusterRole for it is the silent widening #164 was filed
+		// to prevent, and it would have arrived as an inherited side effect of moving off
+		// GenerateClusterScoped rather than as a decision anyone made. Defer it instead: the
+		// namespace is knowable later, at instance creation, and a grant that is owed is
+		// recoverable where a grant that is too wide is not.
+		if r.NamespaceUnknown {
+			deferred = append(deferred, r)
+			continue
+		}
 		if r.Namespace == "" {
 			clusterRows = append(clusterRows, r)
 			continue
@@ -122,6 +150,7 @@ func Generate(readSet []Resource, group, name string) Generated {
 
 	var out Generated
 	out.Dropped = summarise(dropped)
+	out.Deferred = summariseDeferred(deferred)
 
 	if len(clusterRows) > 0 {
 		out.ClusterRole = &rbacv1.ClusterRole{
