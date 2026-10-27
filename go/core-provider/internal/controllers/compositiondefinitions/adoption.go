@@ -239,6 +239,98 @@ func (e *external) adoptableOrphans(ctx context.Context, cr *compositiondefiniti
 	return orphanedBy(cr, cds, instances.Items, gvk.GroupKind(), served), nil
 }
 
+// instancesWillBeAdopted returns the live definition that will take this version's composition
+// instances over once cr is gone, or nil when nothing will. It is the gate on cr's delete
+// destroying them (#218).
+//
+// The defect: Delete uninstalls this version's instances when `successor == nil && len(lst) == 1`.
+// Both terms are VERSION-specific, so a helm upgrade that MOVES a Kind and BUMPS it in one apply —
+// create CD-new on chart 2.0.0 (v2-0-0), delete CD-old on 1.0.0 (v1-0-0) — satisfies both: nothing
+// targets v1-0-0 any more. The instances were destroyed a reconcile before #216's adoption, which
+// runs in Update on CD-new, could have taken them.
+//
+// Why this predicate and not "is the Kind served elsewhere". The wider question would also change
+// a deliberate behaviour: deleting one of two definitions that coexist on a Kind at different
+// versions currently cleans up its instances (compositiondefinitions.go:1659), and turning that
+// into "…unless somebody shares the Kind" is a product decision, not a bug fix. Asking instead
+// whether these instances will actually be ADOPTED ties "do not destroy" to "something will take
+// these", which is the property that makes destroying them wrong.
+//
+// The two differ exactly where it matters. adopterFor's fallback is ofKind, so "an adopter exists"
+// is otherwise near-identical to "the Kind is served elsewhere" — but adoption also requires the
+// instance's version to still be SERVED. On an unserved version nothing can adopt and no
+// controller reconciles, so preserving those instances would leave them alive, unowned and
+// unreconcilable forever, and #189's unaccounted-instance gate would then block the served-version
+// prune for good. Destroying them with the definition is right. That case is the whole reason this
+// is narrower than the Kind-level question.
+//
+// Remote is excluded: a remote target's instances live on its spoke with a dedicated controller,
+// and its teardown must always remove them.
+func (e *external) instancesWillBeAdopted(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) (*compositiondefinitionsv1alpha1.CompositionDefinition, error) {
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		return nil, nil
+	}
+	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if err != nil {
+		return nil, fmt.Errorf("fetching CRD: %w", err)
+	}
+	if crd == nil {
+		return nil, nil
+	}
+	served := map[string]bool{}
+	for _, v := range crd.Spec.Versions {
+		if v.Served {
+			served[v.Name] = true
+		}
+	}
+	cds, err := e.liveDefinitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return adopterOfServed(cds, gvk.GroupKind(), gvr.Version, served), nil
+}
+
+// adopterOfServed is the decision behind instancesWillBeAdopted, separated from the listing the
+// way orphanedBy is. nil means nothing will take these instances, so the delete may remove them.
+//
+// The served check is the whole reason this is not simply adopterFor: orphanedBy will not adopt an
+// instance whose version is no longer served, so promising one an adopter it will never get would
+// strand it alive, unowned and unreconciled.
+//
+// cr is not passed and does not need to be: it carries a deletionTimestamp by the time Delete runs
+// and oldestLiveLocal skips definitions being deleted, so it can never elect itself as the
+// successor to its own instances.
+func adopterOfServed(cds []compositiondefinitionsv1alpha1.CompositionDefinition, gk schema.GroupKind, version string, served map[string]bool) *compositiondefinitionsv1alpha1.CompositionDefinition {
+	if !served[version] {
+		return nil
+	}
+	return adopterFor(cds, gk, version)
+}
+
+// deletesInstances is the decision to UNINSTALL this version's composition instances as part of a
+// CompositionDefinition delete. It is named and tested rather than written inline because it is a
+// four-term conjunction in front of the most destructive act on this path, and an inline
+// conjunction in front of a teardown is exactly the shape that produced #210 — two signals that
+// shared a failure mode, trusted because there were two of them.
+//
+// Each term answers a different question, and the comment is the point:
+//
+//   - successor: does another definition still run the CONTROLLER for this exact Kind+version?
+//     If so this delete is a hand-over and nothing of the Kind's is removed (#212).
+//   - adopter: will another live definition INHERIT these instances once this one is gone? A move
+//     that also bumps the chart leaves nothing targeting the old version, so the version-specific
+//     terms both say "last definition" while the instances have a successor waiting (#218).
+//   - remote: a remote target's CRD, cdc and instances are dedicated to this definition on its
+//     spoke, so they always go, whatever the management cluster's counting says.
+//   - sameVersionDefinitions: how many definitions report this exact Kind+version on their status.
+//
+// Note what is NOT here: nothing Kind-wide. Keeping the CRD is a separate decision with a separate
+// gate (kindReferencedElsewhere, #214), because a Kind outliving a version is normal and must not
+// by itself preserve that version's instances.
+func deletesInstances(successor, adopter *compositiondefinitionsv1alpha1.CompositionDefinition, remote bool, sameVersionDefinitions int) bool {
+	return successor == nil && adopter == nil && (remote || sameVersionDefinitions == 1)
+}
+
 // adoptOrphans re-points cr's adoptable orphans' definition-ref labels at cr.
 //
 // The write goes through the endpoint of the instance's OWN version label, which is the version it
