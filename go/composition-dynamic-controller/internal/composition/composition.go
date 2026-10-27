@@ -455,7 +455,12 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	}
 
 	if reconcileRes.Changed {
-		log.Debug("Composition drift detected and self-healed.", "package", pkg.URL,
+		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
+		// was done about it, and at Debug it was invisible on every cluster that runs at Info —
+		// which is why 62,783 revisions on git-provider went unnoticed for 28 days. A self-heal is
+		// a real event about the cluster, not controller noise, and it is bounded by how often
+		// children actually drift rather than by the reconcile cadence.
+		log.Info("Composition drift detected and self-healed", "package", pkg.URL,
 			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated)
 		return controller.ExternalObservation{
 			ResourceExists:   true,
@@ -765,10 +770,33 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("stamping composition-definition labels: %w", err)
 	}
 
-	// Update the helm chart. Observe now renders as a dry-run (no revision written), so the live
-	// mutation happens HERE — the runtime routes to Update only when Observe reported drift. Perform
-	// the real Upgrade so the change is actually applied, mirroring the Observe render (same values,
-	// global-value injection, post-render labels + traceparent, TakeOwnership).
+	// Converge the helm release. Reconcile, NOT Upgrade (#175).
+	//
+	// The comment that stood here said Observe renders as a dry-run so the live mutation happens
+	// here. That stopped being true: Observe calls hc.Reconcile, which converges the cluster and
+	// writes a revision when it actually changed something. By the time the runtime routes here —
+	// which it does precisely BECAUSE Observe reported drift — the drift is already healed, and an
+	// unconditional Upgrade wrote a second revision for it.
+	//
+	// Measured on krateo-057: strictly bimodal pairs, ~3s apart within a pair and ~58s between
+	// pairs, against a 60s reconcile cadence. git-provider reached 62,783 revisions over 28 days
+	// and cloud-meetup-turin sat at 99.8% of the theoretical 2.00/min ceiling. One drifting child,
+	// two revisions and two helm operations per cycle, indefinitely.
+	//
+	// Reconcile removes the doubling STRUCTURALLY rather than by suppressing this call: it is
+	// apply-if-changed, so when Observe has already converged the cluster it writes no revision and
+	// runs no hooks. A genuine change still converges — once. No signal has to pass from Observe to
+	// Update, which is what makes this robust to either phase changing later.
+	//
+	// Suppressing the dispatch instead (returning ResourceUpToDate on self-heal) was the obvious
+	// alternative and is wrong: Update is the ONLY place that keeps the def-ref labels current,
+	// backfills the #168 origin stamp, and refreshes status.managed. A composition that only ever
+	// self-heals — alert-provider, whose Job is deleted by ttlSecondsAfterFinished every 10
+	// minutes — would silently stop getting all three.
+	//
+	// Same values, global-value injection, post-render labels + traceparent and TakeOwnership as
+	// the Observe reconcile, so the two agree on the desired state and the second genuinely is a
+	// no-op.
 	hc, err := helm.NewClient(h.kubeconfig,
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
@@ -799,9 +827,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	postrenderLabels.WithTraceparent(tpCarrier[meta.AnnotationKeyTraceparent], tpCarrier[meta.AnnotationKeyTracestate])
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
+	var reconcileRes *helmconfig.ReconcileResult
 	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
+			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
 				ActionConfig: &helmconfig.ActionConfig{
 					ChartVersion:          pkg.Version,
 					ChartName:             pkg.Repo,
@@ -814,6 +843,11 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				},
 				MaxHistory: helmMaxHistory,
 			})
+			if rerr != nil {
+				return nil, rerr
+			}
+			reconcileRes = res
+			return res.Release, nil
 		})
 	})
 	if err != nil {
@@ -822,6 +856,16 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	if upgradedRel == nil {
 		log.Debug("Release not found after upgrade.")
 		return fmt.Errorf("release not found after upgrade")
+	}
+	// Changed==false is the normal, desired outcome: Observe's reconcile already converged the
+	// cluster, so this one had nothing to do and wrote no revision. Logged at Info when it DID
+	// write, because that is the case worth seeing — it means Observe's convergence did not hold,
+	// or a change arrived between the two phases.
+	if reconcileRes != nil && reconcileRes.Changed {
+		log.Info("Update wrote a helm revision; Observe's reconcile had not fully converged",
+			"package", pkg.URL, "revision", upgradedRel.Revision,
+			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted,
+			"patched", reconcileRes.PatchedUpdated)
 	}
 
 	previousDigest, err := maps.NestedString(mg.Object, "status", "digest")
