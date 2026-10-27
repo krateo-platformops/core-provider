@@ -1815,18 +1815,18 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// Keep the shared CRD while any other live local definition still needs this Kind — on ANY
 		// version, judged from the spec when a sibling has no status yet (#214). A remote target's
 		// CRD is dedicated to this definition on its spoke, so it always goes.
-		var skipCRD bool
-		var keptFor string
+		var keep keepReason
 		if !remote {
-			skipCRD, keptFor, err = e.kindReferencedElsewhere(ctx, cr, gvk.GroupKind())
+			keep, err = e.kindReferencedElsewhere(ctx, cr, gvk.GroupKind())
 			if err != nil {
 				return fmt.Errorf("error checking whether %s is still referenced: %w", gvk.GroupKind().String(), err)
 			}
 		}
+		skipCRD := keep.keep
 		switch {
 		case skipCRD:
 			log.Debug("Skipping CRD deletion, another CompositionDefinition still needs this Kind",
-				"gvk", gvk.String(), "referencedBy", keptFor)
+				"gvk", gvk.String(), "referencedBy", keep.String())
 		case successor != nil:
 			// The hand-over below returns before the Undeploy, so no CRD deletion happens either
 			// way; say so rather than announce one that never runs.
