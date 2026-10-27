@@ -103,6 +103,55 @@ jobs:
       test_args: -count=1 -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
+  tag-compile:
+    # Every build tag in this repo COMPILED, even where nothing runs it.
+    #
+    # The `e2e` job below runs only ./internal/tools/crd/..., and `-tags integration` is run by no
+    # job at all. So a tagged test can stop compiling and every check stays green: two in
+    # internal/tools/deploy had not built since a signature change to ProjectChartInspector, and
+    # nothing noticed (#224).
+    #
+    # This is the cheap 90% of the value. It needs no cluster and no apiserver — `go vet` type-checks
+    # the test binary without running it — and it would have failed the day those broke. It does NOT
+    # claim the tests pass; only that they still describe code that exists, which is the claim that
+    # was silently false.
+    #
+    # Same family as the other two found the same day: #220's gate wiring and #221's condition
+    # routing were both uncovered, and both defaulted to silent success. A green check asserts two
+    # things — that the thing is fine, and that it was examined. Only the first is usually tested.
+    name: compile every build tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: go vet, every module, every tag
+        run: |
+          set -uo pipefail
+          rc=0
+          n=0
+          for m in go/core-provider go/composition-dynamic-controller go/chart-inspector; do
+            for tag in default integration e2e envtest; do
+              if [ "$tag" = default ]; then args=""; else args="-tags $tag"; fi
+              echo "::group::$m ($tag)"
+              if ! (cd "$m" && go vet $args ./...); then
+                echo "::error::$m does not compile with tag '$tag'"
+                rc=1
+              fi
+              n=$((n+1))
+              echo "::endgroup::"
+            done
+          done
+          # A loop that examined nothing would exit 0 and look identical to success — the exact
+          # failure mode this job exists to catch, so it must not have it.
+          if [ "$n" -ne 12 ]; then
+            echo "::error::checked $n module/tag combinations, expected 12 - this job proved nothing"
+            exit 1
+          fi
+          echo "compiled $n module/tag combinations"
+          exit $rc
+
   envtest-cdc:
     # The composition-dynamic-controller's envtest-tagged tests had NO runner. They prove the
     # cache-staleness fix end to end — WatchCRDsAndInvalidate keeping the long-lived

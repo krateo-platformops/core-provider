@@ -24,16 +24,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func e2eClient(t *testing.T, env string) client.Client {
+// e2eRESTConfig builds the rest config for the cluster named by env.
+func e2eRESTConfig(t *testing.T, env string) *rest.Config {
 	t.Helper()
 	rc, err := clientcmd.BuildConfigFromFlags("", os.Getenv(env))
 	if err != nil {
 		t.Fatalf("building rest config from %s: %v", env, err)
 	}
+	return rc
+}
+
+func e2eClient(t *testing.T, env string) client.Client {
+	t.Helper()
+	rc := e2eRESTConfig(t, env)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
@@ -51,6 +59,8 @@ func TestE2E_ProjectChartInspector(t *testing.T) {
 	ctx := context.Background()
 	hub := e2eClient(t, "MGMT_KUBECONFIG")
 	spoke := e2eClient(t, "TARGET_KUBECONFIG")
+	// spokeDyn lives in remoteseed_e2e_test.go, same package and same TARGET_KUBECONFIG.
+	spokeDynamic := spokeDyn(t)
 
 	coords := ChartInspectorCoords{
 		Name:      "installer-core-provider-chart-inspector",
@@ -58,7 +68,7 @@ func TestE2E_ProjectChartInspector(t *testing.T) {
 		Port:      8081,
 	}
 
-	if err := ProjectChartInspector(ctx, hub, spoke, coords); err != nil {
+	if err := ProjectChartInspector(ctx, hub, spoke, spokeDynamic, coords); err != nil {
 		t.Fatalf("ProjectChartInspector: %v", err)
 	}
 
@@ -114,7 +124,7 @@ func TestE2E_ProjectChartInspector(t *testing.T) {
 	}
 
 	// idempotent: a second projection must not error
-	if err := ProjectChartInspector(ctx, hub, spoke, coords); err != nil {
+	if err := ProjectChartInspector(ctx, hub, spoke, spokeDynamic, coords); err != nil {
 		t.Fatalf("second ProjectChartInspector (idempotency): %v", err)
 	}
 	_ = metav1.NamespaceAll

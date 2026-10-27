@@ -54,7 +54,7 @@ func TestE2E_RemoteSeedTeardown(t *testing.T) {
 	chart := &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/example/krateo/demo", Version: "1.0.0"}
 
 	// --- setup: project chart-inspector + seed two shadow CDs in different namespaces ---
-	if err := ProjectChartInspector(ctx, hub, spoke, coords); err != nil {
+	if err := ProjectChartInspector(ctx, hub, spoke, spokeDyn(t), coords); err != nil {
 		t.Fatalf("ProjectChartInspector: %v", err)
 	}
 	seed := func(ns, name string) {
