@@ -1812,23 +1812,27 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}
 		}
 
+		// Keep the shared CRD while any other live local definition still needs this Kind — on ANY
+		// version, judged from the spec when a sibling has no status yet (#214). A remote target's
+		// CRD is dedicated to this definition on its spoke, so it always goes.
 		var skipCRD bool
+		var keptFor string
 		if !remote {
-			lst, err = getters.GetCompositionDefinitions(ctx, e.mgmt, schema.GroupKind{
-				Group: gvk.Group,
-				Kind:  gvk.Kind,
-			})
+			skipCRD, keptFor, err = e.kindReferencedElsewhere(ctx, cr, gvk.GroupKind())
 			if err != nil {
-				return fmt.Errorf("error getting CompositionDefinitions: %w", err)
+				return fmt.Errorf("error checking whether %s is still referenced: %w", gvk.GroupKind().String(), err)
 			}
-			skipCRD = len(lst) > 1
 		}
-		// skipCRD is counted from status, so it misses a successor that has not reconciled yet; the
-		// successor (found from the spec too) keeps the CRD regardless, so say so in the log rather
-		// than announce a CRD deletion that the hand-over below never performs.
-		if skipCRD || successor != nil {
-			log.Debug("Skipping CRD deletion, other CompositionDefinitions exist", "gvk", gvk.String())
-		} else {
+		switch {
+		case skipCRD:
+			log.Debug("Skipping CRD deletion, another CompositionDefinition still needs this Kind",
+				"gvk", gvk.String(), "referencedBy", keptFor)
+		case successor != nil:
+			// The hand-over below returns before the Undeploy, so no CRD deletion happens either
+			// way; say so rather than announce one that never runs.
+			log.Debug("Skipping CRD deletion, handing this version over", "gvk", gvk.String(),
+				"to", successor.Namespace+"/"+successor.Name)
+		default:
 			log.Debug("Deleting CRD", "gvk", gvk.String(), "remote", remote)
 		}
 

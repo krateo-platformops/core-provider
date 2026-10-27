@@ -7,6 +7,7 @@ import (
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
+	"github.com/krateo-platformops/core-provider/internal/tools/chart"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
@@ -190,6 +191,103 @@ func (e *external) controllerSuccessor(ctx context.Context, cr *compositiondefin
 		}
 	}
 	return oldestLiveLocalSibling(cr, cds), nil
+}
+
+// kindReferencedElsewhere reports whether a live local definition other than cr still needs the
+// generated Kind gk, so cr's delete must leave the shared CRD standing. The second return value
+// names who, for the log.
+//
+// This replaces counting definitions by Status.CurrentGVK on the delete path (#214). The two gates
+// in front of that teardown disagreed about SCOPE: controllerSuccessor is version-specific and —
+// since #212 — spec-aware, while the CRD gate was Kind-wide and status-only. So a sibling on a
+// DIFFERENT version of the same Kind that had not reconciled yet was invisible to both: the
+// successor lookup rejected it on version, the Kind count never saw it at all, and the delete
+// removed the shared CRD. Deleting a CRD deletes EVERY version's instances of that Kind, including
+// the sibling's, so this is the most destructive act on the path and had the weakest gate.
+//
+// Why the Kind cannot be read off the spec the way targetsVersion reads the version: chartRef
+// compares url+repo+version, and the Kind is derived from the chart's NAME, which no field of
+// ChartInfo carries. "Same url+repo, any version" is not the same chart — one repo serves many.
+// So the question is answered the only exact way available: resolve the sibling's chart to the GVK
+// it generates, with the very functions Delete already used to resolve cr's own
+// (ChartInfoFromSpec + ChartGroupVersionKind). No new inference rule, and no second signal that
+// shares the first one's blind window.
+//
+// The chart is fetched ONLY for a sibling with no status GVK at all. One that has reconciled has
+// already told us its Kind, and trusting it keeps the cost at zero fetches in the normal case and
+// one in the hand-over case — not one per definition (83 of them on krateo-057).
+//
+// An unresolvable chart returns true. A definition whose chart cannot be read is precisely the
+// definition whose first reconcile is failing, and that failure must never become the reason a
+// Kind's CRD and every instance of it are deleted — the same rule targetsVersion states for the
+// version gate. The cost of being wrong here is a CRD left standing with nothing serving it: a
+// leak, recoverable by deleting it, and the cdc is still torn down either way.
+//
+// It is NOT total, in one narrow direction: a definition re-pointed at a chart with a different
+// NAME changes its Kind in place, and until it reconciles its status still names the old Kind, so
+// it is trusted on the old Kind and not consulted about the new one. That is the pre-existing
+// status-only behaviour for that case, it only ever yields a false negative, and closing it would
+// mean fetching every definition's chart on every delete.
+func (e *external) kindReferencedElsewhere(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gk schema.GroupKind) (bool, string, error) {
+	cds, err := e.liveDefinitions(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	return referencesKind(ctx, cr, cds, gk, e.chartGroupKind)
+}
+
+// chartGroupKind resolves a definition's chart to the Kind it generates, with the same two calls
+// Delete uses on cr's own chart.
+func (e *external) chartGroupKind(ctx context.Context, c *compositiondefinitionsv1alpha1.ChartInfo) (schema.GroupKind, error) {
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, c)
+	if err != nil {
+		return schema.GroupKind{}, err
+	}
+	gvk, err := chart.ChartGroupVersionKind(pkg, dir)
+	if err != nil {
+		return schema.GroupKind{}, err
+	}
+	return gvk.GroupKind(), nil
+}
+
+// kindResolver maps a chart reference to the Kind it generates. Injected so the decision below is
+// a pure function of the definitions plus this one lookup.
+type kindResolver func(ctx context.Context, c *compositiondefinitionsv1alpha1.ChartInfo) (schema.GroupKind, error)
+
+// referencesKind is the decision behind kindReferencedElsewhere, separated from the listing so it
+// can be exercised over a definition population directly. resolve is called only for a definition
+// with no status GVK.
+func referencesKind(ctx context.Context, self *compositiondefinitionsv1alpha1.CompositionDefinition, cds []compositiondefinitionsv1alpha1.CompositionDefinition, gk schema.GroupKind, resolve kindResolver) (bool, string, error) {
+	for i := range cds {
+		cd := &cds[i]
+		if cd.GetName() == self.GetName() && cd.GetNamespace() == self.GetNamespace() {
+			continue
+		}
+		// A definition already terminating is going away too, so it is not a reason to keep the
+		// Kind — the same exclusion oldestLiveLocalSibling makes, and for the same reason: two
+		// definitions deleted together must not each cite the other and leak the CRD. A remote
+		// definition has its own projected CRD on its spoke and never shares this one.
+		if cd.GetDeletionTimestamp() != nil || clusterkube.IsRemote(cd.Spec.Deploy) {
+			continue
+		}
+		who := cd.GetNamespace() + "/" + cd.GetName()
+
+		if sgvk := cd.Status.CurrentGVK(); sgvk.Kind != "" {
+			if sgvk.GroupKind() == gk {
+				return true, who + " (status)", nil
+			}
+			continue
+		}
+
+		cgk, err := resolve(ctx, cd.Spec.Chart)
+		if err != nil {
+			return true, fmt.Sprintf("%s (chart unreadable: %v)", who, err), nil
+		}
+		if cgk == gk {
+			return true, who + " (chart)", nil
+		}
+	}
+	return false, "", nil
 }
 
 // controllerDeployedIn reports whether namespace holds a controller Deployment for gvr.
