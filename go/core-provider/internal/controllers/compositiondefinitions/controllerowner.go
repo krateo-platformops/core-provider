@@ -7,6 +7,7 @@ import (
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
+	"github.com/krateo-platformops/core-provider/internal/tools/chart"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
@@ -190,6 +191,166 @@ func (e *external) controllerSuccessor(ctx context.Context, cr *compositiondefin
 		}
 	}
 	return oldestLiveLocalSibling(cr, cds), nil
+}
+
+// kindReferencedElsewhere reports whether a live local definition other than cr still needs the
+// generated Kind gk, so cr's delete must leave the shared CRD standing. The second return value
+// names who, for the log.
+//
+// This replaces counting definitions by Status.CurrentGVK on the delete path (#214). The two gates
+// in front of that teardown disagreed about SCOPE: controllerSuccessor is version-specific and —
+// since #212 — spec-aware, while the CRD gate was Kind-wide and status-only. So a sibling on a
+// DIFFERENT version of the same Kind that had not reconciled yet was invisible to both: the
+// successor lookup rejected it on version, the Kind count never saw it at all, and the delete
+// removed the shared CRD. Deleting a CRD deletes EVERY version's instances of that Kind, including
+// the sibling's, so this is the most destructive act on the path and had the weakest gate.
+//
+// A sibling with no status is judged in three steps, cheapest and most certain first.
+//
+//  1. chartsOfKind (#216) gives the url+repo of every chart KNOWN to generate gk, gathered from
+//     the status of definitions that have served it. The version is excluded, so this is a
+//     Kind-level chart identity — if the sibling's spec names one of those charts it is on this
+//     Kind, decided from data already in hand with no fetch at all.
+//  2. Otherwise resolve the sibling's chart to the GVK it generates, with the very functions
+//     Delete used on cr's own (ChartInfoFromSpec + ChartGroupVersionKind). Exact, and it also
+//     catches the same chart served from a mirror, which step 1 cannot see.
+//  3. If that chart cannot be read, hold ONLY when the known set is empty — see below.
+//
+// Nothing is fetched for a sibling that HAS a status GVK: it has already told us its Kind, which
+// keeps the cost at zero fetches normally and one during a hand-over, not one per definition
+// (83 of them on krateo-057).
+//
+// Step 3 is bounded, and the bound is the point. An unresolvable chart must hold, because a
+// definition whose chart cannot be read is precisely the definition whose first reconcile is
+// failing, and that failure must never become the reason a Kind's CRD and every instance of it
+// are deleted — the rule targetsVersion states for the version gate. But holding on EVERY Kind
+// for any unreadable definition is not fail-safe, it is a platform-wide off switch: one
+// definition with a private chart and no status (krateo-system/github-provider-kog on the demo,
+// found in review of #217) would keep every Kind's CRD on the cluster, on every last-definition
+// delete, logged only at Debug.
+//
+// So the hold is confined to the Kinds the unreadable chart could actually be. Step 1 has already
+// held it if its chart is a known chart of gk. If gk has known charts and this is not one of
+// them, it is a different chart and is skipped. Only when gk has NO known charts — nobody has
+// ever reconciled it, so there is no discriminator — is the unreadable chart held against it, and
+// that is also the case where deleting the CRD is least justified.
+//
+// It is NOT total, in one narrow direction acmp also raised: a definition re-pointed at a chart
+// with a different NAME changes its Kind in place, and until it reconciles its status still names
+// the old Kind, so it is trusted on the old Kind and not consulted about the new one. Pre-existing
+// status-only behaviour for that case, false-negative only, and closing it would mean fetching
+// every definition's chart on every delete.
+func (e *external) kindReferencedElsewhere(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gk schema.GroupKind) (keepReason, error) {
+	cds, err := e.liveDefinitions(ctx)
+	if err != nil {
+		return keepReason{}, err
+	}
+	return referencesKind(ctx, cr, cds, gk, e.chartGroupKind)
+}
+
+// keepReason says whether the CRD is held and why, as a fixed token rather than prose so a caller
+// can branch on it. Every token names POSITIVE evidence that some definition is on this Kind —
+// there is deliberately no "could not tell" token, because the gate never holds on ignorance
+// alone (see the unreadable-chart case in referencesKind).
+type keepReason struct {
+	keep bool
+	who  string
+	why  string // "status" | "spec" | "chart"
+}
+
+func (k keepReason) String() string {
+	if !k.keep {
+		return ""
+	}
+	return fmt.Sprintf("%s (%s)", k.who, k.why)
+}
+
+// chartGroupKind resolves a definition's chart to the Kind it generates, with the same two calls
+// Delete uses on cr's own chart.
+func (e *external) chartGroupKind(ctx context.Context, c *compositiondefinitionsv1alpha1.ChartInfo) (schema.GroupKind, error) {
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, c)
+	if err != nil {
+		return schema.GroupKind{}, err
+	}
+	gvk, err := chart.ChartGroupVersionKind(pkg, dir)
+	if err != nil {
+		return schema.GroupKind{}, err
+	}
+	return gvk.GroupKind(), nil
+}
+
+// kindResolver maps a chart reference to the Kind it generates. Injected so the decision below is
+// a pure function of the definitions plus this one lookup.
+type kindResolver func(ctx context.Context, c *compositiondefinitionsv1alpha1.ChartInfo) (schema.GroupKind, error)
+
+// referencesKind is the decision behind kindReferencedElsewhere, separated from the listing so it
+// can be exercised over a definition population directly. resolve is called only for a definition
+// with no status GVK whose chart is not already known to generate gk.
+func referencesKind(ctx context.Context, self *compositiondefinitionsv1alpha1.CompositionDefinition, cds []compositiondefinitionsv1alpha1.CompositionDefinition, gk schema.GroupKind, resolve kindResolver) (keepReason, error) {
+	// Built over every definition, self included: self is being deleted but it does generate gk,
+	// so its own chart belongs in the Kind's identity — that is what recognises an unreconciled
+	// sibling carrying the same chart at another version.
+	known := chartsOfKind(cds, gk)
+	if c := self.Spec.Chart; c != nil && c.Url != "" {
+		known[chartRef{url: c.Url, repo: c.Repo}] = true
+	}
+
+	for i := range cds {
+		cd := &cds[i]
+		if cd.GetName() == self.GetName() && cd.GetNamespace() == self.GetNamespace() {
+			continue
+		}
+		// A definition already terminating is going away too, so it is not a reason to keep the
+		// Kind — the same exclusion oldestLiveLocalSibling makes, and for the same reason: two
+		// definitions deleted together must not each cite the other and leak the CRD. A remote
+		// definition has its own projected CRD on its spoke and never shares this one.
+		if cd.GetDeletionTimestamp() != nil || clusterkube.IsRemote(cd.Spec.Deploy) {
+			continue
+		}
+		who := cd.GetNamespace() + "/" + cd.GetName()
+
+		if sgvk := cd.Status.CurrentGVK(); sgvk.Kind != "" {
+			if sgvk.GroupKind() == gk {
+				return keepReason{keep: true, who: who, why: "status"}, nil
+			}
+			continue
+		}
+
+		// No status. Its spec naming a chart already known to generate gk settles it without a
+		// fetch, and keeps working when that chart cannot be read at all.
+		if specOfKind(cd, known) {
+			return keepReason{keep: true, who: who, why: "spec"}, nil
+		}
+
+		cgk, err := resolve(ctx, cd.Spec.Chart)
+		if err != nil {
+			// Unreadable, and specOfKind above already said its chart is not one of gk's. gk
+			// always HAS a known chart — self's own, added above, since self generates gk — so
+			// there is always a discriminator here and it has already answered: a different
+			// chart. Skip it.
+			//
+			// Holding instead is what #217 did first, and it is not fail-safe but a platform-wide
+			// off switch: one definition with a private chart and no status
+			// (krateo-system/github-provider-kog on the demo) would keep EVERY Kind's CRD on the
+			// cluster, on every last-definition delete, logged only at Debug. A gate that never
+			// says no is not a gate.
+			//
+			// The residual is narrow and real: the same chart served from a MIRROR has an unknown
+			// url, so an unreadable+unreconciled+mirrored sibling is missed and its CRD can go.
+			// That needs all three at once, and it is the same mirror gap specOfKind and
+			// targetsVersion already document. Preferred over freezing teardown fleet-wide.
+			// Info, not Debug: an unreadable chart means a definition whose first reconcile is
+			// failing, and it is the one thing here an operator may need to act on (acmp, #217).
+			contexttools.LoggerFromCtx(ctx, logging.NewNopLogger()).Info(
+				"CRD gate: sibling chart unreadable and not a known chart of this Kind; not holding",
+				"definition", who, "kind", gk.String(), "error", err.Error())
+			continue
+		}
+		if cgk == gk {
+			return keepReason{keep: true, who: who, why: "chart"}, nil
+		}
+	}
+	return keepReason{}, nil
 }
 
 // controllerDeployedIn reports whether namespace holds a controller Deployment for gvr.
