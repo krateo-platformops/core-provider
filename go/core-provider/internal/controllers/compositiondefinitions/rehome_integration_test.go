@@ -42,9 +42,28 @@ const (
 	rehomeVersion    = "v2-0-4"
 	rehomeShared     = "fireworksapps-v2-0-4" // ClusterRole/ClusterRoleBinding/ServiceAccount
 	rehomeCRD        = "fireworksapps.composition.krateo.io"
+	// After the hand-overs the surviving definition is moved to another chart version (#215).
+	rehomeBumpChart   = "2.0.3"
+	rehomeBumpVersion = "v2-0-3"
 )
 
-var rehomeGVR = schema.GroupVersionResource{Group: "composition.krateo.io", Version: rehomeVersion, Resource: "fireworksapps"}
+var (
+	rehomeGVR     = schema.GroupVersionResource{Group: "composition.krateo.io", Version: rehomeVersion, Resource: "fireworksapps"}
+	rehomeBumpGVR = schema.GroupVersionResource{Group: "composition.krateo.io", Version: rehomeBumpVersion, Resource: "fireworksapps"}
+)
+
+// rehomeProbeLabels reads the probe instance's definition-ref namespace and version label.
+func rehomeProbeLabels(ctx context.Context, dyn dynamic.Interface) (refNamespace, version string, ok bool) {
+	u, err := dyn.Resource(rehomeGVR).Namespace(namespace).Get(ctx, rehomeInstance, metav1.GetOptions{})
+	if err != nil {
+		u, err = dyn.Resource(rehomeBumpGVR).Namespace(namespace).Get(ctx, rehomeInstance, metav1.GetOptions{})
+		if err != nil {
+			return "", "", false
+		}
+	}
+	l := u.GetLabels()
+	return l["krateo.io/composition-definition-namespace"], l["krateo.io/composition-version"], true
+}
 
 func rehomeControllerIn(ctx context.Context, t *testing.T, r *resources.Resources, ns string) bool {
 	t.Helper()
@@ -96,14 +115,19 @@ func assessRehomeFollower(ctx context.Context, t *testing.T, cfg *envconf.Config
 		t.Fatal(err)
 	}
 
-	// A live instance of the Kind, labelled the way the composition-version policy would label it.
+	// A live instance of the Kind, labelled the way the composition-version policy and the
+	// controller label it: its version, and the definition that owns it (the original, for now).
 	dyn := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
 	inst := &unstructured.Unstructured{}
 	inst.SetAPIVersion(rehomeGVR.GroupVersion().String())
 	inst.SetKind("FireworksApp")
 	inst.SetNamespace(namespace)
 	inst.SetName(rehomeInstance)
-	inst.SetLabels(map[string]string{"krateo.io/composition-version": rehomeVersion})
+	inst.SetLabels(map[string]string{
+		"krateo.io/composition-version":              rehomeVersion,
+		"krateo.io/composition-definition-name":      rehomeCDName,
+		"krateo.io/composition-definition-namespace": namespace,
+	})
 	_ = unstructured.SetNestedField(inst.Object, rehomeInstance, "spec", "git", "toRepo", "name")
 	if _, err := dyn.Resource(rehomeGVR).Namespace(namespace).Create(ctx, inst, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create instance: %v", err)
@@ -167,6 +191,12 @@ func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config
 	if c := moved.GetCondition(rtv1.TypeReady); strings.Contains(c.Message, "run by CompositionDefinition") {
 		t.Fatalf("moved definition still reports itself a follower after the owner went: %q", c.Message)
 	}
+	// The instance named the deleted original; the definition that took the Kind over adopts it
+	// (#215). Without this the next version bump of that definition leaves it behind.
+	rehomeEventually(t, 3*time.Minute, "the instance to be adopted by "+rehomeNamespace, func() bool {
+		ns, _, ok := rehomeProbeLabels(ctx, dyn)
+		return ok && ns == rehomeNamespace
+	})
 
 	// Back-to-back, the way a helm upgrade moves a definition: the next copy exists but core-provider
 	// has not reconciled it even once when the current owner's delete runs, so its status is still
@@ -212,16 +242,53 @@ func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config
 		return rehomeControllerIn(ctx, t, r, rehome2Namespace) && !rehomeControllerIn(ctx, t, r, rehomeNamespace)
 	})
 	moved = next
+	rehomeEventually(t, 3*time.Minute, "the instance to be adopted by "+rehome2Namespace, func() bool {
+		ns, _, ok := rehomeProbeLabels(ctx, dyn)
+		return ok && ns == rehome2Namespace
+	})
+
+	// #215: bump the surviving definition. Its instances must follow it onto the new version. On
+	// the bug, the bump retired the old version's controller, the owner-scoped migration matched
+	// nothing (the instance named a deleted definition), and the definition reported up to date
+	// with the instance stranded on the old version label.
+	if err := r.Get(ctx, rehomeCDName, rehome2Namespace, &moved); err != nil {
+		t.Fatal(err)
+	}
+	moved.Spec.Chart.Version = rehomeBumpChart
+	if err := r.Update(ctx, &moved); err != nil {
+		t.Fatalf("bumping the surviving definition: %v", err)
+	}
+	// Judged on what the definition REPORTS, not on the predicate behind it: #215's definition
+	// reported Available on the new version while the instance was stranded, because its gate and
+	// its migration shared one blind selector. So wait only for the definition to call itself done,
+	// then require that it is.
+	rehomeEventually(t, 5*time.Minute, "the bumped definition to report Available on "+rehomeBumpVersion, func() bool {
+		var cd v1alpha1.CompositionDefinition
+		if err := r.Get(ctx, rehomeCDName, rehome2Namespace, &cd); err != nil {
+			return false
+		}
+		return cd.Status.CurrentGVK().Version == rehomeBumpVersion && cd.GetCondition(rtv1.TypeReady).Reason == rtv1.ReasonAvailable
+	})
+	if ns, v, ok := rehomeProbeLabels(ctx, dyn); !ok || ns != rehome2Namespace || v != rehomeBumpVersion {
+		t.Fatalf("definition reports Available on %s, but the instance is owned by %q on version %q", rehomeBumpVersion, ns, v)
+	}
+	left, err := dyn.Resource(rehomeBumpGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: "krateo.io/composition-version=" + rehomeVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left.Items) != 0 {
+		t.Fatalf("%d instance(s) still on %s after the bump", len(left.Items), rehomeVersion)
+	}
 
 	// Cleanup: the instance first (strip a finalizer the test controller image may have added),
 	// then the now-last definition, which takes the CRD with it.
-	_ = dyn.Resource(rehomeGVR).Namespace(namespace).Delete(ctx, rehomeInstance, metav1.DeleteOptions{})
+	_ = dyn.Resource(rehomeBumpGVR).Namespace(namespace).Delete(ctx, rehomeInstance, metav1.DeleteOptions{})
 	rehomeEventually(t, 2*time.Minute, "the probe instance to go", func() bool {
-		_, err := dyn.Resource(rehomeGVR).Namespace(namespace).Get(ctx, rehomeInstance, metav1.GetOptions{})
+		_, err := dyn.Resource(rehomeBumpGVR).Namespace(namespace).Get(ctx, rehomeInstance, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true
 		}
-		_, _ = dyn.Resource(rehomeGVR).Namespace(namespace).Patch(ctx, rehomeInstance, types.MergePatchType,
+		_, _ = dyn.Resource(rehomeBumpGVR).Namespace(namespace).Patch(ctx, rehomeInstance, types.MergePatchType,
 			[]byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{})
 		return false
 	})
