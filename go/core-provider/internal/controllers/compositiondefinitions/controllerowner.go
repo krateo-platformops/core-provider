@@ -67,6 +67,12 @@ func olderDefinition(a, b *compositiondefinitionsv1alpha1.CompositionDefinition)
 
 // oldestLiveLocalSibling returns the oldest definition in cds that is not self, not being deleted
 // and not remote, or nil when there is none.
+//
+// Skipping definitions that are being deleted is load-bearing, not hygiene: with siblings also
+// matched on spec (targetsVersion), two same-chart definitions deleted together would otherwise
+// each name the other as successor, neither would uninstall, and the instances and CRD would leak
+// with no controller. Skipping them, both take the last-definition path, which is right because
+// both are going away.
 func oldestLiveLocalSibling(self *compositiondefinitionsv1alpha1.CompositionDefinition, cds []compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.CompositionDefinition {
 	var oldest *compositiondefinitionsv1alpha1.CompositionDefinition
 	for i := range cds {
@@ -109,12 +115,79 @@ func (e *external) controllerOwner(ctx context.Context, cr *compositiondefinitio
 	return electControllerOwner(cr, cds), nil
 }
 
+// chartRef is the part of a chart reference that decides the generated Kind+version: two
+// definitions with equal chartRefs generate the same CRD version by construction, whether or not
+// either has reconciled yet.
+type chartRef struct{ url, repo, version string }
+
+func chartRefOf(c *compositiondefinitionsv1alpha1.ChartInfo) chartRef {
+	if c == nil {
+		return chartRef{}
+	}
+	return chartRef{url: c.Url, repo: c.Repo, version: c.Version}
+}
+
+func chartRefOfProps(c *compositiondefinitionsv1alpha1.ChartInfoProps) chartRef {
+	if c == nil {
+		return chartRef{}
+	}
+	return chartRef{url: c.Url, repo: c.Repo, version: c.Version}
+}
+
+// targetsVersion reports whether cd targets gvk: either its status says so, or — before it has
+// reconciled even once — its spec names the very chart (chart) that generates gvk.
+//
+// The second clause is what a helm upgrade that moves a definition needs. It creates the new
+// definition and deletes the old one within a second, and the old one's Delete can run before
+// core-provider has observed the new one at all. Matching on status alone, the new definition
+// was invisible there, the delete took the last-definition path, and it uninstalled the live
+// instances and deleted the CRD (caught by a kind rehearsal of installer 0.3.457).
+//
+// The race is PRE-EXISTING, not something #203 introduced: before #203 the same delete gated on
+// `len(lst) == 1` from GetCompositionDefinitions, which also reads Status.CurrentGVK and was blind
+// in the same window. Reverting #203 was never a fix.
+//
+// Why spec-derived: the clause must not be "simplified" onto another status field.
+// Status.CurrentGVK, Status.Managed and Status.Managed.VersionInfo are all written by the same
+// first reconcile, so they share the same blind window; adding one as a "second opinion" is one
+// signal wearing two hats. The chart reference is in the spec from the moment the object exists.
+// It is sound because the generated GVK is a pure function of the chart (chartfs: group fixed,
+// version from the chart's version, kind from the chart's name) and no spec field overrides it.
+//
+// An unreconciled sibling counts, deliberately, whatever keeps it unreconciled. The case that
+// decides it is a definition whose first reconcile ERRORS (an unreachable chart, a registry
+// hiccup): it stays without a status GVK indefinitely, and that failure must never become the
+// reason the Kind's CRD and instances are deleted. A sibling paused with krateo.io/paused is in the
+// same state and is treated the same: it still declares the Kind+version, so deleting the other
+// definition hands over to it instead of tearing the Kind down. An operator who wants the
+// teardown deletes both. (The integration test reaches this state by pausing the new copy.)
+//
+// It is NOT total. The GVK depends on the chart's name and version, while chartRef also compares
+// url and repo, so the same chart served from a different URL (a mirror, a fork, a registry
+// migration) generates the same GVK but does not match here. That gap only produces false
+// negatives, i.e. the pre-existing behaviour, never a false successor. Don't read chart equality
+// as a complete answer to the window.
+func targetsVersion(cd *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, chart chartRef) bool {
+	if cd.Status.CurrentGVK() == gvk {
+		return true
+	}
+	return chart != (chartRef{}) && chartRefOf(cd.Spec.Chart) == chart
+}
+
 // controllerSuccessor returns the live local definition that takes over gvk's controller once cr
-// stops running it, or nil when no other definition still needs it.
-func (e *external) controllerSuccessor(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind) (*compositiondefinitionsv1alpha1.CompositionDefinition, error) {
-	cds, err := getters.GetCompositionDefinitionsWithVersion(ctx, e.mgmt, gvk)
-	if err != nil {
+// stops running it, or nil when no other definition still needs it. chart is the chart that
+// generates gvk (cr's current chart, or the one recorded for an older version), so a successor is
+// recognised even before its status is populated.
+func (e *external) controllerSuccessor(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, chart chartRef) (*compositiondefinitionsv1alpha1.CompositionDefinition, error) {
+	var all compositiondefinitionsv1alpha1.CompositionDefinitionList
+	if err := e.mgmt.List(ctx, &all); err != nil {
 		return nil, fmt.Errorf("error listing CompositionDefinitions on %s: %w", gvk.String(), err)
+	}
+	var cds []compositiondefinitionsv1alpha1.CompositionDefinition
+	for i := range all.Items {
+		if targetsVersion(&all.Items[i], gvk, chart) {
+			cds = append(cds, all.Items[i])
+		}
 	}
 	return oldestLiveLocalSibling(cr, cds), nil
 }
@@ -200,7 +273,7 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
 		return false, nil
 	}
-	successor, err := e.controllerSuccessor(ctx, cr, gvk)
+	successor, err := e.controllerSuccessor(ctx, cr, gvk, chartRefOf(cr.Spec.Chart))
 	if err != nil || successor == nil {
 		return false, err
 	}

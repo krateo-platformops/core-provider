@@ -1485,7 +1485,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					// Kind+version, so if it was ours, hand it to that definition rather than
 					// leaving it running here; the shared RBAC and the CRD version stay.
 					oldVerGVK := schema.GroupVersionKind{Group: oldGVK.Group, Kind: oldGVK.Kind, Version: vi.Version}
-					successor, serr := e.controllerSuccessor(ctx, cr, oldVerGVK)
+					successor, serr := e.controllerSuccessor(ctx, cr, oldVerGVK, chartRefOfProps(vi.Chart))
 					if serr != nil {
 						return serr
 					}
@@ -1755,7 +1755,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				Group:   gvk.Group,
 				Kind:    gvk.Kind,
 				Version: gvk.Version,
-			})
+			}, chartRefOf(cr.Spec.Chart))
 			if err != nil {
 				return err
 			}
@@ -1800,7 +1800,10 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}
 			skipCRD = len(lst) > 1
 		}
-		if skipCRD {
+		// skipCRD is counted from status, so it misses a successor that has not reconciled yet; the
+		// successor (found from the spec too) keeps the CRD regardless, so say so in the log rather
+		// than announce a CRD deletion that the hand-over below never performs.
+		if skipCRD || successor != nil {
 			log.Debug("Skipping CRD deletion, other CompositionDefinitions exist", "gvk", gvk.String())
 		} else {
 			log.Debug("Deleting CRD", "gvk", gvk.String(), "remote", remote)
@@ -1825,7 +1828,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
 			// An old version another live definition still targets is handed over, not torn down.
 			if !remote {
-				oldSuccessor, serr := e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{Group: gvk.Group, Kind: gvk.Kind, Version: vi.Version})
+				oldSuccessor, serr := e.controllerSuccessor(ctx, cr, schema.GroupVersionKind{Group: gvk.Group, Kind: gvk.Kind, Version: vi.Version}, chartRefOfProps(vi.Chart))
 				if serr != nil {
 					return serr
 				}
