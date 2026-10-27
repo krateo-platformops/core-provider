@@ -2,7 +2,9 @@ package rbac
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/krateo-platformops/plumbing/e2e"
@@ -32,6 +34,26 @@ var (
 func TestMain(m *testing.M) {
 	xenv.SetTestMode(true)
 
+	// Pin KUBECONFIG to a scratch file BEFORE any cluster is created.
+	//
+	// This suite has no build tag, so it runs on a bare `go test ./...` — and kind writes to AND
+	// switches ~/.kube/config unless KUBECONFIG points elsewhere. DestroyCluster then removes that
+	// context again, so the visible damage is not "switched to kind" but a CLEARED current-context:
+	// whatever cluster the developer was pointed at, they are now pointed at nothing. It happened
+	// on a real machine (2026-10-27) and cost another session a restore.
+	//
+	// Harmless on an ephemeral CI runner, which is why it survived: the failure only shows up on a
+	// workstation, and only as a side effect of a test suite that otherwise passes.
+	//
+	// Pinning rather than tagging the suite out, deliberately. It is real coverage that runs in CI
+	// today, and moving it behind `integration` would quietly delete that coverage to fix a side
+	// effect. The side effect is the bug, not the test.
+	kubeconfig := filepath.Join(os.TempDir(), fmt.Sprintf("krateo-rbac-test-%d.kubeconfig", os.Getpid()))
+	if err := os.Setenv("KUBECONFIG", kubeconfig); err != nil {
+		fmt.Fprintf(os.Stderr, "pinning KUBECONFIG: %v\n", err)
+		os.Exit(1)
+	}
+
 	namespace = "demo-system"
 	altNamespace := "krateo-system"
 	clusterName = "krateo"
@@ -57,7 +79,10 @@ func TestMain(m *testing.M) {
 		envfuncs.DestroyCluster(clusterName),
 	)
 
-	os.Exit(testenv.Run(m))
+	code := testenv.Run(m)
+	// Not deferred: os.Exit does not run defers.
+	_ = os.Remove(kubeconfig)
+	os.Exit(code)
 }
 
 func TestApplyRole(t *testing.T) {
