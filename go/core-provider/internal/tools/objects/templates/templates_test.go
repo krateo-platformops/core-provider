@@ -36,7 +36,7 @@ spec:
 	spec:
 	  containers:
 	  - name: {{ .resource }}-{{ .apiVersion }}-controller
-		image: ghcr.io/krateoplatformops/composition-dynamic-controller:0.15.3
+		image: ghcr.io/krateo-platformops/composition-dynamic-controller:2.13.31
 		imagePullPolicy: IfNotPresent
 		env: 
 		- name: HOME
