@@ -208,7 +208,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Install with DryRun to get templated manifest using global helm client with tracer integration
-	_, err = h.HelmClient.Install(ctx, compositionMeta.GetReleaseName(composition), compositionDefinition.Spec.Chart.Url, installCfg)
+	rel, err := h.HelmClient.Install(ctx, compositionMeta.GetReleaseName(composition), compositionDefinition.Spec.Chart.Url, installCfg)
 	if err != nil {
 		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),
@@ -223,6 +223,31 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ensure resLi is not nil to avoid null in JSON response
 	if resLi == nil {
 		resLi = []resources.Resource{}
+	}
+
+	// Separate what the chart OWNS from what it merely LOOKS UP (#228). The dry-run above returns
+	// the rendered manifest, which is the evidence the tracer lacks: a named observation of an
+	// object the chart does not render is a read-only lookup, not a create existence-check, and
+	// does not need the management superset. See ownership.go for why narrowing the verbs instead
+	// would break teardown.
+	//
+	// Failure here never widens a grant and never fails the request: with no usable manifest
+	// nothing is narrowed and the response is exactly what it was before.
+	if rel != nil {
+		rendered, rerr := renderedObjects(rel.GetManifest(), composition.GetNamespace(), h.Plurarizer)
+		if rerr != nil {
+			log.WarnContext(ctx, "could not read the rendered manifest; leaving observed verbs unnarrowed",
+				slog.Any("err", rerr))
+		} else {
+			var narrowed int
+			resLi, narrowed = narrowLookupVerbs(resLi, rendered)
+			if narrowed > 0 {
+				log.InfoContext(ctx, "narrowed read-only named lookups to get/list/watch",
+					slog.Int("narrowed", narrowed), slog.Int("observed", len(resLi)),
+					slog.Int("rendered", len(rendered.owned)),
+					slog.Int("opaqueGroups", len(rendered.opaqueGroups)))
+			}
+		}
 	}
 
 	if meta.IsVerbose(composition) {
