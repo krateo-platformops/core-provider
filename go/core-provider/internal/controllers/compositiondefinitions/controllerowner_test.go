@@ -236,3 +236,63 @@ func TestHandedOver(t *testing.T) {
 		t.Error("same-namespace successor: the shared controller is the successor's; the leaving definition is gone")
 	}
 }
+
+// A helm upgrade that moves a definition creates the new one and deletes the old one within a
+// second, so the old one's Delete can run before core-provider has reconciled the new one at all.
+// The successor must be found then, with the new definition's status still EMPTY. That is only
+// possible through a spec-derived signal (the identical chart generates the same Kind+version):
+// anything read from status (CurrentGVK, Managed, VersionInfo) is blind in exactly that window.
+// Missing it made the delete take the last-definition path and destroy the live instances and the
+// CRD (kind rehearsal of installer 0.3.457). If this test fails, do not "simplify" the sibling match
+// back onto status.
+func TestControllerSuccessor_FoundBeforeItsStatusExists(t *testing.T) {
+	sc := runtime.NewScheme()
+	if err := apis.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	chart := &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/krateo-blueprints/charts/selfservice-krateo", Version: "0.2.45"}
+	gvk := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-2-45", Kind: "SelfserviceKrateo"}
+
+	leaving := ownerCD("krateo-system", "selfservice-krateo", 0)
+	leaving.Spec.Chart = chart.DeepCopy()
+	leaving.Status.ApiVersion = "composition.krateo.io/v0-2-45"
+	leaving.Status.Kind = "SelfserviceKrateo"
+	deletingAt := deleting(leaving)
+	deletingAt.SetFinalizers([]string{"finalizer.managedresource.krateo.io"})
+
+	// Created a moment ago and never reconciled: no status at all.
+	fresh := ownerCD("krateo-bp-selfservice-krateo", "selfservice-krateo", 1)
+	fresh.Spec.Chart = chart.DeepCopy()
+
+	// Unreconciled too, but a different chart: not a successor for this Kind+version.
+	unrelated := ownerCD("krateo-system", "github-provider-kog", 1)
+	unrelated.Spec.Chart = &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/krateo-blueprints/charts/github-provider-kog", Version: "0.3.2"}
+
+	successorOf := func(objs ...client.Object) string {
+		t.Helper()
+		e := &external{mgmt: clientfake.NewClientBuilder().WithScheme(sc).WithObjects(objs...).Build()}
+		got, err := e.controllerSuccessor(context.Background(), &deletingAt, gvk, chartRefOf(deletingAt.Spec.Chart))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ownerName(got)
+	}
+
+	if got := successorOf(&deletingAt, &fresh, &unrelated); got != "krateo-bp-selfservice-krateo/selfservice-krateo" {
+		t.Fatalf("successor with an empty status but the identical chart = %s, want krateo-bp-selfservice-krateo/selfservice-krateo", got)
+	}
+	if got := successorOf(&deletingAt, &unrelated); got != "<self>" {
+		t.Fatalf("an unreconciled definition of a DIFFERENT chart was taken as successor: %s", got)
+	}
+
+	// Independence: with no chart to compare (the old status-only signal), the same fresh sibling
+	// is invisible. This pins that the protection comes from the spec, not from status.
+	e := &external{mgmt: clientfake.NewClientBuilder().WithScheme(sc).WithObjects(&deletingAt, &fresh).Build()}
+	got, err := e.controllerSuccessor(context.Background(), &deletingAt, gvk, chartRef{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("without a chart the status-only match found %s; the test no longer proves the spec signal is what protects", ownerName(got))
+	}
+}
