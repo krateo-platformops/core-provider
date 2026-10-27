@@ -1229,6 +1229,34 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 	if crVersion == "" {
 		return false
 	}
+
+	// Is the stamp still TRUE of this object? (#199 residual.)
+	//
+	// A second question, not a second opinion on the first. IsParentRendered above asks whether
+	// there is anything to hand over TO — a structural fact about who renders this object. This
+	// asks whether the stamp we are about to compare still describes it.
+	//
+	// The claim the early return rests on is that a parent-rendered composition is RECREATED at
+	// each bump and re-stamped at Create, so its stamp cannot go stale. That holds for a bump
+	// delivered by its parent. It does not hold for one delivered OUT OF BAND, past the umbrella's
+	// pin: then core-provider re-points the CRD under the object it already has, exactly as it
+	// does for a standalone composition, and the write-once stamp freezes while the served version
+	// walks away from it. IsParentRendered still says true, the stale stamp is consulted after
+	// all, and a genuine delete reads as a migration and skips the uninstall — the #199 defect in
+	// the one population #199 exempted.
+	//
+	// krateo.io/composition-version answers it directly and is the only field that can: the
+	// version MutatingAdmissionPolicy re-stamps it on EVERY write, which is what makes it useless
+	// as an origin (see AnnotationKeyOriginVersion) and exactly right as a freshness probe. Equal
+	// to the stamp means the object has not been re-pointed since it was stamped. Different means
+	// it has, and the stamp no longer describes it.
+	//
+	// Absent means the policy did not run — an old object, or a cluster without it. Then there is
+	// no freshness evidence either way, and the guard yields rather than inventing a verdict: the
+	// behaviour is exactly what it was before this check existed.
+	if served := mg.GetLabels()[compositionMeta.CompositionVersionLabel]; served != "" && served != crVersion {
+		return false
+	}
 	// Normalize the owning CD's semver chart version ("0.1.8") to the CR's version form ("v0-1-8").
 	cdVersion := "v" + strings.ReplaceAll(pkg.Version, ".", "-")
 	return cdVersion != crVersion

@@ -41,6 +41,25 @@ func crWithOrigin(deliveredVersion, originVersion string) *unstructured.Unstruct
 	ann := mg.GetAnnotations()
 	ann[compositionMeta.AnnotationKeyOriginVersion] = originVersion
 	mg.SetAnnotations(ann)
+
+	// krateo.io/composition-version equals the ORIGIN here, which is what a real object in this
+	// state carries and what fullDefinitionLabels' fixed "v0-1-7" was silently misrepresenting.
+	//
+	// The version MutatingAdmissionPolicy stamps that label on CREATE and UPDATE — on a WRITE to
+	// the object. Re-pointing the CRD to a new served version is neither, so the label does not
+	// move: the object is DELIVERED at the new version while still labelled with the one it was
+	// written at. That is precisely the race these cases describe.
+	//
+	// An object whose label has moved past its origin is a different state entirely — it was
+	// written again, i.e. migrated in place rather than recreated — and the tests for that set the
+	// label explicitly (withServedLabel, handover_stalestamp_test.go).
+	l := mg.GetLabels()
+	l2 := make(map[string]string, len(l))
+	for k, v := range l {
+		l2[k] = v
+	}
+	l2[compositionMeta.CompositionVersionLabel] = originVersion
+	mg.SetLabels(l2)
 	return mg
 }
 
