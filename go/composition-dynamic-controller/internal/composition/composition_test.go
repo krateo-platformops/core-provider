@@ -671,8 +671,12 @@ func TestController(t *testing.T) {
 
 		// A single Observe runs the self-healing Reconcile internally: kc.Update recreates
 		// the deleted child, Reconcile detects the create as a real change and writes ONE
-		// new revision. We assert exactly-once by driving the heal through Observe alone
-		// (not the Observe->Update route, which would apply a second time).
+		// new revision. This case drives the heal through Observe ALONE.
+		//
+		// It used to say "not the Observe->Update route, which would apply a second time",
+		// which is how #175 hid in plain sight: the harness knew the full route doubled and
+		// stepped around it rather than asserting on it. The route it avoided is now covered
+		// by "SelfHeal: the full Observe->Update route writes ONE revision" below.
 		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
 		observation, err := handler.Observe(ctx, u)
 		if err != nil {
@@ -710,6 +714,153 @@ func TestController(t *testing.T) {
 		t.Logf("[selfheal-delete] latest revision after 3 steady reconciles: %d (was %d)", revSteady, revAfterHeal)
 		if revSteady != revAfterHeal {
 			t.Errorf("steady-state reconciles bumped revision: %d -> %d", revAfterHeal, revSteady)
+		}
+
+		return ctx
+	}).Assess("SelfHeal: the full Observe->Update route writes ONE revision", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// #175's acceptance test, on the route the case above deliberately avoided.
+		//
+		// The runtime does not stop at Observe. Observe converges the cluster with
+		// hc.Reconcile and returns ResourceUpToDate:false, which makes the runtime dispatch
+		// Update — and Update used to perform an unconditional hc.Upgrade, writing a SECOND
+		// revision for drift the first call had already healed. Measured on krateo-057 as
+		// strictly bimodal pairs ~3s apart against a 60s cadence; git-provider reached 62,783
+		// revisions in 28 days.
+		//
+		// Two arms, and the second is what makes the first mean anything:
+		//
+		//   A. drift -> Observe -> Update   must bump the revision EXACTLY ONCE
+		//   B. drift -> Update alone        must still bump it exactly once, and heal
+		//
+		// Without B, a "fix" that simply made Update do nothing would pass A. #175 names this
+		// explicitly: a fix that MOVED the write rather than removing it passes the first
+		// check and fails the second.
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Fatalf("decoding composition manifest: %v", err)
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		gvr := schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}
+		cli := dy.Resource(gvr).Namespace(obj.GetNamespace())
+		u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting composition: %v", err)
+		}
+		releaseName := compositionMeta.GetReleaseName(u)
+
+		adminCfg := cfg.Client().RESTConfig()
+		clientset, _ := kubernetes.NewForConfig(adminCfg)
+		latestRevision := func() int {
+			list, err := clientset.CoreV1().Secrets(u.GetNamespace()).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("name=%s,owner=helm", releaseName),
+			})
+			if err != nil {
+				t.Fatalf("listing helm revisions: %v", err)
+			}
+			max := 0
+			for _, s := range list.Items {
+				if v := s.Labels["version"]; v != "" {
+					if n, err := strconv.Atoi(v); err == nil && n > max {
+						max = n
+					}
+				}
+			}
+			return max
+		}
+
+		childGVR := schema.GroupVersionResource{
+			Resource: "datapresentationazures",
+			Group:    "finops.krateo.io",
+			Version:  "v1alpha1",
+		}
+		childName := "focus-1-focus-data-presentation-azure"
+		childCli := dynamic.NewForConfigOrDie(adminCfg).Resource(childGVR).Namespace(obj.GetNamespace())
+
+		dropChild := func(tag string) {
+			t.Helper()
+			if err := childCli.Delete(ctx, childName, metav1.DeleteOptions{}); err != nil {
+				t.Fatalf("[%s] deleting child out-of-band: %v", tag, err)
+			}
+			for i := 0; i < 20; i++ {
+				if _, err := childCli.Get(ctx, childName, metav1.GetOptions{}); errors.IsNotFound(err) {
+					return
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			t.Fatalf("[%s] child %q was not deleted out-of-band", tag, childName)
+		}
+
+		// --- arm A: the full route ---
+		revBefore := latestRevision()
+		dropChild("A")
+
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		observation, err := handler.Observe(ctx, u)
+		if err != nil {
+			t.Fatalf("[A] observe after out-of-band delete: %v", err)
+		}
+		if observation.ResourceUpToDate {
+			t.Fatalf("[A] Observe did not report drift, so the route under test is not exercised")
+		}
+
+		// Exactly what the runtime does next.
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err := handler.Update(ctx, u); err != nil {
+			t.Fatalf("[A] update after drift: %v", err)
+		}
+
+		revAfterRoute := latestRevision()
+		t.Logf("[175-A] revision %d -> %d across Observe+Update", revBefore, revAfterRoute)
+		if revAfterRoute != revBefore+1 {
+			t.Errorf("[A] the Observe->Update route wrote %d revisions for ONE drift (%d -> %d), want 1. "+
+				"This is #175: Observe's reconcile heals the drift and Update then writes again for it.",
+				revAfterRoute-revBefore, revBefore, revAfterRoute)
+		}
+		if _, err := childCli.Get(ctx, childName, metav1.GetOptions{}); err != nil {
+			t.Errorf("[A] child %q not present after the route: %v", childName, err)
+		}
+
+		// --- arm B: the control. Update alone must still converge and write once ---
+		revBeforeB := latestRevision()
+		dropChild("B")
+
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err := handler.Update(ctx, u); err != nil {
+			t.Fatalf("[B] update on a drifted cluster: %v", err)
+		}
+
+		revAfterB := latestRevision()
+		t.Logf("[175-B] revision %d -> %d across Update alone", revBeforeB, revAfterB)
+		if _, err := childCli.Get(ctx, childName, metav1.GetOptions{}); err != nil {
+			t.Errorf("[B] Update alone did not heal the drift; child %q still missing: %v. "+
+				"Arm A would then pass for the wrong reason — a no-op Update writes no second "+
+				"revision either.", childName, err)
+		}
+		if revAfterB != revBeforeB+1 {
+			t.Errorf("[B] Update alone wrote %d revisions (%d -> %d), want exactly 1: it must still "+
+				"converge when nothing converged before it", revAfterB-revBeforeB, revBeforeB, revAfterB)
+		}
+
+		// --- steady state: neither phase writes when there is nothing to do ---
+		revSteadyBefore := latestRevision()
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if obs, err := handler.Observe(ctx, u); err != nil {
+			t.Fatalf("steady-state observe: %v", err)
+		} else if !obs.ResourceUpToDate {
+			t.Errorf("steady-state Observe reported drift after the cluster was converged")
+		}
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err := handler.Update(ctx, u); err != nil {
+			t.Fatalf("steady-state update: %v", err)
+		}
+		if revSteady := latestRevision(); revSteady != revSteadyBefore {
+			t.Errorf("a converged cluster still wrote %d revision(s) (%d -> %d); apply-if-changed "+
+				"is not holding on either phase", revSteady-revSteadyBefore, revSteadyBefore, revSteady)
 		}
 
 		return ctx
