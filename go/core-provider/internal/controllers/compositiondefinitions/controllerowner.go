@@ -430,22 +430,83 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 // definition alone, and nothing it could remove would leave the successor's controller without a
 // live identity. The successor redeploys its own configuration on its next reconcile (its status
 // digest is empty while it follows, so its Observe reports not up to date).
+// definitionGone is Observe's decision that a deleting definition's external resource is gone, so
+// the reconciler may drop the finalizer. Separated as a truth table because it is the counterpart
+// of Delete's keep-the-CRD decision, and #205 was the two disagreeing.
+//
+// The disagreement: Delete keeps the shared CRD when ANY live definition still needs the Kind
+// (kindReferencedElsewhere, Kind-wide and spec-aware since #214), while Observe only reported gone
+// when a successor took over this exact Kind+VERSION. A sibling on another version therefore kept
+// the CRD standing while Observe went on reporting it as this definition's, the finalizer never
+// dropped, and Delete re-ran forever.
+//
+// That is the same shape as #214 itself — a Kind-wide gate against a version-specific one — and
+// #214's fix widened it, because skipCRD became true in strictly more cases. Before it, the
+// cross-version case deleted the CRD and the definition terminated cleanly BY DESTROYING IT. The
+// better failure, but a new one, and this is where it landed.
+//
+// ownControllerPresent is what keeps the ordering safe in every branch: it can only be false after
+// Delete has removed this definition's controller, so the early return can never short-circuit the
+// cleanup it depends on. The first Observe of a deletion still finds the controller, reports
+// exists, and Delete runs.
+//
+// successorSharesNamespace is true at once with no Delete, by construction: two definitions in one
+// namespace share every controller object by name, so nothing belongs to the leaving definition
+// alone. That shortcut is version-specific and deliberately not extended to the Kind-level branch —
+// a sibling on another version has its own {resource}-{version}-named objects, so this definition's
+// are genuinely its own and must actually be removed first.
+func definitionGone(remote, hasVersionSuccessor, successorSharesNamespace, kindHeldByAnother, ownControllerPresent bool) bool {
+	if remote {
+		return false // a remote target's CRD and cdc are its own, on its spoke; they always go
+	}
+	if hasVersionSuccessor {
+		if successorSharesNamespace {
+			return true
+		}
+		return !ownControllerPresent
+	}
+	if kindHeldByAnother {
+		return !ownControllerPresent
+	}
+	return false
+}
+
+// handedOver reports whether a definition being deleted has finished handing over: nothing it owns
+// outlives it, so Observe may report the external resource gone and let the finalizer drop.
+//
+// Asks the same question Delete asks, at both granularities — see definitionGone.
 func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) (bool, error) {
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
 		return false, nil
 	}
 	successor, err := e.controllerSuccessor(ctx, cr, gvk, chartRefOf(cr.Spec.Chart))
-	if err != nil || successor == nil {
-		return false, err
-	}
-	if successor.Namespace == cr.Namespace {
-		return true, nil
-	}
-	own, err := e.controllerDeployedIn(ctx, cr.Namespace, gvr)
 	if err != nil {
 		return false, err
 	}
-	return !own, nil
+
+	kindHeld := false
+	if successor == nil {
+		// No successor on this exact version. The CRD may still be standing for another version of
+		// the same Kind, in which case it is not this definition's to wait on.
+		keep, kerr := e.kindReferencedElsewhere(ctx, cr, gvk.GroupKind())
+		if kerr != nil {
+			return false, kerr
+		}
+		kindHeld = keep.keep
+	}
+	if successor == nil && !kindHeld {
+		return false, nil
+	}
+
+	sharesNS := successor != nil && successor.Namespace == cr.Namespace
+	own := false
+	if !sharesNS {
+		own, err = e.controllerDeployedIn(ctx, cr.Namespace, gvr)
+		if err != nil {
+			return false, err
+		}
+	}
+	return definitionGone(false, successor != nil, sharesNS, kindHeld, own), nil
 }
 
 func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
