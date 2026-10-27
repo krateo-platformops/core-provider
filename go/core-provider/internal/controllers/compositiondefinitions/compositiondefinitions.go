@@ -996,6 +996,21 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
+	// Instances whose definition-ref labels name a definition that no longer exists are invisible
+	// to the owner-scoped migration check below, so it would report up to date over them (#215).
+	// Adopting them is Update's job; report not up to date until it has (adoption.go).
+	orphans, err := e.adoptableOrphans(ctx, cr, chartGVK, gvr)
+	if err != nil {
+		return reconciler.ExternalObservation{}, fmt.Errorf("error checking for orphaned compositions: %w", err)
+	}
+	if len(orphans) > 0 {
+		log.Info("Orphaned compositions pending adoption", "gvr", gvr.String(), "count", len(orphans))
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	// Drive version migration to completion: if any composition still carries a previous
 	// served version's label, report not-up-to-date so Update re-runs and re-stamps it.
 	// The composition-version policy keys off the write endpoint, so a straggler can
@@ -1448,6 +1463,14 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		gvr, err = e.deployController(ctx, cr, gvk, crd, specSchemaBytes, log)
 	}
 	if err != nil {
+		return err
+	}
+
+	// Adopt the instances a hand-over left naming a deleted definition (#215) BEFORE retiring
+	// old-version controllers and migrating: the migration below is scoped to this definition's
+	// instances, so only once adopted are they migrated rather than left behind on a version whose
+	// controller is about to go.
+	if err := e.adoptOrphans(ctx, cr, gvk, gvr, log); err != nil {
 		return err
 	}
 
