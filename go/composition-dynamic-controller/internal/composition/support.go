@@ -81,6 +81,13 @@ func setUnavailableStatus(mg *unstructured.Unstructured, message string, force b
 	return setReadyCondition(mg, condition.Unavailable(), message, force)
 }
 
+// setZeroEvidenceStatus stamps Ready=Unknown/ZeroEvidence: the composition's health could not be
+// assessed at all (#165). Routed through the same helper as the other three so it cannot reintroduce
+// #119's contradictory-status comparison.
+func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, condition.ZeroEvidence(), message, force)
+}
+
 type ConditionType string
 
 const (
@@ -206,14 +213,29 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 		}
 	}
 
-	out := resolveReady(projPresent, projReady, projMsg, opts.message, v)
+	return stampReady(mg, resolveReady(projPresent, projReady, projMsg, opts.message, v), opts.force)
+}
+
+// stampReady writes the Ready condition a readyOutcome calls for.
+//
+// Named and tested rather than inlined in deriveReadyFromHealth, because that function needs a
+// kubeconfig to reach the rollup and so could not be exercised in a unit test — which meant the
+// ROUTING was untested while every setter it routes to was tested individually. Dropping the
+// ZeroEvidence arm failed nothing (found by mutation while shipping #165).
+//
+// That gap is dangerous here specifically because the default arm stamps AVAILABLE. A reason added
+// to resolveReady without a case here does not fail loudly or stamp nothing; it reports healthy.
+// Which is the exact failure #165 is about, arriving in the fix for it.
+func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) error {
 	switch out.reason {
 	case "Unavailable":
-		return setUnavailableStatus(mg, out.message, opts.force)
+		return setUnavailableStatus(mg, out.message, force)
 	case "Creating":
-		return setCreatingStatus(mg, out.message, opts.force)
+		return setCreatingStatus(mg, out.message, force)
+	case "ZeroEvidence":
+		return setZeroEvidenceStatus(mg, out.message, force)
 	default:
-		return setAvaibleStatus(mg, out.message, opts.force)
+		return setAvaibleStatus(mg, out.message, force)
 	}
 }
 
