@@ -58,7 +58,15 @@ jobs:
       fmt_check: true
       tidy_check: true
       crd_drift: true
-      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+      # -count=1 defeats the test cache, which is NOT optional here. Several tests read files
+      # OUTSIDE their Go module — internal/tools/policy/chartparity_test.go and
+      # internal/tools/deploy/controller_naming_test.go both reach up into helm/core-provider/ —
+      # and the build cache does not track those as inputs. Measured: with these exact flags a
+      # second run reports `ok (cached)`, so -coverprofile does NOT disable caching as it appears
+      # to. setup-go restores the cache across runs, so without -count=1 an edit to a shipped chart
+      # template alone can produce a cached pass and those guards are vacuous for precisely the
+      # regression they exist to catch.
+      test_args: -count=1 -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
   checks-composition-dynamic-controller:
@@ -67,7 +75,15 @@ jobs:
       module: go/composition-dynamic-controller
       fmt_check: true
       tidy_check: true
-      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+      # -count=1 defeats the test cache, which is NOT optional here. Several tests read files
+      # OUTSIDE their Go module — internal/tools/policy/chartparity_test.go and
+      # internal/tools/deploy/controller_naming_test.go both reach up into helm/core-provider/ —
+      # and the build cache does not track those as inputs. Measured: with these exact flags a
+      # second run reports `ok (cached)`, so -coverprofile does NOT disable caching as it appears
+      # to. setup-go restores the cache across runs, so without -count=1 an edit to a shipped chart
+      # template alone can produce a cached pass and those guards are vacuous for precisely the
+      # regression they exist to catch.
+      test_args: -count=1 -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
   checks-chart-inspector:
@@ -76,7 +92,15 @@ jobs:
       module: go/chart-inspector
       fmt_check: true
       tidy_check: true
-      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
+      # -count=1 defeats the test cache, which is NOT optional here. Several tests read files
+      # OUTSIDE their Go module — internal/tools/policy/chartparity_test.go and
+      # internal/tools/deploy/controller_naming_test.go both reach up into helm/core-provider/ —
+      # and the build cache does not track those as inputs. Measured: with these exact flags a
+      # second run reports `ok (cached)`, so -coverprofile does NOT disable caching as it appears
+      # to. setup-go restores the cache across runs, so without -count=1 an edit to a shipped chart
+      # template alone can produce a cached pass and those guards are vacuous for precisely the
+      # regression they exist to catch.
+      test_args: -count=1 -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
   e2e:
