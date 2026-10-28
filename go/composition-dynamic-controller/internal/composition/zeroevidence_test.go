@@ -156,7 +156,7 @@ func TestKrateoReady_UnknownOnlyCountsAsUnevaluatedWithTheZeroEvidenceReason(t *
 func TestResolveReady_ZeroEvidencePassesThrough(t *testing.T) {
 	v := healthVerdict{ready: false, reason: "ZeroEvidence", message: "health is unknown", total: 5, unevaluated: 5}
 
-	out := resolveReady(false, false, "", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{}, "Composition is up-to-date", v)
 	if out.reason != "ZeroEvidence" {
 		t.Fatalf("reason = %q, want ZeroEvidence — anything else is stamped Available downstream", out.reason)
 	}
@@ -172,7 +172,7 @@ func TestResolveReady_ZeroEvidencePassesThrough(t *testing.T) {
 func TestResolveReady_ProjectedHealthOverridesZeroEvidence(t *testing.T) {
 	v := healthVerdict{ready: false, reason: "ZeroEvidence", message: "health is unknown", total: 3, unevaluated: 3}
 
-	out := resolveReady(true, true, "api answered 200", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{present: true, ready: true, message: "api answered 200"}, "Composition is up-to-date", v)
 	if out.reason != "Available" {
 		t.Fatalf("reason = %q, want Available: the author's health check is evidence", out.reason)
 	}
@@ -182,7 +182,7 @@ func TestResolveReady_ProjectedHealthOverridesZeroEvidence(t *testing.T) {
 
 	// Control arm: a projected ready=FALSE must still be honoured as Unavailable, not softened
 	// into ZeroEvidence by the new branch.
-	if out := resolveReady(true, false, "api answered 503", "Composition is up-to-date", v); out.reason != "Unavailable" {
+	if out := resolveReady(projectedHealth{present: true, ready: false, message: "api answered 503"}, "Composition is up-to-date", v); out.reason != "Unavailable" {
 		t.Errorf("projected ready=false gave reason %q, want Unavailable", out.reason)
 	}
 }
