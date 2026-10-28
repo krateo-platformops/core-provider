@@ -1,6 +1,8 @@
 module github.com/krateo-platformops/chart-inspector
 
-go 1.26.10
+go 1.26.0
+
+toolchain go1.26.10
 
 require (
 	github.com/gobuffalo/flect v1.0.3

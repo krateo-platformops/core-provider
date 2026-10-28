@@ -1,6 +1,8 @@
 module github.com/krateo-platformops/core-provider
 
-go 1.26.10
+go 1.26.0
+
+toolchain go1.26.10
 
 require (
 	github.com/Masterminds/sprig/v3 v3.3.0

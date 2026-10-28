@@ -1,6 +1,8 @@
 module github.com/krateo-platformops/composition-dynamic-controller
 
-go 1.26.10
+go 1.26.0
+
+toolchain go1.26.10
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
