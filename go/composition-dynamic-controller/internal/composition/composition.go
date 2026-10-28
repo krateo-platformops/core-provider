@@ -888,6 +888,20 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 	h.eventRecorder.Event(mg, event.Normal(reasonUpdated, "Update", fmt.Sprintf("Updated composition: %s", mg.GetName())))
 
+	// Decided BEFORE setStatus, and that ordering is the whole of #232. Pausedness selects the
+	// conditionType, and setStatus ALSO uses the conditionType to decide whether to evaluate the
+	// statusDataTemplate projection — so a decision taken after setStatus can reach neither. It used
+	// to be taken after, by assigning statusOpts.conditionType at a point where statusOpts is never
+	// read again, which made both effects unreachable: ConditionTypeReconcileGracefullyPaused was
+	// never passed to setStatus from anywhere, so setGracefullyPausedCondition could not be called
+	// and the projection gate could not fire. A paused composition reported Ready=True/Available and
+	// had its status projected as if it were reconciling.
+	//
+	// Checked here rather than at the top of Update because Observe already returns early when
+	// paused: reaching this point at all means the annotation arrived DURING this reconcile, and the
+	// latest read of it is the useful one.
+	paused := compositionMeta.IsGracefullyPaused(mg)
+
 	statusOpts := &statusManagerOpts{
 		force:           false,
 		resources:       all,
@@ -899,7 +913,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		releaseStatus:   string(upgradedRel.Status),
 		releaseRevision: upgradedRel.Revision,
 		releaseName:     upgradedRel.Name,
-		conditionType:   ConditionTypeAvailable,
+		conditionType:   convergedConditionType(paused),
 	}
 	err = h.setStatus(ctx, mg, statusOpts)
 	if err != nil {
@@ -914,14 +928,15 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("updating cr status with values: %w", err)
 	}
 
-	if compositionMeta.IsGracefullyPaused(mg) {
-		statusOpts.conditionType = ConditionTypeReconcileGracefullyPaused
+	// The ANNOTATION work has to stay here, after the status update, even though the decision above
+	// moved earlier. updateStatusWithRetry returns the server's response to a status-subresource
+	// write, which does not carry local metadata edits — so annotations set on mg before it are
+	// silently dropped, and only edits applied to the returned object survive tools.Update below.
+	if paused {
 		compositionMeta.SetGracefullyPausedTime(mg, time.Now())
 		log.Debug("Composition gracefully paused.")
 		h.eventRecorder.Event(mg, event.Normal(reasonReconciliationGracefullyPaused, "Update", "Reconciliation paused via the gracefully paused annotation."))
-
 	} else {
-		statusOpts.conditionType = ConditionTypeAvailable
 		meta.RemoveAnnotations(mg, compositionMeta.AnnotationKeyReconciliationGracefullyPausedTime)
 	}
 

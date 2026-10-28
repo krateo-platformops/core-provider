@@ -97,6 +97,27 @@ const (
 	ConditionTypeReconcileGracefullyPaused ConditionType = "ReconcileGracefullyPaused"
 )
 
+// convergedConditionType picks the conditionType for a reconcile that has just converged, from
+// whether the composition is gracefully paused.
+//
+// Extracted as a named function rather than written inline in Update for one reason: Update drives
+// helm and a live dynamic client and cannot be unit-tested, so an inline conditional there is only
+// reachable by a source-level guard — and a guard of that kind asserts that the paused constant is
+// MENTIONED, not that it can be produced. Proven, not assumed: an earlier version of this change
+// kept the conditional inline and a mutation that made it `if paused && false` SURVIVED the guard,
+// because the identifier was still sitting there in dead code. This function is the smallest unit
+// that makes the decision itself falsifiable.
+//
+// Both effects of a pause hang off this return value: setStatus routes
+// ConditionTypeReconcileGracefullyPaused to setGracefullyPausedCondition AND uses it to skip the
+// statusDataTemplate projection. Before #232 nothing ever passed it, so neither happened.
+func convergedConditionType(paused bool) ConditionType {
+	if paused {
+		return ConditionTypeReconcileGracefullyPaused
+	}
+	return ConditionTypeAvailable
+}
+
 type statusManagerOpts struct {
 	force           bool
 	chartURL        string
