@@ -803,23 +803,26 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	//
 	seedReadyIfAbsent(cr)
 
+	// Every chart-read failure below answers from status instead of returning bare, so an
+	// unresolved create handshake can still be resolved by the runtime (#235). See
+	// observeWithoutChart.
 	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
-		return reconciler.ExternalObservation{}, fmt.Errorf("error getting chart info: %w", err)
+		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting chart info: %w", err), log)
 	}
 
 	pkg, err := chartfs.ForSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
-		return reconciler.ExternalObservation{}, err
+		return e.observeWithoutChart(ctx, cr, fmt.Errorf("reading chart: %w", err), log)
 	}
 
 	chartGVK, err := chartfs.GroupVersionKind(pkg)
 	if err != nil {
-		return reconciler.ExternalObservation{}, err
+		return e.observeWithoutChart(ctx, cr, fmt.Errorf("deriving GVK from chart: %w", err), log)
 	}
 	specSchemaBytes, err := chart.ChartJsonSchema(pkgInfo, dir)
 	if err != nil {
-		return reconciler.ExternalObservation{}, fmt.Errorf("error getting spec schema: %w", err)
+		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting spec schema: %w", err), log)
 	}
 
 	gvr, err := e.pluralizer.GVKtoGVR(chartGVK)
@@ -1708,6 +1711,60 @@ func statusGVR(cr *compositiondefinitionsv1alpha1.CompositionDefinition) (schema
 		return schema.GroupVersionResource{}, false
 	}
 	return gv.WithResource(cr.Status.Resource), true
+}
+
+// observeWithoutChart answers "does the external resource exist?" when the chart cannot be read
+// (#235).
+//
+// The runtime's unresolved-create recovery is gated on an ANSWER from Observe, not on an error:
+//
+//	observation, err := external.Observe(...)
+//	if err != nil { ... return }                  // returns HERE
+//	if unresolvedCreate { switch { ... } }        // never reached
+//
+// So while Observe errors, a half-created CompositionDefinition keeps
+// krateo.io/external-create-pending as its newest marker and every reconcile refuses with
+// "cannot determine creation result" — forever, on provider-runtime v1.5.2 exactly as on v1.3.0.
+// The bump bounds the CONFLICT wedge; it cannot help an ERROR wedge, because there is nothing for
+// the guard to act on.
+//
+// Observe used to return bare on every chart-read failure, and a chart can stay unreadable
+// indefinitely: a private registry, a pulled chart, credentials that stopped working. This file
+// already records a definition that sat failing its chart fetch for FIVE DAYS on krateo-057.
+// Half-created plus unreadable chart was therefore a permanent wedge that no runtime version fixed.
+//
+// The question does not actually need the chart. It needs the GVK, and a definition that has
+// reconciled even once records that on its status — which is what statusGVR already derives for
+// the remote-delete path, for the same reason. A definition that has NEVER reconciled has no
+// status and no generated CRD, so "does not exist" is the truthful answer for it too.
+//
+// The chart failure is NOT swallowed. ResourceUpToDate is false, so the runtime proceeds to
+// Create or Update, both of which read the chart themselves and fail there — surfacing the same
+// error from the phase that can act on it, and (for Create) stamping external-create-failed so
+// the handshake closes instead of hanging. The condition set here names the chart error so the
+// cause is visible on the object without waiting for that.
+func (e *external) observeWithoutChart(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, cause error, log logging.Logger) (reconciler.ExternalObservation, error) {
+	cr.SetConditions(rtv1.Unavailable().
+		WithMessage(fmt.Sprintf("chart could not be read: %v", cause)))
+
+	gvr, ok := statusGVR(cr)
+	if !ok {
+		// Never reconciled: no recorded GVK, therefore no generated CRD. "Does not exist" is true.
+		log.Info("Chart unreadable and no GVK on status; reporting the external resource absent so an unresolved create can recover",
+			"error", cause.Error())
+		return reconciler.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
+	}
+
+	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if err != nil {
+		// A failed CRD read is a live apiserver problem, not a permanent state, and retrying is
+		// right. Returning the error here cannot wedge anything the way the chart path did.
+		return reconciler.ExternalObservation{}, fmt.Errorf("error getting CRD while the chart is unreadable: %w", err)
+	}
+	exists := crd != nil
+	log.Info("Chart unreadable; answered from the GVK on status rather than returning an error",
+		"gvr", gvr.String(), "resourceExists", exists, "error", cause.Error())
+	return reconciler.ExternalObservation{ResourceExists: exists, ResourceUpToDate: false}, nil
 }
 
 func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
