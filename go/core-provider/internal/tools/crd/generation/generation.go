@@ -6,6 +6,7 @@ import (
 	encjson "encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	_ "embed"
 
@@ -36,6 +37,12 @@ import (
 var (
 	crdGenCache sync.Map   // digest string -> []byte (generated CRD manifest)
 	crdGenMu    sync.Mutex // serializes crdgen.Generate (the go-toolchain exec) across goroutines
+	// crdGenRuns counts ACTUAL toolchain invocations, i.e. cache misses. It exists so the cache can
+	// be tested by observing the thing it is meant to prevent, instead of by timing two calls and
+	// inferring a cache hit from the second being faster. That inference is not sound: when the
+	// toolchain's own build cache is warm a cold call costs ~16ms, so the two durations are noise
+	// and the comparison flips on an unrelated GC pause. It did, intermittently, on CI and locally.
+	crdGenRuns atomic.Int64
 )
 
 func crdGenKey(specSchema, statusSchema []byte, gvk schema.GroupVersionKind) string {
@@ -390,6 +397,7 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 		return append([]byte(nil), v.([]byte)...), nil
 	}
 
+	crdGenRuns.Add(1)
 	res, err := crdgen.Generate(crdgen.Options{
 		Group:        gvk.Group,
 		Version:      gvk.Version,

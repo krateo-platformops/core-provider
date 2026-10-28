@@ -15,31 +15,47 @@ func cacheTestSchema() []byte {
 // GenerateCRD shells out to the Go toolchain (crdgen.Generate). The cold call runs it; a second
 // call with the same (schema, gvk) must be served from crdGenCache instead of re-running the
 // toolchain — otherwise Observe pays a compilation on every reconcile.
+//
+// This asserts the toolchain INVOCATION COUNT, not elapsed time. The earlier version timed both
+// calls and required the second to be at least 4x faster, which was flaky and, worse, unsound:
+// the property under test is "the toolchain did not run again", and duration is only a proxy for
+// it. The proxy breaks whenever the toolchain's own build cache is already warm — an observed
+// failure had cold=16ms warm=117ms, i.e. a "cold" call that never paid for a compilation at all,
+// so the comparison was measuring GC and scheduler noise and flipped at random.
+//
+// Counting is exact, machine-independent, and tests the thing the cache exists to do.
 func TestGenerateCRD_CacheAvoidsToolchainReinvocation(t *testing.T) {
 	spec := cacheTestSchema()
 	gvk := schema.GroupVersionKind{Group: "cache.example.org", Version: "v1", Kind: "Cachewidget"}
 
-	t0 := time.Now()
+	before := crdGenRuns.Load()
 	crd1, err := GenerateCRD(spec, gvk)
 	if err != nil {
 		t.Fatalf("first GenerateCRD: %v", err)
 	}
-	coldDur := time.Since(t0)
+	afterCold := crdGenRuns.Load()
 
-	t1 := time.Now()
+	// POSITIVE CONTROL, and the reason the old test could pass while proving nothing. If this
+	// (schema, gvk) was already cached, BOTH calls are hits, and an assertion that the second did
+	// not run the toolchain is vacuously true. Establish that the first call really was a miss
+	// before concluding anything from the second.
+	if afterCold != before+1 {
+		t.Fatalf("the first GenerateCRD did not invoke the toolchain (runs %d -> %d), so this test "+
+			"never observed a cold start and the cache assertion below would be vacuous",
+			before, afterCold)
+	}
+
 	crd2, err := GenerateCRD(spec, gvk)
 	if err != nil {
 		t.Fatalf("second GenerateCRD: %v", err)
 	}
-	warmDur := time.Since(t1)
+	if got := crdGenRuns.Load(); got != afterCold {
+		t.Errorf("second GenerateCRD re-invoked the go toolchain (runs %d -> %d); Observe would pay "+
+			"a compilation on every reconcile", afterCold, got)
+	}
 
 	if crd1.Name != crd2.Name {
 		t.Fatalf("cached CRD differs from freshly generated: %q vs %q", crd1.Name, crd2.Name)
-	}
-	// The cold call runs the toolchain (hundreds of ms at minimum); a cache hit is orders of
-	// magnitude faster. Guard the fast-machine case with an absolute floor.
-	if warmDur > coldDur/4 && warmDur > 50*time.Millisecond {
-		t.Fatalf("second GenerateCRD was not served from cache: cold=%s warm=%s", coldDur, warmDur)
 	}
 }
 
