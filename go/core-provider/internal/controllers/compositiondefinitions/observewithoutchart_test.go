@@ -57,8 +57,14 @@ func generatedCRD(plural, group, version string) *apiextensionsv1.CustomResource
 
 // #235: the runtime's unresolved-create recovery is gated on an ANSWER from Observe. An error
 // returns before the guard runs, so while Observe errors a half-created definition keeps
-// external-create-pending as its newest marker and refuses forever — on v1.5.2 exactly as on
-// v1.3.0.
+// external-create-pending as its newest marker and refuses forever — on every provider-runtime
+// version from v1.3.0 through v1.6.0.
+//
+// v1.6.0 is worth naming precisely, because it is easy to mistake for a fix. It wraps the Observe
+// error with "external create pending since <t> cannot be resolved until observe succeeds", which
+// makes an UNFIXED instance visible on the object instead of benign-looking. It does not resolve
+// the handshake, and deliberately so: the only way a reconciler could bound this itself is to
+// create blind. The fix has to be here, in the consumer, which is what this file tests.
 //
 // A chart can be unreadable indefinitely (private registry, pulled chart, dead credentials), and
 // Observe used to return bare on every chart-read failure. So "half-created plus unreadable chart"
