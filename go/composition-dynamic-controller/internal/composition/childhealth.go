@@ -195,17 +195,58 @@ func withUnevaluated(base string, unevaluated, total int) string {
 	return fmt.Sprintf("%s (%d of %d managed children not health-evaluated)", base, unevaluated, total)
 }
 
-// readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable") and
-// the message to stamp.
+// readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable" |
+// "ZeroEvidence") and the message to stamp.
 type readyOutcome struct {
 	reason  string
 	message string
 }
 
-// resolveReady folds a blueprint's projected health (.status.health.ready, when present) with the
+// projectedHealth is a blueprint's OWN declared health, read from .status.health. Only a health
+// RESTAction projection writes there, so `present` unambiguously means "the author has a view".
+//
+// Grouped into a struct rather than threaded as positional arguments because `reason` arriving
+// (#234) would have made resolveReady a five-scalar signature with two bools and three strings
+// adjacent — the shape where a swapped argument compiles and lies.
+type projectedHealth struct {
+	present bool
+	ready   bool
+	// reason is OPTIONAL. Absent — which is every blueprint written before #234 — it changes
+	// nothing at all; see notReadyReason.
+	reason  string
+	message string
+}
+
+// notReadyReason maps a declared not-ready projection onto the Ready reason to stamp.
+//
+// WHY THIS EXISTS (krateo-core-provider#234). `.status.health.ready: false` had exactly one
+// meaning: Unavailable, i.e. broken. A composition that is mid-bump — its own values changed and
+// its children not yet reconverged — had no way to say so, and the installer's #230 fix needs to.
+// Reporting Unavailable there propagates a FAULT: krateoReady maps a child whose Ready reason is
+// Unavailable to childFailed, so one deliberately-converging composition turned every parent into
+// an outage report. A false green is a missed signal; a false red is a page.
+//
+// Only "Creating" is recognised, and an absent or unrecognised reason yields Unavailable —
+// today's behaviour, unchanged. That asymmetry is deliberate and is the safe direction: a typo
+// read as Creating would quietly downgrade a real failure to "still converging" and wait forever,
+// whereas a typo read as Unavailable is the loud answer the author already got before #234.
+//
+// The accepted spelling must equal what condition.Creating() stamps as its Reason, because the
+// round trip is the whole feature: this reason is written onto the child's Ready condition, and a
+// PARENT then reads it back through krateoReady. TestDeclaredConverging_RoundTripsToChildConverging
+// pins both ends of that trip; a rename on either side fails there.
+func (p projectedHealth) notReadyReason() string {
+	if strings.EqualFold(p.reason, "Creating") {
+		return "Creating"
+	}
+	return "Unavailable"
+}
+
+// resolveReady folds a blueprint's projected health (.status.health, when present) with the
 // generic managed-child rollup into the final Ready outcome (krateo-core-provider#96):
 //
-//   - A blueprint that projected ready=false is honored — the author declared it unhealthy.
+//   - A blueprint that projected ready=false is honored — the author declared it not ready, and
+//     their optional reason decides whether that reads as broken or as still converging (#234).
 //   - Otherwise a positively-observed sick managed child (a workload with unready/unavailable
 //     replicas, a failed Job, a nested composition reporting Unavailable) keeps the composition
 //     Ready=False EVEN WHEN the blueprint projected ready=true. Projected health may VETO but must
@@ -216,20 +257,27 @@ type readyOutcome struct {
 //
 // The rollup is itself fail-safe (unreadable / unmodeled children count healthy), so this can only
 // surface failures it can positively observe — it never flips a working composition to NotReady.
-func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v healthVerdict) readyOutcome {
-	if projPresent && !projReady {
-		msg := projMsg
+func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
+	if p.present && !p.ready {
+		msg := p.message
 		if msg == "" {
 			msg = defaultMsg
 		}
-		// Both signals agree the composition is unhealthy, so keep both. The author's verdict is the
-		// primary reason and leads; the rollup's names are the part an operator can act on, and
-		// returning projMsg alone discarded them — the one case where the two agree was the one case
-		// that lost the identifiers.
+		// A positively-observed TERMINAL failure outranks whatever the author declared. This is the
+		// same asymmetry the ready=true case already encodes — a projection may veto health but may
+		// not overrule what we can see — applied to #234's new direction: "I am converging" must not
+		// mask a child we positively observed has failed and will not recover on its own.
+		//
+		// Both signals are kept. The author's verdict is the primary reason and leads; the rollup's
+		// names are the part an operator can act on, and returning msg alone discarded them — the
+		// one case where the two agree was the one case that lost the identifiers.
 		if len(v.failing) > 0 {
-			msg = fmt.Sprintf("%s; also unhealthy: %s", msg, joinCap(v.failing, 3))
+			return readyOutcome{
+				reason:  "Unavailable",
+				message: fmt.Sprintf("%s; also unhealthy: %s", msg, joinCap(v.failing, 3)),
+			}
 		}
-		return readyOutcome{reason: "Unavailable", message: msg}
+		return readyOutcome{reason: p.notReadyReason(), message: msg}
 	}
 	switch v.reason {
 	case "Unavailable":
@@ -240,10 +288,10 @@ func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v hea
 		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
 		// the author's health RESTAction IS evidence, and it is better evidence than the generic
 		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
-		// only reached when projPresent is false or projReady is true, and in the latter case the
+		// only reached when the projection is absent or says ready, and in the latter case the
 		// author has told us it is healthy.
-		if projPresent && projReady {
-			msg := projMsg
+		if p.present && p.ready {
+			msg := p.message
 			if msg == "" {
 				msg = defaultMsg
 			}
@@ -255,8 +303,8 @@ func resolveReady(projPresent, projReady bool, projMsg, defaultMsg string, v hea
 	// "Composition values updated"), or the author's projected message when they wrote one — NOT
 	// v.message, which hardcodes "Composition is up-to-date" and would overwrite the phase.
 	msg := defaultMsg
-	if projPresent && projMsg != "" {
-		msg = projMsg
+	if p.present && p.message != "" {
+		msg = p.message
 	}
 	return readyOutcome{reason: "Available", message: withUnevaluated(msg, v.unevaluated, v.total)}
 }
@@ -432,6 +480,16 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// what the converging branch exists for.
 			return childUnevaluated
 		default:
+			// Not-True for any other reason: converging. TWO routes reach here and both must,
+			// so do not narrow this to a Creating-only case.
+			//
+			//  1. A child the cdc itself judged not-ready-yet (reason Creating from the rollup).
+			//  2. A child whose BLUEPRINT declared it converging — .status.health.ready=false with
+			//     reason Creating (#234). This is the route that needs no code of its own: because
+			//     resolveReady stamps reason Creating instead of Unavailable, such a child misses
+			//     the childFailed arm above and lands here. That is the whole of "krateoReady stops
+			//     mapping the converging case to childFailed" — the mapping is keyed on the reason,
+			//     and #234 changed the reason rather than adding a branch.
 			return childConverging
 		}
 	}

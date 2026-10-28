@@ -201,9 +201,6 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 // (#96). It is fail-safe: if children cannot be read (client build fails, a child GET is Forbidden,
 // etc.) the rollup degrades to Available, so it can only surface positively-observed failures.
 func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Unstructured, opts *statusManagerOpts) error {
-	projReady, projPresent := readProjectedHealth(mg)
-	projMsg, _, _ := unstructured.NestedString(mg.Object, "status", "health", "message")
-
 	// Default the rollup to healthy so a missing/unusable client never regresses a working
 	// composition (fail-safe toward Available).
 	v := healthVerdict{ready: true, reason: "Available", message: opts.message}
@@ -213,7 +210,7 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 		}
 	}
 
-	return stampReady(mg, resolveReady(projPresent, projReady, projMsg, opts.message, v), opts.force)
+	return stampReady(mg, resolveReady(readProjectedHealth(mg), opts.message, v), opts.force)
 }
 
 // stampReady writes the Ready condition a readyOutcome calls for.
@@ -239,17 +236,25 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 	}
 }
 
-// readProjectedHealth returns (.status.health.ready, present). Only a blueprint's health RESTAction
-// projection sets this field (the generic rollup does not persist it), so its presence unambiguously
-// means "author-defined health". Accepts bool or string so the statusDataTemplate expression is free.
-func readProjectedHealth(mg *unstructured.Unstructured) (bool, bool) {
+// readProjectedHealth reads a blueprint's own declared health out of .status.health. Only a
+// blueprint's health RESTAction projection writes there (the generic rollup does not persist it),
+// so presence unambiguously means "author-defined health".
+//
+// `ready` accepts bool or string so the statusDataTemplate expression is free to produce either —
+// a jq projection naturally yields a string.
+//
+// `reason` and `message` are read unconditionally and are free-form here; resolveReady decides
+// what, if anything, they mean. An absent reason is the pre-#234 world and must stay inert.
+func readProjectedHealth(mg *unstructured.Unstructured) projectedHealth {
+	var p projectedHealth
 	if b, found, _ := unstructured.NestedBool(mg.Object, "status", "health", "ready"); found {
-		return b, true
+		p.ready, p.present = b, true
+	} else if s, found, _ := unstructured.NestedString(mg.Object, "status", "health", "ready"); found {
+		p.ready, p.present = strings.EqualFold(s, "true"), true
 	}
-	if s, found, _ := unstructured.NestedString(mg.Object, "status", "health", "ready"); found {
-		return strings.EqualFold(s, "true"), true
-	}
-	return false, false
+	p.reason, _, _ = unstructured.NestedString(mg.Object, "status", "health", "reason")
+	p.message, _, _ = unstructured.NestedString(mg.Object, "status", "health", "message")
+	return p
 }
 
 func setManagedResources(mg *unstructured.Unstructured, managed []any) {

@@ -128,48 +128,46 @@ func TestResolveReady(t *testing.T) {
 	available := healthVerdict{ready: true, reason: "Available", message: "Composition is up-to-date"}
 
 	cases := []struct {
-		name        string
-		projPresent bool
-		projReady   bool
-		projMsg     string
-		v           healthVerdict
-		wantReason  string
-		wantMsg     string
+		name       string
+		p          projectedHealth
+		v          healthVerdict
+		wantReason string
+		wantMsg    string
 	}{
 		{
-			name:        "projected ready=true but workload Unavailable -> Unavailable (the #96 fix)",
-			projPresent: true, projReady: true, projMsg: "all good",
-			v: unavail, wantReason: "Unavailable", wantMsg: unavail.message,
+			name: "projected ready=true but workload Unavailable -> Unavailable (the #96 fix)",
+			p:    projectedHealth{present: true, ready: true, message: "all good"},
+			v:    unavail, wantReason: "Unavailable", wantMsg: unavail.message,
 		},
 		{
-			name:        "projected ready=true but workload Creating -> Creating",
-			projPresent: true, projReady: true, projMsg: "all good",
-			v: creating, wantReason: "Creating", wantMsg: creating.message,
+			name: "projected ready=true but workload Creating -> Creating",
+			p:    projectedHealth{present: true, ready: true, message: "all good"},
+			v:    creating, wantReason: "Creating", wantMsg: creating.message,
 		},
 		{
-			name:        "projected ready=true and rollup healthy -> Available with projected message",
-			projPresent: true, projReady: true, projMsg: "all good",
-			v: available, wantReason: "Available", wantMsg: "all good",
+			name: "projected ready=true and rollup healthy -> Available with projected message",
+			p:    projectedHealth{present: true, ready: true, message: "all good"},
+			v:    available, wantReason: "Available", wantMsg: "all good",
 		},
 		{
-			name:        "projected ready=false -> Unavailable (author veto) even when rollup healthy",
-			projPresent: true, projReady: false, projMsg: "app says no",
-			v: available, wantReason: "Unavailable", wantMsg: "app says no",
+			name: "projected ready=false -> Unavailable (author veto) even when rollup healthy",
+			p:    projectedHealth{present: true, ready: false, message: "app says no"},
+			v:    available, wantReason: "Unavailable", wantMsg: "app says no",
 		},
 		{
-			name:        "no projection, rollup Creating -> Creating",
-			projPresent: false,
-			v:           creating, wantReason: "Creating", wantMsg: creating.message,
+			name: "no projection, rollup Creating -> Creating",
+			p:    projectedHealth{},
+			v:    creating, wantReason: "Creating", wantMsg: creating.message,
 		},
 		{
-			name:        "no projection, rollup Available -> Available with default message",
-			projPresent: false,
-			v:           available, wantReason: "Available", wantMsg: "default-msg",
+			name: "no projection, rollup Available -> Available with default message",
+			p:    projectedHealth{},
+			v:    available, wantReason: "Available", wantMsg: "default-msg",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out := resolveReady(c.projPresent, c.projReady, c.projMsg, "default-msg", c.v)
+			out := resolveReady(c.p, "default-msg", c.v)
 			if out.reason != c.wantReason {
 				t.Errorf("reason = %q, want %q", out.reason, c.wantReason)
 			}
@@ -322,9 +320,9 @@ func TestReadProjectedHealth(t *testing.T) {
 		{"str-false", mkStr("no"), false, true},
 		{"absent", &unstructured.Unstructured{Object: map[string]any{}}, false, false},
 	} {
-		gotReady, gotPresent := readProjectedHealth(c.mg)
-		if gotReady != c.ready || gotPresent != c.present {
-			t.Errorf("%s: got (ready=%v present=%v) want (%v %v)", c.name, gotReady, gotPresent, c.ready, c.present)
+		got := readProjectedHealth(c.mg)
+		if got.ready != c.ready || got.present != c.present {
+			t.Errorf("%s: got (ready=%v present=%v) want (%v %v)", c.name, got.ready, got.present, c.ready, c.present)
 		}
 	}
 }

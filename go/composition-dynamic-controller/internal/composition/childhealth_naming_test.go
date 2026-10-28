@@ -104,7 +104,7 @@ func TestResolveReady_UnevaluatedCaveatReachesTheCondition(t *testing.T) {
 	v := healthVerdict{ready: true, reason: "Available",
 		message: availableMessage(3, 10), unevaluated: 3, total: 10}
 
-	out := resolveReady(false, false, "", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{}, "Composition is up-to-date", v)
 
 	if out.reason != "Available" {
 		t.Fatalf("expected Available, got %s", out.reason)
@@ -119,7 +119,7 @@ func TestResolveReady_UnevaluatedCaveatReachesTheCondition(t *testing.T) {
 func TestResolveReady_CaveatPreservesThePhaseMessage(t *testing.T) {
 	v := healthVerdict{ready: true, reason: "Available", unevaluated: 2, total: 5}
 
-	out := resolveReady(false, false, "", "Composition values updated", v)
+	out := resolveReady(projectedHealth{}, "Composition values updated", v)
 
 	if !strings.HasPrefix(out.message, "Composition values updated") {
 		t.Errorf("phase message must lead, not be replaced: %q", out.message)
@@ -133,7 +133,7 @@ func TestResolveReady_CaveatPreservesThePhaseMessage(t *testing.T) {
 func TestResolveReady_CaveatSurvivesAProjectedMessage(t *testing.T) {
 	v := healthVerdict{ready: true, reason: "Available", unevaluated: 1, total: 4}
 
-	out := resolveReady(true, true, "app reports healthy", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{present: true, ready: true, message: "app reports healthy"}, "Composition is up-to-date", v)
 
 	if !strings.HasPrefix(out.message, "app reports healthy") {
 		t.Errorf("the author's message must lead: %q", out.message)
@@ -147,7 +147,7 @@ func TestResolveReady_CaveatSurvivesAProjectedMessage(t *testing.T) {
 func TestResolveReady_NoCaveatWhenFullyEvaluated(t *testing.T) {
 	v := healthVerdict{ready: true, reason: "Available", unevaluated: 0, total: 9}
 
-	out := resolveReady(false, false, "", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{}, "Composition is up-to-date", v)
 
 	if out.message != "Composition is up-to-date" {
 		t.Errorf("no caveat expected when everything was evaluated: %q", out.message)
@@ -161,7 +161,7 @@ func TestResolveReady_ProjectedFalseKeepsTheFailingNames(t *testing.T) {
 		message: "managed children not healthy: portals/ns/db",
 		failing: []string{"portals/ns/db"}, total: 6}
 
-	out := resolveReady(true, false, "health check failed", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{present: true, ready: false, message: "health check failed"}, "Composition is up-to-date", v)
 
 	if out.reason != "Unavailable" {
 		t.Fatalf("expected Unavailable, got %s", out.reason)
@@ -181,7 +181,7 @@ func TestResolveReady_ProjectedTrueCannotMaskAFailedChild(t *testing.T) {
 		message: "managed children not healthy: portals/ns/db",
 		failing: []string{"portals/ns/db"}, total: 6}
 
-	out := resolveReady(true, true, "app reports healthy", "Composition is up-to-date", v)
+	out := resolveReady(projectedHealth{present: true, ready: true, message: "app reports healthy"}, "Composition is up-to-date", v)
 
 	if out.reason != "Unavailable" {
 		t.Fatalf("a projected true must not override an observed failure, got %s", out.reason)
