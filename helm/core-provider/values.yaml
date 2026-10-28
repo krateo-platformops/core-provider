@@ -335,15 +335,34 @@ cdc:
   # compositions, so it never reconciles and never leaked — sits FLAT at 37Mi. That is the true
   # idle floor. A reconciling controller legitimately needs more (chart fetch + render + helm
   # 3-way merge), so 128Mi requests the floor plus real working room, without pricing in the leak.
-  # 41 controllers x 128Mi = 5.25Gi reserved, versus 2.6Gi before and 10.5Gi if we had believed the
-  # leak-inflated figure.
+  #
+  # RE-DERIVED on 2026-10-28 against the fixed system (krateo-057, 2.13.37, 68 cdc controllers,
+  # selected by container image with the pod count controlled against the deployment count). The
+  # estimate above HELD and these numbers are now a measurement rather than an inference (#202):
+  #
+  #   min 19Mi   median 49Mi   p90 60Mi   max 115Mi
+  #   0 of 68 over the 128Mi request    0 restarts    0 OOMKills ever
+  #   3393Mi actual against 8704Mi requested = 39% utilisation
+  #
+  # The leak really was the inflation: the old "200-239Mi steady state" is now a 115Mi MAXIMUM,
+  # less than half the old median.
+  #
+  # Do NOT read 39% as a reason to cut the request. For a single-replica, no-leader-election
+  # controller the request is the eviction-protection floor, so it has to cover the MAXIMUM working
+  # set, not the median — and 128Mi sits just above the observed 115Mi max, with the top two
+  # controllers at 90% and 77% of request. Cutting to 64Mi would put both above their request and
+  # make them first to be evicted under node pressure, mid-helm-operation, which manufactures
+  # exactly the stale-lock state issue #57 is about.
+  #
+  # What has actually changed since this was written is SCALE, not sizing: 41 controllers became
+  # 68, so the committed reservation is 8.5Gi rather than 5.25Gi. The footprint is
+  # O(composition types) because the architecture is one Deployment per type, and 39% average
+  # utilisation across 68 single-tenant controllers is structural. Reducing it means changing that
+  # architecture, not these numbers.
   #
   # The 512Mi limit is deliberate headroom for a large chart render, and limits are not reserved,
-  # so it costs no scheduling capacity. With the leak fixed, nothing should approach it.
-  #
-  # RE-DERIVE THESE once the leak fix has been deployed for a few days: measure the post-fix steady
-  # state and set the request from that. These numbers are the best defensible estimate from
-  # leak-contaminated data plus one clean control, not a measurement of the fixed system.
+  # so it costs no scheduling capacity. With the leak fixed nothing approaches it — 4.4x the
+  # observed max — so it stays as insurance against a pathological chart.
   #
   # NOTE (capacity): raising the request is still a real scheduling change — a cluster that was
   # silently overcommitted may show Pending controllers until sized for what these pods use.
