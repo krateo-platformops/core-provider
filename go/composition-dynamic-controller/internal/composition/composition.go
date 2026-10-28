@@ -882,6 +882,9 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("populating managed resources: %w", err)
 	}
+	// Read the PREVIOUS managed count before overwriting it — this is the only point where both
+	// the old and the new set exist (#230).
+	shrank, previouslyManaged := managedSetShrank(mg, len(managed))
 	setManagedResources(mg, managed)
 
 	log.Debug("Composition values updated.", "package", pkg.URL)
@@ -900,6 +903,23 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		releaseRevision: upgradedRel.Revision,
 		releaseName:     upgradedRel.Name,
 		conditionType:   ConditionTypeAvailable,
+	}
+	// A render that produced FEWER children than the object was managing is not a converged
+	// composition, and must not report Available (#230).
+	//
+	// status.managed is replaced wholesale from the render, and it is the ONLY input to the health
+	// rollup. So a shrunken render shrinks the health denominator: the rollup evaluates the smaller
+	// set, finds all of it healthy, and reports Available with nothing saying the set moved. During
+	// a multi-component bump that is a FALSE CONVERGENCE SIGNAL to an automated gate —
+	// inst.depsReady renders a dependent set against a parent that is Available *because* its
+	// children are missing. Found by the installer session on the 0.3.465 roll, where the umbrella
+	// read Ready=True with 108 managed children instead of 122 and a gate reported 14 components
+	// as disappeared.
+	if shrank {
+		statusOpts.conditionType = ConditionTypeCreating
+		statusOpts.message = shrunkenSetMessage(len(managed), previouslyManaged)
+		log.Info("Managed set shrank; reporting Creating rather than Available",
+			"rendered", len(managed), "previouslyManaged", previouslyManaged, "package", pkg.URL)
 	}
 	err = h.setStatus(ctx, mg, statusOpts)
 	if err != nil {

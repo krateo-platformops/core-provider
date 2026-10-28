@@ -329,3 +329,41 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 
 	return managed, nil
 }
+
+// managedSetShrank reports whether the newly rendered managed set is smaller than the one the
+// object currently carries, and the previous size (#230).
+//
+// It compares against the PREVIOUS status.managed, deliberately, NOT against a high-water mark.
+// That choice is what makes the verdict self-converging and is the whole reason this is safe to put
+// on the hot path:
+//
+//	bump in flight     122 -> 108  Creating, then the next render is 122 again -> Available
+//	permanent shrink   122 -> 108  Creating for ONE reconcile, then previous==108==current -> Available
+//
+// A high-water mark would report Creating forever for a chart that legitimately drops a component,
+// which is the wedge this file's history is made of (#72's snowplow, #112's CronJob): a predicate
+// treating a steady state as a transient one. Against the previous set there is no steady state it
+// can hold, because the comparison moves with the object.
+//
+// Only a SHRINK is a signal. Growth is an ordinary bump adding a component and says nothing about
+// convergence; the rollup already evaluates whatever is listed.
+func managedSetShrank(mg *unstructured.Unstructured, rendered int) (bool, int) {
+	// No explicit "nothing to compare against" guard, deliberately. NestedSlice returns a nil
+	// slice when status.managed is absent or unusable, so len(previous) is 0 and `rendered < 0` is
+	// already false for every render — a first Update, or an object whose status predates the
+	// field, reports no shrink by arithmetic rather than by a branch.
+	//
+	// The guard was written first and then removed: mutation showed deleting it changed no test,
+	// because it could not change an answer. A guard that cannot fail implies protection the
+	// arithmetic already provides, and is the same dead branch removed from #217's CRD gate on the
+	// same day. The test for this case stays — it pins the behaviour, which is what matters.
+	previous, _, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
+	return rendered < len(previous), len(previous)
+}
+
+// shrunkenSetMessage says what moved, in the terms the reader needs: it is the denominator that
+// changed, not the health of what was counted.
+func shrunkenSetMessage(rendered, previous int) string {
+	return fmt.Sprintf("Composition is converging: %d of %d previously-managed children rendered "+
+		"(a bump in flight, or a component removed)", rendered, previous)
+}
