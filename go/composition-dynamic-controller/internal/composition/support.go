@@ -252,9 +252,19 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setCreatingStatus(mg, out.message, force)
 	case "ZeroEvidence":
 		return setZeroEvidenceStatus(mg, out.message, force)
-	default:
+	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
 	}
+	// Available is an EXPLICIT case above and this is an error, not a fallback. The arm used to be
+	// `default: setAvaibleStatus`, which meant a reason added to resolveReady without a case here
+	// reported the composition HEALTHY — silently, and in the one direction nobody audits. That is
+	// the failure #165 exists to fix, reachable through the routing that implements it.
+	//
+	// "Not in a recognised bad branch" is not evidence of good. Erroring matches this file's own
+	// sibling, setStatus, which ends `return fmt.Errorf("unknown condition type: %s", ...)` rather
+	// than assuming. The cost of being wrong here is asymmetric: a loud error on an unknown reason
+	// is a bug report, a quiet Available is an outage nobody is told about.
+	return fmt.Errorf("unknown ready reason: %q", out.reason)
 }
 
 // readProjectedHealth reads a blueprint's own declared health out of .status.health. Only a
