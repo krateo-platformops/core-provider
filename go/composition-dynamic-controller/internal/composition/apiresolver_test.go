@@ -3,6 +3,11 @@ package composition
 import (
 	"context"
 	"errors"
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
+	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
+	"strings"
 	"testing"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
@@ -73,8 +78,12 @@ func TestSetStatus_ProjectsAPISource(t *testing.T) {
 // project, and observedGeneration is still stamped.
 func TestSetStatus_APIResolveError_Degrades(t *testing.T) {
 	fr := &fakeResolver{err: errors.New("snowplow unreachable")}
+	// A real recorder, because the failure path now emits a Warning event (#251) and production
+	// always has one. A nil recorder here would be a test that does not represent the handler.
+	rec := events.NewFakeRecorder(10)
 	h := &handler{
-		apiResolver: fr,
+		apiResolver:   fr,
+		eventRecorder: *event.NewAPIRecorder(rec),
 		statusDataTemplate: []statusprojection.Mapping{
 			{ForPath: "health", Expression: `${ .api.health.status }`},
 			{ForPath: "chartVersion", Expression: `${ .helm.version }`},
@@ -92,6 +101,45 @@ func TestSetStatus_APIResolveError_Degrades(t *testing.T) {
 	if v, found, _ := unstructured.NestedFieldNoCopy(mg.Object, "status", "health"); found && v != nil {
 		t.Errorf("status.health = %v, want nil/absent on resolve error", v)
 	}
+	// #251: the failure must be VISIBLE, not merely degraded. Before this the degrade was silent
+	// — logged at Info, no condition, no event — so "authn was never installed here" looked
+	// identical to a template that never set the field.
+	// NOTE: unstructuredtools.GetCondition matches Type AND Reason, so passing "" for the reason
+	// silently returns nil rather than "any reason" — an API that invites exactly this mistake.
+	// Scan by type instead, since the point is that SOME ApiResolved condition exists.
+	var cond *metav1.Condition
+	for _, c := range unstructuredtools.GetConditions(mg) {
+		if c.Type == ConditionTypeApiResolved {
+			cc := c
+			cond = &cc
+		}
+	}
+	if cond == nil {
+		t.Fatalf("no %s condition: the degrade is still silent", ConditionTypeApiResolved)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("%s status = %v, want False", ConditionTypeApiResolved, cond.Status)
+	}
+	if cond.Reason != reasonResolveFailed {
+		t.Errorf("reason = %q, want %q (a non-authn failure)", cond.Reason, reasonResolveFailed)
+	}
+	// Ready must be untouched: the degrade is deliberate and a resolver failure must not make a
+	// composition with a healthy release report unready.
+	for _, c := range unstructuredtools.GetConditions(mg) {
+		if c.Type == "Ready" && c.Status != metav1.ConditionTrue {
+			t.Errorf("Ready = %v/%s, want it left True — ApiResolved must not regress readiness",
+				c.Status, c.Reason)
+		}
+	}
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "Warning") || !strings.Contains(ev, "ApiRefUnresolved") {
+			t.Errorf("event = %q, want a Warning/ApiRefUnresolved", ev)
+		}
+	default:
+		t.Error("no event emitted: an operator watching events sees nothing")
+	}
+
 	// helm-sourced field still projected
 	if v, _, _ := unstructured.NestedString(mg.Object, "status", "chartVersion"); v != "9.9.9" {
 		t.Errorf("status.chartVersion = %q, want 9.9.9", v)
