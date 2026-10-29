@@ -137,7 +137,23 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		mapper:             opts.Mapper,
 		statusDataTemplate: opts.StatusDataTemplate,
 		apiResolver:        opts.APIResolver,
+		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
 	}
+}
+
+// newHelmCachedClients builds the process-wide discovery client and RESTMapper for helm (#202).
+// Degrade-only: a nil kubeconfig (tests) or a discovery failure returns nil, and every call site
+// then behaves exactly as it did before this existed. Discovery is lazy inside
+// DeferredDiscoveryRESTMapper, so this does not talk to the apiserver here.
+func newHelmCachedClients(cfg *rest.Config) *helm.CachedClients {
+	if cfg == nil {
+		return nil
+	}
+	cc, err := helm.NewCachedClients(cfg)
+	if err != nil {
+		return nil
+	}
+	return &cc
 }
 
 type handler struct {
@@ -159,6 +175,44 @@ type handler struct {
 	// apiResolver resolves the apiRef to the ".api" projection source each reconcile; nil
 	// when no apiRef is declared.
 	apiResolver APIResolver
+	// cachedClients is ONE discovery client and RESTMapper for the whole process, handed to every
+	// helm client this handler builds.
+	//
+	// Without it each helm.NewClient falls to plumbing's uncached RESTClientGetter, whose
+	// ToRESTMapper performs a full API discovery -- every group, version and resource in the
+	// cluster. Observe builds TWO clients and runs on every resync, so that was two full
+	// discoveries per composition per tick. Measured on krateo-057 (#202): a controller managing
+	// NOTHING spent ~38s of every 60s tick and allocated 5,190 GB over 16h, 2,466 GB of it (45.3%)
+	// in NewDiscoveryRESTMapper.
+	//
+	// Built here rather than passed in, so no call site can forget it: the cost is invisible when
+	// it is missing (a client that builds its own mapper behaves identically, only slower).
+	//
+	// Safe to share: DeferredDiscoveryRESTMapper guards its delegate with a mutex and the
+	// memory-cached discovery client is synchronised, which matters because the fleet runs
+	// workers=10. Staleness is handled by plumbing resetting the mapper on a REST-mapping miss --
+	// when a lookup proves the cache stale, rather than on every CRD event in the cluster.
+	//
+	// nil when the kubeconfig is nil (tests) or discovery could not be built; every call site
+	// passes it through helmCacheOpt, which omits the option in that case and so keeps the old
+	// per-client behaviour rather than failing.
+	cachedClients *helm.CachedClients
+}
+
+// helmCacheOpts is the shared-discovery option, or nothing when this handler has no cache.
+//
+// A SLICE rather than a single option because plumbing's ClientOption closes over an unexported
+// type, so a caller outside that package cannot write a no-op one. Returning zero options is the
+// honest degradation: plumbing refuses a nil *CachedClients by design (a stored nil would make a
+// client look cached while every getter check fell through), so omitting the option entirely is
+// how a caller says "I have no cache" and gets the previous per-client behaviour.
+//
+// Centralised so the five helm.NewClient sites cannot diverge.
+func (h *handler) helmCacheOpts() []helm.ClientOption {
+	if h.cachedClients == nil {
+		return nil
+	}
+	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients)}
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (controller.ExternalObservation, error) {
@@ -233,11 +287,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return controller.ExternalObservation{}, fmt.Errorf("getting package info: %w", err)
 	}
 
-	hc, err := helm.NewClient(h.kubeconfig,
+	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
 		helm.WithCache(),
-	)
+	)...)
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("creating helm client: %w", err)
 	}
@@ -346,10 +400,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
 		return tracer.WithRoundTripper(rt)
 	}
-	hc, err = helm.NewClient(cfg,
+	// cfg is a COPY of h.kubeconfig with a traced transport, so it is the same cluster and the
+	// shared discovery cache is correct here. One consequence worth knowing: that cache was built
+	// from the untraced config, so discovery requests do not appear in the trace -- which keeps
+	// the trace about the release rather than about API discovery.
+	hc, err = helm.NewClient(cfg, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithCache(),
-	)
+	)...)
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("getting helm client: %w", err)
 	}
@@ -587,10 +645,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("installing rbac: %w", err)
 	}
 
-	hc, err := helm.NewClient(h.kubeconfig,
+	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
@@ -798,10 +856,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// Same values, global-value injection, post-render labels + traceparent and TakeOwnership as
 	// the Observe reconcile, so the two agree on the desired state and the second genuinely is a
 	// no-op.
-	hc, err := helm.NewClient(h.kubeconfig,
+	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
@@ -982,10 +1040,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("helm chart package info getter must be specified")
 	}
 
-	hc, err := helm.NewClient(h.kubeconfig,
+	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("creating helm client: %w", err)
 	}
