@@ -379,6 +379,40 @@ cdc:
       memory: 128Mi
     limits:
       memory: 512Mi
+
+  # GOMEMLIMIT for every spawned CDC. Accepts:
+  #   "request"  (default) — the container's own requests.memory, in bytes
+  #   "limit"              — the container's own limits.memory, in bytes
+  #   ""                   — omit the variable entirely (pre-#202 behaviour)
+  #   "192MiB"             — a literal, in GO's syntax (B/KiB/MiB/GiB), NOT a k8s quantity
+  #
+  # WHY. A CDC's RSS tracks the arena HIGH-WATER MARK, not its live data. Measured on krateo-057:
+  # agentgatewaycontrollers held HeapSys 206.5 MiB against HeapAlloc of 20.7 MiB — about ten times
+  # its live heap — having allocated 1,548 GB over 15 hours at 58,149 collections. Each resync
+  # renders the chart and runs a helm 3-way merge (~8s), Go grows the arena to that burst peak, and
+  # returns it only lazily. A quiet controller on the same image and uptime allocated 74 MB total.
+  #
+  # "request" is the default because it makes the pod live inside what it reserved, which is the
+  # contract the scheduler was given. It binds where it should: at 128Mi it is below the 206 MiB
+  # arena observed above and roughly 6x the largest live heap measured, so it constrains the burst
+  # without crowding real working set.
+  #
+  # It is a SOFT limit — the runtime collects harder to stay under it and exceeds it rather than
+  # failing — so the 512Mi container limit is still the real backstop and this cannot cause an OOM
+  # that would not have happened anyway. The cost it does carry is CPU, spent during the render
+  # burst that is the moment it binds. If a chart's live heap genuinely approaches the request,
+  # raise the request (which raises this with it) rather than setting a literal here.
+  #
+  # Capping the peak is also the precondition for lowering `resources.requests.memory` at all: the
+  # 128Mi request is sized against the measured MAXIMUM (see the note above), so the request cannot
+  # come down until the maximum does.
+  #
+  # SET IT HERE AND NOWHERE ELSE. `cdc.env` below is rendered into each CDC's ConfigMap and read
+  # through `envFrom`, while this renders a container `env` entry — and a container `env` entry
+  # takes PRECEDENCE over `envFrom`. So a `cdc.env.GOMEMLIMIT` would validate, reach the ConfigMap,
+  # and then be silently overridden by this one, which is the same shape of quiet failure as the
+  # "128Mi" suffix above. The values schema therefore REFUSES GOMEMLIMIT under `cdc.env`.
+  goMemLimit: request
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
   # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
   # (graceful drain), not readiness-gating — probes are intentionally left off BY DESIGN: a

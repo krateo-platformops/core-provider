@@ -129,12 +129,30 @@ confirmed correct against a measured 115Mi maximum). So sharding a Kind K ways c
 **(K−1) × 128Mi of reserved memory** for that Kind, against a measured per-controller median of
 49Mi actually used. For 64 of 68 controllers that is pure reservation against no work.
 
-**`spec.controller.workers` — Step 0, the ladder's prerequisite — has 0 of 68 adopters.** Not one
-live controller passes `-workers`; every one runs the chart default of 1. Only 2 of 68 set
-`-resync-interval` at all. **This is the correct state, not a gap**: a controller watching one
-composition has nothing for a second worker to do. It is recorded here because "the recommended
-first move was never tried" is the obvious objection to the decision below, and the answer is that
-rung 2 of §8's ladder has nothing to tune on this fleet — not that it was overlooked.
+**Step 0 — `workers` / `resyncInterval` — is adopted FLEET-WIDE, via the ConfigMap rather than
+args.** Measured on every one of the 68 live CDC ConfigMaps, with the count controlled:
+
+```
+configmaps carrying COMPOSITION_CONTROLLER_WORKERS   68   (control: matches the controller count)
+distinct values                                      workers=10 / resync=60s   x68
+```
+
+So rung 2 of §8's ladder has already been climbed: every controller runs **10 workers**, not 1, and
+ticks at **60s**, not the binary's 3m. Args are the *per-Kind override* path on top of that, and
+only 2 of 68 use one (`-resync-interval=4h`, which beats the ConfigMap because an explicit flag
+wins).
+
+> **Correction.** An earlier version of this section said `spec.controller.workers` "has 0 of 68
+> adopters … every one runs the chart default of 1", and argued that this was correct because a
+> controller watching one composition has nothing for a second worker to do. That was wrong in both
+> halves. It came from reading the spawned Deployments' `args` and the flag defaults in `main.go`,
+> and not the ConfigMap — which `main.go` explicitly warns about at the declaration site: *"Read the
+> configmap, not this line, when reasoning about reconcile concurrency or tick rate."* The answer
+> was in reach and was not consulted.
+
+This strengthens the decision below rather than weakening it: the throughput knob is already at 10x
+the binary default fleet-wide, so a Kind that saturated would be saturating *despite* rung 2, not
+before reaching it.
 
 **Does the #202 floor correction change the conclusion? No, and the question is orthogonal.**
 #181 was closed because consolidation was justified by a claimed ~95% fixed per-process overhead,

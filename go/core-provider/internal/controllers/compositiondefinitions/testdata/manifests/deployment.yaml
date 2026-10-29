@@ -31,6 +31,17 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ .resource }}-{{ .apiVersion }}-configmap
+          # Mirrors what the chart emits for the default cdc.goMemLimit: "request" (#202).
+          # NOTE: this fixture has drifted from helm/core-provider/assets/cdc/deployment.yaml in
+          # other respects (it still names the dead "krateoplatformops" org, and predates the
+          # trunc-63 labels and terminationGracePeriodSeconds). Only this block is known current.
+          env:
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: {{ .resource }}-{{ .apiVersion }}-controller
+                  resource: requests.memory
+                  divisor: "1"
           securityContext:
             {}
           args:

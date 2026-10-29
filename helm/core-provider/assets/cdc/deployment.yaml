@@ -39,6 +39,35 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-configmap
+          {{- if .Values.cdc.goMemLimit }}
+          env:
+            # GOMEMLIMIT caps the Go runtime's total footprint. Without it a CDC's RSS tracks the
+            # ARENA HIGH-WATER MARK rather than its live data: measured on krateo-057,
+            # agentgatewaycontrollers held HeapSys 206.5 MiB against HeapAlloc of only 20.7 MiB —
+            # ~10x its live heap — because each resync renders the chart and runs a helm 3-way
+            # merge, and Go grows the arena to the burst peak and returns it lazily (#202).
+            #
+            # Derived from the container's own resource field rather than hardcoded, so it cannot
+            # drift when the request or limit is changed, including by a per-Kind
+            # spec.controller.resources override. divisor "1" yields bytes, which GOMEMLIMIT
+            # accepts as a bare integer — do NOT substitute a Kubernetes quantity like "128Mi",
+            # since Go's syntax is "128MiB" and a mismatch is silently ignored.
+            #
+            # It is a SOFT limit: the runtime GCs harder to stay under it and exceeds it rather
+            # than failing, so the hard container limit remains the real backstop. The cost is CPU
+            # during a render burst, which is the moment it binds. Set cdc.goMemLimit to "" to
+            # restore the previous unbounded behaviour.
+            - name: GOMEMLIMIT
+              {{- if or (eq .Values.cdc.goMemLimit "request") (eq .Values.cdc.goMemLimit "limit") }}
+              valueFrom:
+                resourceFieldRef:
+                  containerName: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+                  resource: {{ if eq .Values.cdc.goMemLimit "request" }}requests.memory{{ else }}limits.memory{{ end }}
+                  divisor: "1"
+              {{- else }}
+              value: {{ .Values.cdc.goMemLimit | quote }}
+              {{- end }}
+          {{- end }}
           securityContext:
             {{- toYaml .Values.cdc.securityContext | nindent 12 }}
           args:
