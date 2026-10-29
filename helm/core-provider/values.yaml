@@ -406,6 +406,12 @@ cdc:
   # Capping the peak is also the precondition for lowering `resources.requests.memory` at all: the
   # 128Mi request is sized against the measured MAXIMUM (see the note above), so the request cannot
   # come down until the maximum does.
+  #
+  # SET IT HERE AND NOWHERE ELSE. `cdc.env` below is rendered into each CDC's ConfigMap and read
+  # through `envFrom`, while this renders a container `env` entry — and a container `env` entry
+  # takes PRECEDENCE over `envFrom`. So a `cdc.env.GOMEMLIMIT` would validate, reach the ConfigMap,
+  # and then be silently overridden by this one, which is the same shape of quiet failure as the
+  # "128Mi" suffix above. The values schema therefore REFUSES GOMEMLIMIT under `cdc.env`.
   goMemLimit: request
   # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
   # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy

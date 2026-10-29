@@ -565,7 +565,7 @@
         },
         "env": {
           "type": "object",
-          "title": "Environment variables",
+          "title": "Environment variables, rendered into each CDC's ConfigMap and read via envFrom. GOMEMLIMIT is REFUSED here: the deployment sets it as a container env var, which takes precedence over envFrom, so a value set here would be silently ignored. Use cdc.goMemLimit instead.",
           "additionalProperties": {
             "type": "string"
           },
@@ -584,6 +584,11 @@
           "default": {
             "HOME": "/tmp",
             "COMPOSITION_CONTROLLER_DEBUG": "false"
+          },
+          "not": {
+            "required": [
+              "GOMEMLIMIT"
+            ]
           }
         },
         "fullnameOverride": {
