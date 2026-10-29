@@ -150,6 +150,43 @@ core-provider only shapes the schema — the `${ jq }` is evaluated by the CDC, 
 syntactically valid expression that resolves to nothing simply writes nothing under
 `.status`.
 
+## A composition's own Helm release is absent from its `status.managed` and carries no parent label
+
+A composition's release is named after the composition itself: `CalculateReleaseName`
+(`composition-dynamic-controller/pkg/meta/meta.go`) returns `obj.GetName()`, or
+`<name>-<uid-hash>` when `safeReleaseName` is on. That release **is** the composition's output, so
+two absences around it are structural rather than evidence of anything:
+
+- **It never appears in that composition's own `status.managed`.** The list is built by
+  `populateManagedResources` from `processor.DecodeMinRelease(rel)` — the objects rendered *inside*
+  the release. A release cannot be a child of itself.
+- **Its Helm secret carries no `krateo.io/composition-name`.** That label
+  (`ParentCompositionNameLabel`, `pkg/meta/meta.go`) marks a *child's parent* and drives
+  `IsParentRendered`; the release is not a child, so nothing stamps it.
+
+So "no Krateo ownership labels on the Helm secret" and "absent from the parent composition's
+`status.managed`" are both true of a release the CDC is actively managing.
+
+**Their absence carries no information at all** — which is a stronger statement than "it can
+mislead". Neither marker *can* be present on a composition's own release, for any composition, so
+observing that they are missing tells you nothing about ownership and cannot be weighed as weak
+evidence either. Treating the absence of a value that can never appear as though it meant something
+is unsound rather than unlucky. Reading it that way, and then patching such a release directly,
+briefly flapped the frontend on krateo-demo (2026-10-29) before being reverted.
+
+To ask the real question — *is this release CDC-managed?* — go the other way and look for the
+composition, not for markers on the release. Every composition CR carries its release name in the
+`krateo.io/release-name` label: `SetReleaseName` stamps it on the CR when absent
+(`pkg/meta/meta.go:168`) and `GetReleaseName` reads it back, so the label is present whether or not
+`safeReleaseName` is on. A composition carrying that label for the release name **is** the owner.
+
+The source of truth is the composition CR. Patch that and let the CDC converge; a direct edit to the
+release is reverted on the next reconcile, which is the behaviour and not a race.
+
+The same fact is recorded operationally in the installer repo (its release and upgrade/rollback
+runbooks), reached from a different task. It is restated here because this is the component whose
+behaviour it is, and a reader looking at the CDC should not have to find it in another repo.
+
 ## Changing statusDataTemplate / apiRef re-renders the CDC (digest churn)
 
 The encoded `statusDataTemplate`, the `apiRef`, the projected-token volume, the
