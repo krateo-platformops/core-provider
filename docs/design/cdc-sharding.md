@@ -8,11 +8,13 @@ status: implemented
 timestamp: 2026-08-07T00:00:00Z
 ---
 
-> **Status (re-verified 2026-08-07): the recorded decision is implemented — i.e.
-> sharding is deliberately NOT built.** No sharding code exists in
-> `go/composition-dynamic-controller/`; the doc itself recommends not building it
-> for the motivating case (§2). If cardinality pressure returns, this remains the
-> plan of record.
+> **Status (re-verified 2026-10-29): the recorded decision is implemented — i.e.
+> sharding is deliberately NOT built**, and the case against building it is now
+> stronger than when this was written. No sharding code exists in
+> `go/composition-dynamic-controller/`. If cardinality pressure returns, this
+> remains the plan of record. See §1.1 for the 2026-10-29 fleet measurement.
+>
+> Previously re-verified 2026-08-07 (same conclusion, on the original evidence).
 
 # Design: Horizontal sharding for the composition-dynamic-controller (CDC)
 
@@ -102,6 +104,52 @@ shape this design:
 `--workers` a per-Kind knob without touching the shared template or restarting the fleet. This
 document exists for *after* that: when a single hot Kind saturates one pod even at high `--workers`,
 or when blast-radius isolation across shards is an operational requirement.
+
+### 1.1 Re-verification, 2026-10-29 — there is no hot Kind left to shard
+
+Measured on krateo-057 (2.13.37), enumerating CDC Deployments by container image and counting the
+live instances of each one's GVR, with the composition total controlled against a known 83:
+
+```
+CDC controllers (Kind x served version)   68
+  watching exactly 1 composition          64
+  watching 0                               2
+  watching more than 1                     2   <- eventsites 2, builderpublishes 17
+compositions total                        83   (control: matches the independent count)
+```
+
+**Sharding splits one Kind's instances across K replicas. On this fleet there is almost nothing to
+split.** The motivating workload — 60,000 `benchapps` behind one CDC — does not exist here; the
+largest population on the platform is 17. Fanning a 1-instance Kind into K Deployments yields one
+shard doing the work and K−1 processes doing none.
+
+That is now quantifiable, which it was not in August. The per-CDC memory **request** is 128Mi
+(`helm/core-provider/values.yaml`, re-derived against the leak-fixed system in #202/#240 and
+confirmed correct against a measured 115Mi maximum). So sharding a Kind K ways costs
+**(K−1) × 128Mi of reserved memory** for that Kind, against a measured per-controller median of
+49Mi actually used. For 64 of 68 controllers that is pure reservation against no work.
+
+**`spec.controller.workers` — Step 0, the ladder's prerequisite — has 0 of 68 adopters.** Not one
+live controller passes `-workers`; every one runs the chart default of 1. Only 2 of 68 set
+`-resync-interval` at all. **This is the correct state, not a gap**: a controller watching one
+composition has nothing for a second worker to do. It is recorded here because "the recommended
+first move was never tried" is the obvious objection to the decision below, and the answer is that
+rung 2 of §8's ladder has nothing to tune on this fleet — not that it was overlooked.
+
+**Does the #202 floor correction change the conclusion? No, and the question is orthogonal.**
+#181 was closed because consolidation was justified by a claimed ~95% fixed per-process overhead,
+re-measured at 38%. That figure bears on *consolidation* (fewer processes), which is the opposite
+proposal to sharding (more processes). This document never rested on it — §2 lists "**Not** a memory
+fix" as an explicit non-goal and §10 says K should be chosen by reconcile rate and blast radius,
+"*not* the memory model". The correction leaves the design and its recommendation untouched.
+
+What it does add: the memory argument now runs **against** sharding on the current fleet rather than
+being merely absent. If a hot Kind reappears, that cost is real but small next to the throughput it
+would buy, and the decision below is unchanged.
+
+**Conclusion unchanged: do not build it.** The trigger remains §8's rung 3 — a single Kind whose one
+pod saturates at high `--workers`, or a blast-radius isolation requirement. Neither exists today, and
+the fleet shape has moved further from them, not closer.
 
 ---
 
