@@ -8,6 +8,7 @@ import (
 	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/maps"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
@@ -196,11 +197,41 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		// Resolve the apiRef (RESTAction via snowplow) into the ".api" source. Degrade-only:
 		// a resolution failure leaves ".api" absent so api-dependent mappings skip, while
 		// built-in and helm-sourced fields still project.
+		//
+		// The degrade is deliberate — a resolver failure must not regress a working composition —
+		// but it used to be SILENT: logged at Info, no condition, no event. So "authn was never
+		// installed in this target" presented as a composition whose projected status fields were
+		// quietly missing, which is indistinguishable from a template that never set them (#251).
+		//
+		// h.apiResolver is nil exactly when no apiRef is declared, so its non-nilness is the
+		// "declared" test. ApiResolved is therefore present whenever an apiRef exists, True or
+		// False — never absent-on-success, so a consumer can tell "resolved" from "nobody looked".
 		if h.apiResolver != nil {
-			if api, aerr := h.apiResolver.Resolve(ctx, mg); aerr != nil {
-				xcontext.Logger(ctx).Info("status projection: apiRef resolution failed; .api source unavailable", "error", aerr.Error())
-			} else if api != nil {
+			api, aerr := h.apiResolver.Resolve(ctx, mg)
+			switch {
+			case aerr != nil:
+				reason, message := apiResolvedFailure(aerr)
+				if cerr := setApiResolvedCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
+					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
+				}
+				h.eventRecorder.Event(mg, event.Warning(reasonApiRefUnresolved, "Observe", aerr))
+				xcontext.Logger(ctx).Info("status projection: apiRef resolution failed; .api source unavailable",
+					"reason", reason, "error", aerr.Error())
+			case api == nil:
+				// The resolver answered without error and without data. Reported rather than
+				// treated as success, because an empty .api and a resolved .api project
+				// identically — the projection just skips — and that is the ambiguity #251 exists
+				// to remove.
+				if cerr := setApiResolvedCondition(mg, metav1.ConditionFalse, reasonApiEmpty,
+					"apiRef resolved without error but returned no data; .api source is unavailable"); cerr != nil {
+					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
+				}
+			default:
 				resolved["api"] = api
+				if cerr := setApiResolvedCondition(mg, metav1.ConditionTrue, reasonApiResolved,
+					"apiRef resolved; .api projection source is available"); cerr != nil {
+					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
+				}
 			}
 		}
 		if perr := statusprojection.Project(ctx, mg, resolved, h.statusDataTemplate); perr != nil {
