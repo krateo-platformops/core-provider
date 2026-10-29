@@ -256,21 +256,14 @@ func TestStampReady_RoutesEveryReasonToTheRightCondition(t *testing.T) {
 	}
 }
 
-// The failure mode of the default arm, stated as a test: an UNKNOWN reason stamps Available. That
-// is deliberate fail-safe behaviour for the three legacy reasons, and it is exactly why every new
-// reason needs an explicit arm — so this documents the hazard rather than leaving it implicit.
-func TestStampReady_UnrecognisedReasonFallsBackToAvailable(t *testing.T) {
-	mg := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "composition.krateo.io/v0-1-0", "kind": "Portal",
-		"metadata": map[string]any{"name": "p", "namespace": "ns"},
-	}}
-	if err := stampReady(mg, readyOutcome{reason: "SomethingNobodyAddedACaseFor", message: "m"}, true); err != nil {
-		t.Fatalf("stampReady: %v", err)
-	}
-	conds, _, _ := unstructured.NestedSlice(mg.Object, "status", "conditions")
-	cm, _ := conds[0].(map[string]any)
-	if stringField(cm, "status") != "True" {
-		t.Fatal("the default arm no longer stamps Available; if that changed deliberately, the " +
-			"comment on stampReady and this test both need updating")
-	}
-}
+// TestStampReady_UnrecognisedReasonFallsBackToAvailable lived here. It asserted that an unknown
+// reason stamps Available, and its own failure message said: "if that changed deliberately, the
+// comment on stampReady and this test both need updating."
+//
+// It changed deliberately. That test documented a HAZARD rather than a wanted behaviour — it
+// existed to make the default arm's silence visible — and the hazard is now closed: stampReady
+// handles Available explicitly and returns an error for anything it does not recognise.
+//
+// The property moved to stampready_exhaustive_test.go, which asserts the error, keeps a control
+// arm over all four real reasons, and adds the check this one could not: that every reason
+// resolveReady can PRODUCE has an arm, so adding a reason is what breaks the build.
