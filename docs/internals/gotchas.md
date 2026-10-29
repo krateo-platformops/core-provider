@@ -165,9 +165,20 @@ two absences around it are structural rather than evidence of anything:
   `IsParentRendered`; the release is not a child, so nothing stamps it.
 
 So "no Krateo ownership labels on the Helm secret" and "absent from the parent composition's
-`status.managed`" are both true of a release the CDC is actively managing. **Neither absence means
-nothing owns it.** Reading them that way, and then patching such a release directly, briefly flapped
-the frontend on krateo-demo (2026-10-29) before being reverted.
+`status.managed`" are both true of a release the CDC is actively managing.
+
+**Their absence carries no information at all** — which is a stronger statement than "it can
+mislead". Neither marker *can* be present on a composition's own release, for any composition, so
+observing that they are missing tells you nothing about ownership and cannot be weighed as weak
+evidence either. Treating the absence of a value that can never appear as though it meant something
+is unsound rather than unlucky. Reading it that way, and then patching such a release directly,
+briefly flapped the frontend on krateo-demo (2026-10-29) before being reverted.
+
+To ask the real question — *is this release CDC-managed?* — go the other way and look for the
+composition, not for markers on the release. Every composition CR carries its release name in the
+`krateo.io/release-name` label: `SetReleaseName` stamps it on the CR when absent
+(`pkg/meta/meta.go:168`) and `GetReleaseName` reads it back, so the label is present whether or not
+`safeReleaseName` is on. A composition carrying that label for the release name **is** the owner.
 
 The source of truth is the composition CR. Patch that and let the CDC converge; a direct edit to the
 release is reverted on the next reconcile, which is the behaviour and not a race.
