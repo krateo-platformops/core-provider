@@ -1,8 +1,13 @@
 // Package authn is a small client for the Kubernetes intra-service auth login strategy: the
 // CDC presents its own projected (audience-bound) ServiceAccount token to authn's
-// /serviceaccount/login endpoint and receives an authn-issued JWT (plus a clientconfig the
-// JWT identifies). That JWT is the Bearer the snowplow client uses to resolve RESTActions
-// under the CDC's identity. See the authn design doc kubernetes-intra-service-auth.md.
+// /serviceaccount/login endpoint and receives an authn-issued JWT. That JWT is the Bearer the
+// snowplow client uses to resolve RESTActions under the CDC's identity. See the authn design
+// doc kubernetes-intra-service-auth.md.
+//
+// The response body is decoded for `accessToken` and NOTHING ELSE — no clientconfig, no `data`
+// envelope. The JWT's claims are what identify the caller downstream; this package never sees
+// or needs the clientconfig those claims refer to, and a comment here previously implied it
+// received one.
 //
 // Token() satisfies snowplow.TokenFunc: it reads the projected SA token fresh on every miss
 // (projected tokens rotate on disk), exchanges it for a JWT, and caches the JWT until shortly
@@ -100,12 +105,16 @@ func (c *Client) exchange(ctx context.Context) (string, time.Time, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("calling authn: %w", err)
+		// Never reached authn. On a spoke this is the signature of "no authn installed into this
+		// target", which is exactly the case that used to degrade silently (#251).
+		return "", time.Time{}, &UnreachableError{Server: c.server, Err: err}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, fmt.Errorf("authn returned %d: %s", resp.StatusCode, string(body))
+		// Typed, so the caller can distinguish rejected-caller from authn-broke without matching
+		// on message text. Carries authn's own details.causes[0].reason when present.
+		return "", time.Time{}, parseStatusError(resp.StatusCode, body)
 	}
 
 	var out struct {
