@@ -531,6 +531,71 @@
       "title": "Composition dynamic controller (cdc)",
       "additionalProperties": false,
       "properties": {
+        "affinity": {
+          "type": "object",
+          "title": "Affinity",
+          "default": {}
+        },
+        "autoscaling": {
+          "type": "object",
+          "title": "Autoscaling (DEPRECATED / inert)",
+          "description": "Ignored: the CDC is a per-composition controller and is never autoscaled. Retained only so existing values overrides continue to validate.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "minReplicas": {
+              "type": "integer",
+              "default": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "default": 100
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "default": 80
+            },
+            "targetMemoryUtilizationPercentage": {
+              "type": "integer"
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "title": "Environment variables",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "properties": {
+            "HOME": {
+              "type": "string",
+              "title": "HOME directory",
+              "default": "/tmp"
+            },
+            "COMPOSITION_CONTROLLER_DEBUG": {
+              "type": "string",
+              "title": "Composition controller debug",
+              "default": "false"
+            }
+          },
+          "default": {
+            "HOME": "/tmp",
+            "COMPOSITION_CONTROLLER_DEBUG": "false"
+          }
+        },
+        "fullnameOverride": {
+          "type": "string",
+          "title": "Fullname override",
+          "default": ""
+        },
+        "goMemLimit": {
+          "type": "string",
+          "pattern": "^$|^request$|^limit$|^[0-9]+(B|KiB|MiB|GiB|TiB)$",
+          "title": "GOMEMLIMIT for each spawned CDC: 'request' (default) or 'limit' to track the container's own resource field, '' to omit, or a literal in Go syntax e.g. 192MiB (NOT a k8s quantity like 192Mi)"
+        },
         "image": {
           "type": "object",
           "title": "CDC image",
@@ -564,22 +629,6 @@
             }
           }
         },
-        "replicaCount": {
-          "type": "integer",
-          "title": "Replica count",
-          "default": 1
-        },
-        "workers": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 512,
-          "title": "Fleet-wide default CDC reconcile workers; per-Kind spec.controller.workers overrides"
-        },
-        "resyncInterval": {
-          "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$",
-          "title": "Fleet-wide default CDC resync interval e.g. 10m; per-Kind spec.controller.resyncInterval overrides"
-        },
         "imagePullSecrets": {
           "type": "array",
           "title": "Image pull secrets",
@@ -588,15 +637,10 @@
             "type": "object"
           }
         },
-        "nameOverride": {
-          "type": "string",
-          "title": "Name override",
-          "default": ""
-        },
-        "fullnameOverride": {
-          "type": "string",
-          "title": "Fullname override",
-          "default": ""
+        "livenessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
         },
         "metrics": {
           "type": "object",
@@ -613,6 +657,56 @@
               "title": "Metrics port"
             }
           }
+        },
+        "nameOverride": {
+          "type": "string",
+          "title": "Name override",
+          "default": ""
+        },
+        "nodeSelector": {
+          "type": "object",
+          "title": "Node selector",
+          "default": {}
+        },
+        "podAnnotations": {
+          "type": "object",
+          "title": "Pod annotations",
+          "default": {}
+        },
+        "podLabels": {
+          "type": "object",
+          "title": "Pod labels",
+          "default": {}
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "title": "Pod security context",
+          "default": {}
+        },
+        "readinessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
+        },
+        "replicaCount": {
+          "type": "integer",
+          "title": "Replica count",
+          "default": 1
+        },
+        "resources": {
+          "type": "object",
+          "title": "Resources",
+          "default": {}
+        },
+        "resyncInterval": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$",
+          "title": "Fleet-wide default CDC resync interval e.g. 10m; per-Kind spec.controller.resyncInterval overrides"
+        },
+        "securityContext": {
+          "type": "object",
+          "title": "Container security context",
+          "default": {}
         },
         "serviceAccount": {
           "type": "object",
@@ -641,34 +735,13 @@
             }
           }
         },
-        "podAnnotations": {
-          "type": "object",
-          "title": "Pod annotations",
-          "default": {}
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "title": "terminationGracePeriodSeconds"
         },
-        "podLabels": {
-          "type": "object",
-          "title": "Pod labels",
-          "default": {}
-        },
-        "podSecurityContext": {
-          "type": "object",
-          "title": "Pod security context",
-          "default": {}
-        },
-        "securityContext": {
-          "type": "object",
-          "title": "Container security context",
-          "default": {}
-        },
-        "resources": {
-          "type": "object",
-          "title": "Resources",
-          "default": {}
-        },
-        "volumes": {
+        "tolerations": {
           "type": "array",
-          "title": "Additional volumes",
+          "title": "Tolerations",
           "default": [],
           "items": {
             "type": "object"
@@ -682,87 +755,19 @@
             "type": "object"
           }
         },
-        "nodeSelector": {
-          "type": "object",
-          "title": "Node selector",
-          "default": {}
-        },
-        "tolerations": {
+        "volumes": {
           "type": "array",
-          "title": "Tolerations",
+          "title": "Additional volumes",
           "default": [],
           "items": {
             "type": "object"
           }
         },
-        "affinity": {
-          "type": "object",
-          "title": "Affinity",
-          "default": {}
-        },
-        "env": {
-          "type": "object",
-          "title": "Environment variables",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "properties": {
-            "HOME": {
-              "type": "string",
-              "title": "HOME directory",
-              "default": "/tmp"
-            },
-            "COMPOSITION_CONTROLLER_DEBUG": {
-              "type": "string",
-              "title": "Composition controller debug",
-              "default": "false"
-            }
-          },
-          "default": {
-            "HOME": "/tmp",
-            "COMPOSITION_CONTROLLER_DEBUG": "false"
-          }
-        },
-        "terminationGracePeriodSeconds": {
+        "workers": {
           "type": "integer",
-          "title": "terminationGracePeriodSeconds"
-        },
-        "autoscaling": {
-          "type": "object",
-          "title": "Autoscaling (DEPRECATED / inert)",
-          "description": "Ignored: the CDC is a per-composition controller and is never autoscaled. Retained only so existing values overrides continue to validate.",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false
-            },
-            "minReplicas": {
-              "type": "integer",
-              "default": 1
-            },
-            "maxReplicas": {
-              "type": "integer",
-              "default": 100
-            },
-            "targetCPUUtilizationPercentage": {
-              "type": "integer",
-              "default": 80
-            },
-            "targetMemoryUtilizationPercentage": {
-              "type": "integer"
-            }
-          }
-        },
-        "livenessProbe": {
-          "type": "object",
-          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
-          "additionalProperties": true
-        },
-        "readinessProbe": {
-          "type": "object",
-          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
-          "additionalProperties": true
+          "minimum": 1,
+          "maximum": 512,
+          "title": "Fleet-wide default CDC reconcile workers; per-Kind spec.controller.workers overrides"
         }
       }
     },
