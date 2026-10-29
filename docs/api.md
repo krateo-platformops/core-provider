@@ -37,13 +37,46 @@ The input: "serve this chart as a Kubernetes API".
 
 ### `status`
 
-Conditioned status plus: `apiVersion`/`kind`/`resource` last applied,
-`managed.versionInfo[]` (served CRD versions and their CDC digests), `packageUrl`,
-`digest` (the FNV idempotency digest — [overview](./overview.md)), and `target`
+Conditioned status plus: `apiVersion`/`kind`/`resource` last applied — **the GVK a
+blueprint must pin, see below** — `managed.versionInfo[]` (served CRD versions and
+their CDC digests), `packageUrl`, `digest` (the FNV idempotency digest —
+[overview](./overview.md)), and `target`
 (`mode` Local/Remote, `connectionStatus` Healthy/Down, target k8s `version`,
 kubeconfig Secret `resourceVersion`). With `apiRef` + `apiRefRBAC`, an
 `ApiRefRBACIncomplete` condition reports a RESTAction whose read-set could not be
 fully enumerated (snowplow 422) — partial RBAC is never written.
+
+### The GVK a blueprint must pin
+
+**Read it from the status; never re-derive it.**
+
+```
+status.apiVersion   composition.krateo.io/v0-4-3
+status.kind         EventSite
+status.resource     eventsites          # already pluralized
+```
+
+The derivation is real — `"v" + chart-version with "." → "-"` — but it is the **full
+`major.minor.patch`**, so a *patch* bump moves the served apiVersion: chart `0.4.3` is
+`v0-4-3`, not `v0-4`. A blueprint that hardcodes the apiVersion is correct only until
+the next patch release of its own chart.
+
+**Getting it wrong fails silently.** Controllers are per-version and label-scoped on
+`krateo.io/composition-version`, so a CR emitted at a version no controller watches is
+reconciled by **nobody** — no error on the CR, no event, no condition, nothing in any
+log. The CR simply sits there. The apiVersion is not a reliable owner key; see
+[composition-version-management](./design/composition-version-management.md) §2 and §6.
+
+Do not compute `resource` either. Only `kind` comes from a string rule
+(`flect.Pascalize` over `ToGolangName`); the plural is **resolved**, by
+`plumbing/kubeutil/plurals` behind `internal/tools/pluralizer`, so it is not derivable
+from the kind by any local rule. `strings.ToLower(kind) + "s"` disagrees with it often
+enough to drop 32 of 83 rows from a fleet-wide join without erroring.
+
+Old versions do not linger as a safety net — stale served versions are pruned once no
+instance uses them (conservatively: never the current or `vacuum` version, never one
+another definition references, and nothing at all is pruned while any instance's
+version label is unaccounted for).
 
 ## `KubernetesTarget`
 
