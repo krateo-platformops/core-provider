@@ -130,6 +130,11 @@ type statusManagerOpts struct {
 	digest          string
 	message         string
 	conditionType   ConditionType
+	// recordManaged says this reconcile DECODED a release and may therefore write
+	// status.managed -- including writing `[]` when the render produced nothing. Observe leaves it
+	// false: it passes resources: nil on the assumption that Create/Update already recorded them,
+	// so it must not overwrite the list with an empty one (#248).
+	recordManaged bool
 }
 
 func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, opts *statusManagerOpts) error {
@@ -137,7 +142,16 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		return fmt.Errorf("status manager options are nil")
 	}
 
-	if len(opts.resources) > 0 {
+	// Keyed on recordManaged, NOT on len(opts.resources) > 0 (#248). Those differ in exactly one
+	// case and it is the case that matters: a reconcile that DID render and found nothing must
+	// record `managed: []`, because "evaluated, found nothing" and "never evaluated" are different
+	// states and the rollup now treats them differently. Under the old length test an empty render
+	// left the key ABSENT, indistinguishable from never having been recorded.
+	//
+	// It cannot be inferred from nil-versus-empty either: processor.DecodeMinRelease returns a nil
+	// slice for an empty render, so the Create/Update paths and Observe would both arrive as nil.
+	// Hence an explicit flag — the phases that decode a release set it, Observe does not.
+	if opts.recordManaged {
 		managed, err := h.populateManagedResources(opts.resources, mg.GetNamespace())
 		if err != nil {
 			return fmt.Errorf("populating managed resources: %w", err)
@@ -300,7 +314,11 @@ func setManagedResources(mg *unstructured.Unstructured, managed []any) {
 }
 
 func (h *handler) populateManagedResources(resources []processor.MinimalMetadata, defaultNamespace string) ([]any, error) {
-	var managed []interface{}
+	// Non-nil by construction, so an empty render serialises as `managed: []` rather than
+	// `managed: null` (#248). A nil slice would land as null, which reads back through
+	// NestedSlice as found=false — collapsing "evaluated, found nothing" into "never recorded"
+	// again, one layer further down than the bug this change fixes.
+	managed := []interface{}{}
 	for _, ref := range resources {
 		gvr, err := h.pluralizer.GVKtoGVR(schema.FromAPIVersionAndKind(ref.GetAPIVersion(), ref.GetKind()))
 		if err != nil {

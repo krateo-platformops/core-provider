@@ -82,8 +82,46 @@ type healthVerdict struct {
 // it while looking like a fix.
 func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interface, mg *unstructured.Unstructured) healthVerdict {
 	managed, found, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
-	if !found || len(managed) == 0 {
+	if found && len(managed) == 0 {
+		// PRESENT AND EMPTY is a real answer: a reconcile decoded the release, rendered nothing,
+		// and recorded that. There are no children, so there is nothing to be unhealthy, and
+		// "up-to-date" is honest. This is the case an earlier author reasoned about and guarded,
+		// and it stays Available.
+		//
+		// It is only distinguishable from the absent case because setStatus now records an empty
+		// render explicitly (#248). Before that, `managed: []` was never written and this branch
+		// was unreachable.
 		return healthVerdict{ready: true, reason: "Available", message: "Composition is up-to-date"}
+	}
+	if !found {
+		// NO RECORDED CHILDREN IS NOT EVIDENCE OF HEALTH (#248). This branch used to return
+		// Available with "Composition is up-to-date", which answered "I have no information" with
+		// "everything is fine" — the same shape as the stampReady default arm closed in #244, one
+		// layer lower and with an absent INPUT rather than an unrecognised output.
+		//
+		// It was not hypothetical. On krateo-057, 7 of 83 compositions had no `status.managed` key
+		// at all while reporting Ready=True/Available over 506 objects their own deployed Helm
+		// manifests show they render — observability-page 145, portal-agents 121,
+		// agentgateway-policies 94. Observe passes `resources: nil` on the assumption that
+		// Create/Update already recorded them (composition.go), so nothing ever repairs the field:
+		// the green was self-perpetuating, and three consumers believed it (deps: ordering, the
+		// installer's readiness gate, and the portal's `ready` bucket).
+		//
+		// ZeroEvidence is Unknown, not False — deliberately. The state is steady, not transient, so
+		// False would wedge every consumer gating on readiness, which is the one direction that
+		// turns an honesty fix into an outage (the wedge this file documents for #72, #112, #165).
+		//
+		// ABSENT is not the same as EMPTY, and the branch above is why this one can be strict.
+		// `setStatus` now records an empty render as `managed: []` (keyed on recordManaged), so a
+		// chart that genuinely renders nothing lands in the Available branch above. Reaching HERE
+		// means no reconcile has ever recorded the list -- which is a different claim from "there
+		// is nothing to record", and the only one of the two that is a defect.
+		return healthVerdict{
+			ready:  false,
+			reason: "ZeroEvidence",
+			message: "Composition health is unknown: no managed children are recorded, so none " +
+				"could be health-evaluated",
+		}
 	}
 
 	var failing, converging []string

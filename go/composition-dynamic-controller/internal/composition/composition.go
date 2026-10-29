@@ -678,6 +678,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	err = h.setStatus(ctx, mg, &statusManagerOpts{
 		force:           true,
 		resources:       all,
+		recordManaged:   true,
 		previousDigest:  "",
 		digest:          digest,
 		message:         "Composition created",
@@ -905,6 +906,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	statusOpts := &statusManagerOpts{
 		force:           false,
 		resources:       all,
+		recordManaged:   true,
 		digest:          digest,
 		previousDigest:  previousDigest,
 		message:         "Composition values updated",
