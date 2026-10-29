@@ -4,7 +4,7 @@ Proves the CDC `apiRef` status source works against the **real** Krateo platform
 
 ```
 projected SA token (file)
-  ─ authn.Client.Token ─▶ authn POST /serviceaccount/login   (TokenReview → JWT + clientconfig)
+  ─ authn.Client.Token ─▶ authn POST /serviceaccount/login   (TokenReview → accessToken)
   ─ snowplow.Client.Resolve(Bearer JWT, extras) ─▶ snowplow GET /call   (resolves a RESTAction)
   ─▶ RESTAction echoes the request extras ─▶ .api.echo.args
 ```
