@@ -287,12 +287,21 @@ func TestRollup_Converging(t *testing.T) {
 	}
 }
 
+// EMPTY means present-and-empty: a reconcile decoded the release, rendered nothing, and recorded
+// that. Still Available -- there are no children, so nothing can be unhealthy.
+//
+// This used to construct a composition with no status at all, i.e. managed ABSENT, because an
+// empty render could not be written. #248 separated the two: absent now means "never recorded"
+// and is ZeroEvidence (see absentmanaged_test.go). The intent of this test is unchanged; only the
+// shape it had to use has.
 func TestRollup_Empty(t *testing.T) {
 	h := &handler{}
-	mg := &unstructured.Unstructured{Object: map[string]any{}}
+	mg := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"managed": []any{}},
+	}}
 	v := h.rollupManagedChildren(context.Background(), fakeDynWith(), mg)
-	if !v.ready {
-		t.Fatalf("empty managed: got ready=%v", v.ready)
+	if !v.ready || v.reason != "Available" {
+		t.Fatalf("empty managed: got ready=%v reason=%s, want Available", v.ready, v.reason)
 	}
 }
 

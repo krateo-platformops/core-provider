@@ -83,11 +83,20 @@ func TestRollup_PartialEvidenceStaysAvailable(t *testing.T) {
 	}
 }
 
-// A composition with NO managed children is not zero evidence — there was nothing to evaluate, and
-// it is legitimately up to date. Guards the `len(managed) > 0` half of the condition.
+// A composition that RECORDED no managed children is not zero evidence — there was nothing to
+// evaluate, and it is legitimately up to date. Guards the `len(managed) == 0` half of the
+// condition.
+//
+// The reasoning is the original author's and is unchanged. What changed in #248 is that it is now
+// expressible: this used to pass an empty status, i.e. managed ABSENT, because `setStatus` would
+// not write `managed: []`. Absent turned out to mean something else entirely — 7 of 83
+// compositions on krateo-057 had the key absent while rendering 506 objects — so absent is now
+// ZeroEvidence and this case uses the empty list it always meant.
 func TestRollup_NoManagedChildrenIsStillAvailable(t *testing.T) {
 	h := &handler{}
-	mg := &unstructured.Unstructured{Object: map[string]any{}}
+	mg := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"managed": []any{}},
+	}}
 
 	v := h.rollupManagedChildren(context.Background(), fakeDynWith(), mg)
 	if !v.ready || v.reason != "Available" {
