@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"strings"
 	"testing"
 
 	"k8s.io/client-go/rest"
@@ -24,48 +26,69 @@ import (
 // claim — "these two appear together" — which is what a source walk can actually prove, unlike a
 // reachability claim.
 func TestEveryHelmClientPassesTheSharedDiscoveryCache(t *testing.T) {
+	// Parse EVERY non-test file in the package, not just composition.go. The original guard named
+	// one file, and a helm.NewClient in existence.go therefore escaped the invariant entirely —
+	// the guard's SCOPE was the defect, not its logic. A file-scoped guard answers "is this
+	// invariant held in the file I named", which is not the claim it appears to make.
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "composition.go", nil, 0)
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
 	if err != nil {
-		t.Fatalf("parsing composition.go: %v", err)
+		t.Fatalf("parsing the package: %v", err)
+	}
+	var files []*ast.File
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			files = append(files, f)
+		}
+	}
+	if len(files) < 2 {
+		t.Fatalf("parsed only %d non-test files; this guard is not reading the package and proves "+
+			"nothing", len(files))
 	}
 
 	var total, withCache int
 	var missing []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "NewClient" {
-			return true
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if !ok || pkg.Name != "helm" {
-			return true
-		}
-		total++
-		// The cache options are prepended via append(h.helmCacheOpts(), ...), so look for that
-		// call anywhere inside this NewClient expression.
-		found := false
-		ast.Inspect(call, func(m ast.Node) bool {
-			inner, ok := m.(*ast.CallExpr)
+	inspect := func(file *ast.File) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			if s, ok := inner.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "helmCacheOpts" {
-				found = true
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "NewClient" {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "helm" {
+				return true
+			}
+			total++
+			// The cache options are prepended via append(h.helmCacheOpts(), ...), so look for that
+			// call anywhere inside this NewClient expression.
+			found := false
+			ast.Inspect(call, func(m ast.Node) bool {
+				inner, ok := m.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if s, ok := inner.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "helmCacheOpts" {
+					found = true
+				}
+				return true
+			})
+			if found {
+				withCache++
+			} else {
+				missing = append(missing, fset.Position(call.Pos()).String())
 			}
 			return true
 		})
-		if found {
-			withCache++
-		} else {
-			missing = append(missing, fset.Position(call.Pos()).String())
-		}
-		return true
-	})
+	}
+	for _, f := range files {
+		inspect(f)
+	}
 
 	if total == 0 {
 		t.Fatal("found no helm.NewClient calls in composition.go — this guard is not looking at " +
