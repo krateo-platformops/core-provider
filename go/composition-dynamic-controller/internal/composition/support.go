@@ -131,6 +131,13 @@ type statusManagerOpts struct {
 	digest          string
 	message         string
 	conditionType   ConditionType
+	// absentChildren, when non-nil, receives the names of managed children that were RECORDED but
+	// not found in the cluster. An out-parameter, which is unusual in this file and deliberate: the
+	// rollup runs inside setStatus, and Observe needs its result to decide up-to-dateness (#261)
+	// without paying for a second pass of child GETs — the alternative was changing setStatus's
+	// signature at every caller to return a verdict only one of them wants.
+	absentChildren *[]string
+
 	// recordManaged says this reconcile DECODED a release and may therefore write
 	// status.managed -- including writing `[]` when the render produced nothing. Observe leaves it
 	// false: it passes resources: nil on the assumption that Create/Update already recorded them,
@@ -274,6 +281,10 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 		if dyn, err := dynamicclient.NewForConfig(h.kubeconfig); err == nil {
 			v = h.rollupManagedChildren(ctx, dyn, mg)
 		}
+	}
+
+	if opts.absentChildren != nil {
+		*opts.absentChildren = v.absent
 	}
 
 	return stampReady(mg, resolveReady(readProjectedHealth(mg), opts.message, v), opts.force)

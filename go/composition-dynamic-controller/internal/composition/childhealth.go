@@ -29,6 +29,22 @@ const (
 	// the composition just reads green, so the author never sees the gap. Counting these makes the
 	// absence visible without inventing a verdict we are not entitled to.
 	childUnevaluated
+
+	// childAbsent: recorded in status.managed and NOT FOUND in the cluster. It rolls up exactly
+	// like childConverging — Ready=False/Creating, named not counted — because "just applied,
+	// self-heals" is the common reason for it and that must not become terminal.
+	//
+	// It is tracked SEPARATELY because it is also the signature of a stale status.managed, and
+	// those two are indistinguishable from the child alone (#261). A chart that RENAMES a child
+	// leaves the old name recorded and the new one absent, and if the digest is unchanged no
+	// Update is ever dispatched, so the composition names a deleted resource forever. Observe uses
+	// this to report drift instead, which hands the repair to Update — the only phase that
+	// rewrites status.managed.
+	//
+	// Deliberately not inferred from `converging`: a child that EXISTS and is merely unready must
+	// not dispatch an Update on every resync, which is why this is a state and not a predicate
+	// over the existing list.
+	childAbsent
 )
 
 // nativeGroups are the API groups whose readiness semantics Kubernetes itself defines, so this
@@ -54,6 +70,10 @@ type healthVerdict struct {
 	converging []string
 	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
 	unevaluated int
+	// absent names children recorded in status.managed that do not exist. A SUBSET of converging —
+	// readiness treats them identically — surfaced separately so Observe can report drift and let
+	// Update rewrite the recorded set (#261). Not part of the condition message.
+	absent []string
 	// total is len(status.managed), kept so the unevaluated caveat can be composed by resolveReady
 	// rather than baked into the rollup's own message — which resolveReady discards.
 	total int
@@ -126,6 +146,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 
 	var failing, converging []string
 	unevaluated := 0
+	var absent []string
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
@@ -147,6 +168,12 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			// saying so was the whole defect, and the asymmetry made it obvious in hindsight: the
 			// childFailed branch below has named its children all along.
 			converging = append(converging, childID(ref))
+		case childAbsent:
+			// Identical readiness treatment to childConverging: named in the same list so the
+			// message and the verdict are unchanged. The only difference is that `absent` is also
+			// recorded, for Observe's drift decision (#261).
+			converging = append(converging, childID(ref))
+			absent = append(absent, childID(ref))
 		case childUnevaluated:
 			unevaluated++ // counted only; never changes the verdict
 		}
@@ -155,6 +182,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	switch {
 	case len(failing) > 0:
 		return healthVerdict{
+			absent:  absent,
 			ready:   false,
 			reason:  "Unavailable",
 			message: fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
@@ -168,6 +196,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			message: fmt.Sprintf("%d of %d managed children are not ready: %s",
 				len(converging), len(managed), joinCap(converging, 3)),
 			converging: converging,
+			absent:     absent,
 			total:      len(managed),
 		}
 	case unevaluated == len(managed):
@@ -372,7 +401,9 @@ func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref ma
 	obj, err := ri.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return childConverging // just applied / self-heals — never terminal
+			// Rolls up as converging (never terminal) but is distinguishable, because this is also
+			// what a stale status.managed looks like — see childAbsent (#261).
+			return childAbsent
 		}
 		// Forbidden (SA lacks read), no REST mapping, transient: degrade to healthy so a missing
 		// grant can never regress a working composition.

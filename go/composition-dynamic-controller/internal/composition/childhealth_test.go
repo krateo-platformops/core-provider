@@ -220,11 +220,58 @@ func fakeDynWith(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, objs...)
 }
 
-func TestChildHealth_NotFoundIsConverging(t *testing.T) {
+func TestChildHealth_NotFoundIsAbsentAndRollsUpAsConverging(t *testing.T) {
 	h := &handler{}
 	ref := map[string]any{"apiVersion": "apps/v1", "resource": "deployments", "name": "absent", "namespace": "ns"}
-	if got := h.childHealth(context.Background(), fakeDynWith(), ref); got != childConverging {
-		t.Errorf("NotFound: got %d want converging", got)
+
+	// NotFound now returns childAbsent rather than childConverging (#261): the two are
+	// indistinguishable from the child alone — "just applied, self-heals" and "recorded but no
+	// longer rendered" look identical — so they are separated at the source and reunited by the
+	// rollup. The invariant this test has always protected is that NotFound is NEITHER healthy nor
+	// terminal, and that is asserted below rather than the enum value.
+	got := h.childHealth(context.Background(), fakeDynWith(), ref)
+	if got != childAbsent {
+		t.Errorf("NotFound: got %d, want childAbsent", got)
+	}
+	if got == childHealthy {
+		t.Error("NotFound must never count as healthy — that was the #72/#73 defect")
+	}
+	if got == childFailed {
+		t.Error("NotFound must never be terminal — a just-applied child self-heals")
+	}
+}
+
+// The readiness treatment must be IDENTICAL to before: absent children are named in the same
+// converging list, with the same reason and the same message. #261 changes what Observe does with
+// that information, not what an operator reads.
+func TestRollup_AbsentChildIsNamedAsConvergingAndRecordedSeparately(t *testing.T) {
+	h := &handler{}
+	mg := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "composition.krateo.io/v0-1-0", "kind": "Portal",
+		"metadata": map[string]any{"name": "p", "namespace": "ns"},
+		"status": map[string]any{"managed": []any{
+			map[string]any{"apiVersion": "apps/v1", "resource": "deployments", "name": "absent", "namespace": "ns"},
+		}},
+	}}
+
+	v := h.rollupManagedChildren(context.Background(), fakeDynWith(), mg)
+
+	if v.ready {
+		t.Error("an absent managed child must not be ready")
+	}
+	if v.reason != "Creating" {
+		t.Errorf("reason = %q, want Creating — unchanged from before #261", v.reason)
+	}
+	if len(v.converging) != 1 {
+		t.Errorf("converging names %d children, want 1 — absent children must still be NAMED "+
+			"in the operator-facing list, not moved out of it", len(v.converging))
+	}
+	if len(v.absent) != 1 {
+		t.Fatalf("absent names %d children, want 1 — Observe cannot report drift without it", len(v.absent))
+	}
+	if v.absent[0] != v.converging[0] {
+		t.Errorf("absent %q and converging %q disagree; absent must be a SUBSET of converging",
+			v.absent[0], v.converging[0])
 	}
 }
 
