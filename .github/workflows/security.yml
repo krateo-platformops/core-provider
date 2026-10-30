@@ -25,4 +25,7 @@ permissions:
 
 jobs:
   security:
-    uses: krateo-platformops/.github/.github/workflows/security.yml@main
+    # TEMPORARY, DO NOT MERGE: pinned to the #32 branch so the amended gitleaks step gets a real
+    # Actions run before it reaches every repo in the org. .github hosts this workflow without
+    # running it, so PR 33 has zero checks of its own -- this PR IS its check. Reverts to @main.
+    uses: krateo-platformops/.github/.github/workflows/security.yml@fix/32-gitleaks-allowlist-and-reporting
