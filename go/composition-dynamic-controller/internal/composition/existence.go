@@ -44,11 +44,16 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
 	releaseName := compositionMeta.GetReleaseName(mg)
 
-	hc, err := helm.NewClient(h.kubeconfig,
+	// #202: the shared discovery cache, as at every other helm.NewClient site. Without it this
+	// falls to plumbing's uncached RESTClientGetter and performs a FULL API discovery per call —
+	// and recovery requeues every 15s through a 2-minute grace period, so an incomplete create
+	// paid for roughly eight full discoveries per object, during incident recovery, which is the
+	// worst moment to be slow.
+	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
 		helm.WithLogger(h.getHelmLogger(meta.IsVerbose(mg))),
 		helm.WithCache(),
-	)
+	)...)
 	if err != nil {
 		return false, fmt.Errorf("creating helm client: %w", err)
 	}
