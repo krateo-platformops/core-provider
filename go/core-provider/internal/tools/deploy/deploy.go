@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
@@ -71,6 +72,16 @@ type UndeployOptions struct {
 	// deploy is removed on undeploy. AuthnNamespace is the authn operator namespace it lives in.
 	ApiRefName     string
 	AuthnNamespace string
+	// DrainTimeout bounds how long Undeploy waits for the retiring controller's pod to disappear
+	// before it deletes that pod's ServiceAccount and RBAC (#263). Zero means derive it from the
+	// rendered Deployment's own terminationGracePeriodSeconds plus a margin, which is what
+	// production uses — the kubelet SIGKILLs at the grace period, so the pod cannot outlive it.
+	//
+	// Set it explicitly only to override that derivation: a cluster whose apiserver is slow to
+	// reflect pod deletion may need longer, and tests use a short value so the suite does not pay
+	// the full grace period per case.
+	DrainTimeout time.Duration
+
 	// KeepShared leaves in place every object another CompositionDefinition's controller for the
 	// same Kind+version also uses: the cluster-scoped ClusterRole/ClusterRoleBinding and apiRef RBAC
 	// (named {resource}-{apiVersion}, with no namespace in the name), and the credentials
@@ -667,6 +678,32 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 	log.Debug("Deployment successfully uninstalled", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
 
+	// #263. The Uninstall above returns when the apiserver ACCEPTS the delete. The pod is then
+	// Terminating and has begun its graceful-shutdown drain — unstructured-runtime keeps it alive
+	// for GracefulShutdownTimeout (30s by default) precisely so an in-flight reconcile can finish.
+	// Everything below this point deletes that pod's ServiceAccount, RBAC and authn mapping, so
+	// without this wait the drain window survives and the IDENTITY does not: the controller spends
+	// 30s unable to read or write anything, and whatever it still owed is lost.
+	//
+	// That is how a composition ends up recording a resource the release no longer renders. A
+	// version migration killed the outgoing controller between its helm upgrade and its status
+	// write, and status.managed kept the old name (#261).
+	//
+	// Two protections already existed and neither covers this. The runtime's drain window is one;
+	// the chart's cdc.terminationGracePeriodSeconds (45s) is the other, and its comment says it
+	// "must exceed the graceful-shutdown drain window so the kubelet does not SIGKILL mid-drain".
+	// Both are correct. They defend against the KUBELET. Nothing defended against the controller
+	// that requested the deletion revoking the identity the drain depends on.
+	if err := waitForControllerDrained(ctx, opts.KubeClient, &dep, opts.DrainTimeout); err != nil {
+		// Deliberately fatal rather than falling through. "I could not confirm the pod is gone" is
+		// exactly the unverifiable case where proceeding is the destructive choice: revoking an
+		// identity from under a controller that is still reconciling loses writes, while leaving a
+		// ServiceAccount behind costs nothing and the next reconcile retries idempotently.
+		log.Error(err, "Refusing to revoke the retiring controller's identity before it has drained",
+			"gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
+		return fmt.Errorf("waiting for retiring controller to drain: %w", err)
+	}
+
 	cm := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
@@ -993,4 +1030,83 @@ func ControllerDeploymentKey(namespace string, gvr schema.GroupVersionResource) 
 		Namespace: namespace,
 		Name:      resourceNamer(gvr.Resource, gvr.Version),
 	})
+}
+
+// drainPollInterval is how often waitForControllerDrained re-lists the retiring controller's pods.
+// A migration is rare and operator-initiated, so a tight poll costs nothing and shortens the
+// common case — a controller with nothing in flight exits in well under a second.
+const drainPollInterval = 500 * time.Millisecond
+
+// drainTimeoutMargin is added to the pod's own terminationGracePeriodSeconds to bound the wait.
+// The kubelet SIGKILLs at the grace period, so a pod cannot outlive it; the margin only covers
+// the kubelet noticing, the container exiting and the API reflecting the deletion.
+const drainTimeoutMargin = 15 * time.Second
+
+// defaultDrainGracePeriod is the wait bound when the rendered Deployment carries no explicit
+// terminationGracePeriodSeconds, matching Kubernetes' own default for a pod that omits it.
+const defaultDrainGracePeriod = 30 * time.Second
+
+// waitForControllerDrained blocks until no pod of the just-deleted controller Deployment remains,
+// so its ServiceAccount and RBAC can be deleted without cutting the identity out from under a
+// reconcile that is still running (#263).
+//
+// It waits on POD ABSENCE rather than on the Deployment's own disappearance. The Deployment object
+// is typically gone within milliseconds while its pod is still draining, so waiting for the
+// Deployment would return immediately and prove nothing — the question is whether the PROCESS has
+// exited, and only the pod answers that.
+//
+// Not implemented as a sleep. A sleep long enough to be safe (the full grace period) would be paid
+// by every retirement including the overwhelming majority with nothing in flight, and a sleep short
+// enough to tolerate would still race.
+func waitForControllerDrained(ctx context.Context, kube client.Client, dep *appsv1.Deployment, timeout time.Duration) error {
+	if kube == nil {
+		return fmt.Errorf("no kube client to confirm the retiring controller has drained")
+	}
+
+	// The selector is the only thing that identifies the pods, so an empty one must FAIL rather
+	// than match everything. client.MatchingLabels{} selects every pod in the namespace, which
+	// would make the wait pass as soon as the namespace happened to be empty of pods and block
+	// forever otherwise — in both directions an answer about the wrong question.
+	if dep.Spec.Selector == nil || len(dep.Spec.Selector.MatchLabels) == 0 {
+		return fmt.Errorf("rendered controller Deployment %s/%s has no label selector, so its pods "+
+			"cannot be identified", dep.Namespace, dep.Name)
+	}
+
+	if timeout <= 0 {
+		timeout = defaultDrainGracePeriod
+		if g := dep.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil && *g > 0 {
+			timeout = time.Duration(*g) * time.Second
+		}
+		timeout += drainTimeoutMargin
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		var pods corev1.PodList
+		if err := kube.List(ctx, &pods,
+			client.InNamespace(dep.Namespace),
+			client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+		); err != nil {
+			// A failed LIST is not evidence of absence. Returning nil here would be the
+			// list-failure-as-zero mistake: the identity would be revoked because we could not see
+			// the pod, which is precisely when we must not.
+			return fmt.Errorf("listing pods of retiring controller %s/%s: %w", dep.Namespace, dep.Name, err)
+		}
+		if len(pods.Items) == 0 {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			names := make([]string, 0, len(pods.Items))
+			for i := range pods.Items {
+				names = append(names, pods.Items[i].Name)
+			}
+			return fmt.Errorf("controller %s/%s still has %d pod(s) after %s: %s",
+				dep.Namespace, dep.Name, len(pods.Items), timeout, strings.Join(names, ", "))
+		case <-time.After(drainPollInterval):
+		}
+	}
 }
