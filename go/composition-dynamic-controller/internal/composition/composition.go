@@ -546,9 +546,21 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}, nil
 	}
 
+	// #261: a child recorded in status.managed but ABSENT from the cluster is drift by definition —
+	// either the record is stale or the child needs recreating, and both are Update's job. Observe
+	// cannot repair it: only Create/Update write status.managed, and getting the current render here
+	// would cost a full manifest decode on every reconcile (measured: 15-27x the digest-only path
+	// and 230KB/11.5MB/125MB of allocation for a 10KB/500KB/5MB manifest, against 32-40 bytes).
+	//
+	// So report drift and let Update — which already decodes the upgraded release and rewrites the
+	// recorded set from it — do the repair. Costs nothing per reconcile: the rollup already performs
+	// these GETs to compute Ready.
+	var absentChildren []string
+
 	err = h.setStatus(ctx, mg, &statusManagerOpts{
 		force:           false,
 		resources:       nil, // we don't need to set resources here as they are already set when a resource is created/updated
+		absentChildren:  &absentChildren,
 		previousDigest:  previousDigest,
 		digest:          digest,
 		message:         "Composition is up-to-date",
@@ -566,6 +578,20 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	_, err = updateStatusWithRetry(ctx, mg, updateOpts)
 	if err != nil {
 		return controller.ExternalObservation{}, err
+	}
+
+	if len(absentChildren) > 0 {
+		// Not an error and not logged as one: the common cause is a child applied moments ago that
+		// has not appeared yet, where the Update this triggers is a cheap no-op and records the
+		// same set again. The expensive case is the one worth paying for — a chart that RENAMED a
+		// child leaves the old name recorded forever, because the digest is unchanged so nothing
+		// would otherwise dispatch an Update (#261).
+		log.Info("Composition reports managed children that do not exist; reporting drift so the "+
+			"recorded set is rewritten", "absent", absentChildren)
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
 	}
 
 	log.Debug("Composition Observed - installed", "package", pkg.URL)
