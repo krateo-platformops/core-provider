@@ -10,7 +10,7 @@ require (
 	github.com/krateo-platformops/core-provider v0.0.0-20260803144138-97785b777edd
 	github.com/krateo-platformops/plumbing v1.17.1
 	github.com/krateo-platformops/provider-runtime v1.7.0
-	github.com/krateo-platformops/unstructured-runtime v1.6.0
+	github.com/krateo-platformops/unstructured-runtime v1.7.0
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag/v2 v2.0.0-rc4
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0

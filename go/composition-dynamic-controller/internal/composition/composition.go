@@ -3,6 +3,8 @@ package composition
 import (
 	"context"
 	"fmt"
+	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -256,9 +258,27 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	if paused && compositionMeta.IsGracefullyPaused(mg) {
 		log.Debug("Composition is gracefully paused, skipping observe.")
 		h.eventRecorder.Event(mg, event.Normal(reasonReconciliationGracefullyPaused, "Observe", "Reconciliation is paused via the gracefully paused annotation."))
+
+		// #258. RETURNED, not written. Before this the pause was invisible on the object: an
+		// already-paused composition kept whatever Ready it had, so one paused while Unavailable
+		// went on reporting the FAILURE. Two sessions concluded the annotation was inert and halted
+		// a live migration on exactly that, and a gate of "proceed when it reports paused" would
+		// have waited forever on the one composition that had to be paused.
+		//
+		// Writing it here cannot work and must not be attempted: Observe deep-copies mg on entry
+		// (see the first line of this function), so a condition set here is discarded — and the
+		// runtime re-fetches the object right after Observe returns, so even mutating the shared
+		// object would be thrown away. Returning it hands the condition to the runtime, which
+		// applies it after that re-fetch and before its own status write (unstructured-runtime
+		// v1.7.0). The handler never writes status, which is what makes the "Observe is a pure
+		// read" rule above structural rather than a request.
+		//
+		// Status True: a pause is a deliberate operator action, not a failure, and keeping it True
+		// means readiness-gating consumers are unaffected by someone pausing a composition.
 		return controller.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: true,
+			Conditions:       []metav1.Condition{compositionCondition.ReconcileGracefullyPaused()},
 		}, nil
 	}
 	// Observe MUST be a pure read of external state. It previously persisted metadata here (release

@@ -180,13 +180,6 @@ func TestPausedConditionDoesNotChurnOnRepeat(t *testing.T) {
 // So this drives the real h.Observe. The paused branch sits before the helm client is built, and
 // dynamic client construction is lazy, so no apiserver is contacted.
 func TestObserve_PausedBranchMakesThePauseObservable(t *testing.T) {
-	t.Skip("#258 is OPEN and the naive fix is unsafe. Observe opens with mg = mg.DeepCopy(), so a " +
-		"condition written in the paused branch is discarded. Making it persist requires a write " +
-		"FROM Observe — and the runtime's handleObserve does fetch -> Observe -> SetConditions(el) " +
-		"-> UpdateStatus(el), so any write from Observe leaves el's resourceVersion stale and the " +
-		"runtime's own UpdateStatus 409s on every paused tick, flipping Synced to ReconcileError. " +
-		"Un-skip this when #258 lands: it is the assertion that distinguishes a fix which works " +
-		"from one that only looks like it does.")
 
 	mg := pausedObj(t, "fireworks-sample", metav1.Condition{
 		Type: "Ready", Status: metav1.ConditionFalse, Reason: "Unavailable",
@@ -212,10 +205,24 @@ func TestObserve_PausedBranchMakesThePauseObservable(t *testing.T) {
 			"report up-to-date or the runtime calls Update and the pause does nothing", obs)
 	}
 
-	if got := readyOf(t, mg).Reason; got != "ReconcileGracefullyPaused" {
-		t.Errorf("Ready reason after a paused Observe = %q, want ReconcileGracefullyPaused. The "+
-			"pause is in effect but invisible on the object, which is #258 — a runbook gate on "+
-			"this reason waits forever.", got)
+	// RETURNED, not written: Observe deep-copies its argument, so asserting on mg would assert
+	// nothing. The runtime applies observation.Conditions after its re-fetch — covered end to end
+	// by unstructured-runtime's TestObservationConditionsAreApplied, which reads back from a
+	// cluster. Here we assert the handler hands over the right condition.
+	if len(obs.Conditions) != 1 {
+		t.Fatalf("returned %d conditions, want exactly 1 (the paused Ready)", len(obs.Conditions))
+	}
+	c := obs.Conditions[0]
+	if c.Type != "Ready" {
+		t.Errorf("condition type = %q, want Ready", c.Type)
+	}
+	if c.Reason != "ReconcileGracefullyPaused" {
+		t.Errorf("condition reason = %q, want ReconcileGracefullyPaused. A runbook gate on this "+
+			"reason waits forever without it (#258).", c.Reason)
+	}
+	if c.Status != metav1.ConditionTrue {
+		t.Errorf("condition status = %v, want True — a pause is an operator action, not a failure, "+
+			"and keeping it True leaves readiness-gating consumers unaffected", c.Status)
 	}
 
 	select {
