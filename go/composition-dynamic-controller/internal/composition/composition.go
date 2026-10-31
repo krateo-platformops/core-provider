@@ -603,6 +603,35 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return controller.ExternalObservation{}, err
 	}
 
+	// #273: the inverse direction of the absentChildren check above. That one catches a child
+	// RECORDED but missing from the cluster; this one catches a child RENDERED but missing from the
+	// record — `status.managed` a strict subset of what the release actually contains, with no
+	// symptom anywhere, because every other status field is independently correct.
+	//
+	// Keyed on the digest rather than on a decode: a full DecodeMinRelease here costs 15-27x the
+	// digest-only path and up to 125MB of allocation (the measurement that settled #261), and it would
+	// be paid on EVERY reconcile. The stamp recorded beside the inventory is free — it is the digest
+	// Create/Update already computed from the release they decoded.
+	//
+	// An absent stamp with a present inventory is the unverifiable state, and it is exactly #273's
+	// live shape: an inventory written before this fix existed. Reporting drift costs one Update per
+	// such composition, once, after which the stamp is set — and that Update is what repairs an
+	// already-frozen inventory. An absent stamp with no inventory is #248's ZeroEvidence and is left
+	// alone.
+	staleInventory, err := inventoryStaleReason(mg, digest)
+	if err != nil {
+		return controller.ExternalObservation{}, fmt.Errorf("checking whether the recorded set matches the release: %w", err)
+	}
+
+	if staleInventory != "" {
+		log.Info("Composition's recorded set does not match the current release; reporting drift so it "+
+			"is rewritten", "reason", staleInventory)
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	if len(absentChildren) > 0 {
 		// Not an error and not logged as one: the common cause is a child applied moments ago that
 		// has not appeared yet, where the Update this triggers is a cheap no-op and records the
