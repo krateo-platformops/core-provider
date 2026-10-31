@@ -67,6 +67,31 @@ reconciled by **nobody** — no error on the CR, no event, no condition, nothing
 log. The CR simply sits there. The apiVersion is not a reliable owner key; see
 [composition-version-management](./design/composition-version-management.md) §2 and §6.
 
+**The plural is not derivable and the `status` is the only source.** It comes from
+`plumbing/kubeutil/plurals`, not from `strings.ToLower(kind) + "s"` — a fleet join that
+assumed the naive rule silently dropped **32 of 83** rows. Read `status.resource`.
+
+**Gate on the CRD, not on the CompositionDefinition's `Ready`.** `Ready=True` means the
+CRD has been written; it does not mean the API answers. Until #269 shipped in 2.13.46 the
+two could differ by the window between a CRD being admitted and becoming `Established`,
+and even now the honest check is the CRD itself:
+
+```
+kubectl wait --for=condition=Established crd/<status.resource>.composition.krateo.io
+```
+
+`status.apiVersion`, `status.kind` and `status.resource` are written consecutively in one
+status update, so there is no partial write to race: if one is present they all are.
+
+**Where this bites hardest: vendored charts.** A namespaced child whose rendered manifest
+omits `metadata.namespace` is the trigger for the published-path defect (#79), and the
+pattern is third-party or vendored chart content rather than Krateo-authored blueprints —
+`ecr.services.k8s.aws/v1alpha1 Repository` from the AWS ACK controller was one bad entry
+out of 93 on a customer cluster, and krateo-observability's clickstack chart omits it on
+secrets, configmaps, services and a deployment. So the exposure scales with how much
+vendored content a blueprint pulls in, not with blueprint count — which means the
+normalisation has to hold rather than the convention.
+
 Do not compute `resource` either. Only `kind` comes from a string rule
 (`flect.Pascalize` over `ToGolangName`); the plural is **resolved**, by
 `plumbing/kubeutil/plurals` behind `internal/tools/pluralizer`, so it is not derivable
