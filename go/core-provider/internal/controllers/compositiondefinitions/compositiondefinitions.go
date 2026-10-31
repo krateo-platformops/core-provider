@@ -1642,6 +1642,38 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 
+	// #270. Report per-version controllers that LEAKED — created by core-provider and never
+	// retired, because a retirement that ran while 2.13.45's drain wedge was live aborted Undeploy
+	// partway. On 057 that left installers-v0-3-480-controller running two installer versions late,
+	// invisible to the rewrite because the rewrite only touches controllers still in the desired set.
+	//
+	// REPORT ONLY, deliberately: nothing deletes them here. Identifying a leak is recoverable if
+	// the predicate is wrong; deleting a CLAIMED controller is not, and this is the same function
+	// whose last change wedged every migration on 2.13.45. The deletion is a separate decision.
+	//
+	// Called from Update rather than Observe because Update runs only when something changed, so
+	// the Deployment LIST this costs is not paid per reconcile across 68 controllers. And this is
+	// the topical place: a leak is created by the retirement a few lines above.
+	//
+	// SILENT WHEN THERE IS NOTHING TO SAY, including when the predicate refuses — the kept reasons
+	// go to Debug, so an operator sees a leak named and not the arithmetic behind not finding one.
+	if leaked, kept, lerr := e.findLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace); lerr != nil {
+		log.Debug("could not check for leaked controllers", "error", lerr.Error())
+	} else {
+		if len(leaked) > 0 {
+			names := make([]string, 0, len(leaked))
+			for i := range leaked {
+				names = append(names, leaked[i].Name)
+			}
+			log.Info("per-version controllers appear to have leaked and are not being deleted; "+
+				"they are retired versions nothing claims, safe to remove by hand (#270)",
+				"deployments", names, "namespace", cr.Namespace)
+		}
+		if len(kept) > 0 {
+			log.Debug("leaked-controller check kept candidates", "reasons", kept)
+		}
+	}
+
 	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
 	// `crd`: the VersionInfo projection keeps only versions present in the CRD it is given, so feeding
 	// it the generated CRD would collapse VersionInfo to just the current version every reconcile. The
