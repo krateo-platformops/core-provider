@@ -390,24 +390,6 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 			ref.SetNamespace(defaultNamespace)
 		}
 
-		buildpath := func() string {
-			prefix := "/apis/" + gvr.Group + "/" + gvr.Version
-			// Core group resources
-			if len(gvr.Group) == 0 {
-				prefix = "/api/" + gvr.Version
-			}
-
-			suffix := "/namespaces/" + ref.GetNamespace() + "/" + gvr.Resource + "/" + ref.GetName()
-			// Cluster scoped resources
-			if len(ref.GetNamespace()) == 0 {
-				suffix = "/" + gvr.Resource + "/" + ref.GetName()
-			}
-			if len(gvr.Group) == 0 {
-				return prefix + suffix
-			}
-			return prefix + suffix
-		}
-
 		// Store the managed ref as a JSON-native map, NOT the typed ManagedResource struct.
 		// mg.Object["status"] is deep-copied by runtime.DeepCopyJSONValue on other reconcile
 		// paths (e.g. the observe/converter path), which panics on any non-JSON type with
@@ -419,7 +401,7 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 			Resource:   gvr.Resource,
 			Name:       ref.GetName(),
 			Namespace:  ref.GetNamespace(),
-			Path:       buildpath(),
+			Path:       managedPath(gvr, isNamespaced, ref.GetNamespace(), ref.GetName()),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("converting managed resource %s to unstructured: %w", ref.GetName(), err)
@@ -487,4 +469,35 @@ func logManagedSetChange(ctx context.Context, previous []any, mg *unstructured.U
 
 	xcontext.Logger(ctx).Info("Composition managed set changed",
 		"added", added, "removed", removed, "total", len(current), "previousTotal", len(previous))
+}
+
+// managedPath builds the API path published as status.managed[].path.
+//
+// KEYED ON isNamespaced, NOT on whether the namespace happens to be non-empty. The normalisation in
+// populateManagedResources makes those two equivalent today — it forces the namespace empty for a
+// cluster-scoped kind and defaults it for a namespaced one — but only as an invariant established
+// twenty lines away and not restated at the point of use. Branching on scope keeps the path correct
+// by construction if that normalisation is ever moved, reordered or made conditional, which is how
+// the namespaced-child-with-no-namespace bug reached status.managed in the first place (#79).
+//
+// Designed by the marketing session, which traced the same defect in the 1.x line
+// (krateoplatformops/composition-dynamic-controller#189, fixed upstream as #188) and found that
+// neither line's fix touched this function — both carried the correct-at-a-distance invariant.
+//
+// EXTRACTED FROM A CLOSURE so the discriminating case is reachable. As a closure inside
+// populateManagedResources it could only be exercised through the normalisation, and no input
+// distinguished the old branch from the new one: a cluster-scoped ref has its namespace stripped
+// before the path is built, so both agreed everywhere. As a function it can be called with
+// isNamespaced=false AND a non-empty namespace — the state the old code got wrong and nothing could
+// previously test.
+func managedPath(gvr schema.GroupVersionResource, isNamespaced bool, namespace, name string) string {
+	prefix := "/apis/" + gvr.Group + "/" + gvr.Version
+	if len(gvr.Group) == 0 {
+		// Core group resources live under /api, not /apis.
+		prefix = "/api/" + gvr.Version
+	}
+	if !isNamespaced {
+		return prefix + "/" + gvr.Resource + "/" + name
+	}
+	return prefix + "/namespaces/" + namespace + "/" + gvr.Resource + "/" + name
 }
