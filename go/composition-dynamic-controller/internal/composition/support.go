@@ -170,6 +170,20 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		previous, _, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
 		setManagedResources(mg, managed)
 		logManagedSetChange(ctx, previous, mg)
+
+		// #273. Stamp the inventory with the digest of the release it was decoded from. Both callers
+		// that set recordManaged take `resources` and `digest` from the SAME DecodeMinRelease call
+		// (composition.go:809 in Create, :1013 in Update), so this is that release's digest and not
+		// merely a contemporaneous one.
+		//
+		// Observe compares it against the current release's digest to answer the question nothing
+		// else could: is this inventory still the inventory of what is rendered? status.digest tracks
+		// the CURRENT release because Observe rewrites it every reconcile; status.managed tracks
+		// whatever Create/Update last decoded. Nothing tied the two together, so a render that grew
+		// left `managed` a strict subset of reality with every other field agreeing it was fine.
+		if err := maps.SetNestedField(mg.Object, opts.digest, "status", "managedDigest"); err != nil {
+			return fmt.Errorf("setting managed digest in status: %w", err)
+		}
 	}
 
 	err := maps.SetNestedField(mg.Object, opts.previousDigest, "status", "previousDigest")
