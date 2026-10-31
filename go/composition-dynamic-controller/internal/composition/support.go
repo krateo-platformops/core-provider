@@ -3,6 +3,7 @@ package composition
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
@@ -165,7 +166,10 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 			return fmt.Errorf("populating managed resources: %w", err)
 		}
 
+		// #268. Read the previous inventory BEFORE overwriting it, so the change can be named.
+		previous, _, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
 		setManagedResources(mg, managed)
+		logManagedSetChange(ctx, previous, mg)
 	}
 
 	err := maps.SetNestedField(mg.Object, opts.previousDigest, "status", "previousDigest")
@@ -424,4 +428,63 @@ func (h *handler) populateManagedResources(resources []processor.MinimalMetadata
 	}
 
 	return managed, nil
+}
+
+// logManagedSetChange emits one Info line when status.managed actually changed, naming what was
+// added and removed.
+//
+// #268. Nothing at default verbosity recorded that the inventory was rewritten. The only line
+// near this write is `log.Debug("Composition values updated.")` at composition.go:992, and the cdc
+// runs at Info unless --debug is passed — so it is never emitted in production. That cost a real
+// misdiagnosis: a peer investigating #261 was told to grep the cdc logs for that string to
+// establish whether Update had run, and their counter returned 0 on a composition that had
+// demonstrably just healed via Update. They caught it only because the arithmetic contradicted the
+// instrument. Their framing: "a blind instrument reporting zero churn is indistinguishable from
+// genuinely zero churn."
+//
+// The event is deliberately narrower than "Update finished", which unstructured-runtime already
+// logs as "Successfully requested update of external resource". What nothing reported is that the
+// RECORDED SET CHANGED — which is the first question asked about every defect in the
+// reports-what-it-recorded-rather-than-what-exists family (#248, #261, #269, #273).
+//
+// SILENT WHEN UNCHANGED, which is what makes it affordable. Info-level logging on a per-reconcile
+// path across 68 controllers is exactly what was trimmed for cost in #175; this fires on a rename,
+// a chart bump or a two-phase render catching up, and on nothing else. A composition whose render
+// is stable never emits it, however often it reconciles.
+func logManagedSetChange(ctx context.Context, previous []any, mg *unstructured.Unstructured) {
+	current, _, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
+
+	ids := func(entries []any) map[string]bool {
+		out := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			if ref, ok := e.(map[string]any); ok {
+				out[childID(ref)] = true
+			}
+		}
+		return out
+	}
+	before, after := ids(previous), ids(current)
+
+	var added, removed []string
+	for id := range after {
+		if !before[id] {
+			added = append(added, id)
+		}
+	}
+	for id := range before {
+		if !after[id] {
+			removed = append(removed, id)
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		return
+	}
+	// Sorted so two runs over the same change produce the same line: map iteration order would
+	// otherwise make an unchanged situation look like it varied, and a log nobody can diff is
+	// nearly as useless as no log.
+	sort.Strings(added)
+	sort.Strings(removed)
+
+	xcontext.Logger(ctx).Info("Composition managed set changed",
+		"added", added, "removed", removed, "total", len(current), "previousTotal", len(previous))
 }
