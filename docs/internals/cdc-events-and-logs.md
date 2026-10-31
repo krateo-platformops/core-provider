@@ -268,3 +268,70 @@ right reading of "this happened at all". Measure before choosing, with the same 
 - `docs/internals/gotchas.md` — runtime pitfalls.
 - `clickstack-chart/charts/krateo-observability/values.yaml` + `docs/alerts.md` — the default
   `sre-*` alert set, and the three rules that decide whether any Alert can fire.
+
+## Profiling: `localhost:6060`, and nothing advertises it
+
+Every CDC pod serves pprof, unconditionally — not behind `--debug`, not behind an env var:
+
+```go
+// composition-dynamic-controller/main.go:160
+go func() {
+    log.Println(http.ListenAndServe("localhost:6060", nil))
+}()
+```
+
+**Bound to `localhost`.** Reachable only from inside the pod's network namespace.
+
+That is the right security posture for an endpoint that dumps heap contents, and it is why nothing
+exposes it: declaring a `containerPort` or a Service port for a localhost listener would advertise
+an endpoint nothing in the cluster can connect to.
+
+There **is** a per-controller Service — `<resource>-<apiVersion>-controller-service` — but it
+carries exactly one port, `metrics`, pointing at `cdc.metrics.port`. 6060 appears in neither the
+Service nor the Deployment's `containerPort` list, and that absence is consistent and correct rather
+than an omission.
+
+### The two ways in, and both are privileged
+
+```bash
+# 1. port-forward tunnels into the pod netns
+kubectl port-forward -n krateo-system pod/<cdc-pod> 16200:6060
+
+# 2. exec, if the image has curl or wget — not verified for every tag
+kubectl exec -n krateo-system <cdc-pod> -- curl -s 'http://localhost:6060/debug/pprof/heap?debug=1'
+```
+
+**There is no Job-based path.** A pod elsewhere in the cluster curling the CDC's pod IP on 6060 gets
+a connection refused — the listener is not on that interface. This is worth stating because the
+refusal is indistinguishable from "this process serves no profiler", and a reasonable investigation
+reaches that conclusion. On 2026-10-31 an in-cluster Job returned four refusals in 0–2 ms across
+four CDC pods; the reporter's own words were **"four identical refusals look like evidence"**. A
+consistent negative from a uniformly wrong instrument is *more* convincing than a single one, which
+is exactly backwards.
+
+### `?debug=1` gives the memory numbers without the pprof toolchain
+
+```bash
+curl -s 'http://localhost:6060/debug/pprof/heap?debug=1' | grep -E '^# (HeapSys|NumGC|TotalAlloc)'
+```
+
+`?debug=1` prefixes the text profile with the whole `runtime.MemStats` dump as `# Field value`
+lines, in **bytes**:
+
+| field | what it answers |
+|---|---|
+| `HeapSys` | the arena the process has reserved — the figure #247 tracks |
+| `NumGC` | GC count, for sanity-checking a rate against uptime |
+| `TotalAlloc` | lifetime allocated; `/1e9` for GB, `/uptime_hours` for GB/h |
+
+So one `curl` answers the questions that otherwise need `/debug/pprof/heap` plus `go tool pprof`.
+Note that a `TotalAlloc`-derived GB/h and a `go tool pprof -top` `of NNNGB total` are **not** the
+same quantity, so do not compare one against the other across samples.
+
+### Comparing samples: uptime is part of the measurement
+
+`HeapSys` is stable **within** a process and **process-specific across** them. Four readings at
+186.7 MiB across two processes looked like a settling value until a third process read 198.8 MiB at
+a comparable uptime. Always report uptime beside the number, and do not compare a 5-minute-old
+process against an hours-old one — that measures warm-up, and it will look like refutation or
+confirmation depending only on which way it falls.
