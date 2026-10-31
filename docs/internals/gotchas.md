@@ -187,6 +187,68 @@ The same fact is recorded operationally in the installer repo (its release and u
 runbooks), reached from a different task. It is restated here because this is the component whose
 behaviour it is, and a reader looking at the CDC should not have to find it in another repo.
 
+## Auditing `status.managed[].path` — the raw empty-namespace count is not the defect count
+
+`managedPath` (`internal/composition/support.go:493`) keys the path on the resource's **scope**, not
+on whether a namespace string happens to be set:
+
+```go
+if !isNamespaced {
+	return prefix + "/" + gvr.Resource + "/" + name
+}
+return prefix + "/namespaces/" + namespace + "/" + gvr.Resource + "/" + name
+```
+
+So **an empty `namespace` is the correct recorded value for every cluster-scoped child**, and on a
+blueprint heavy with cluster-scoped CRs most entries have one. Counting empty namespaces to look for
+the #79 defect therefore measures the wrong thing by a wide margin: on one 3.0-line composition the
+raw count was **58** and the defect count was **1** (a namespaced `ecr.services.k8s.aws`
+`repositories`); the other 57 were `azuredevops.krateo.io` kinds, all genuinely cluster-scoped.
+
+The defect is the **off-diagonal cell**: a *namespaced* kind recorded with an *empty* namespace.
+
+### Audit by differential, not by count
+
+Recompute what `managedPath` should emit for every entry, taking `isNamespaced` from the cluster's
+discovery API — a source independent of the code under test — and compare exactly:
+
+```
+# scope, as a boolean, with no table parsing
+kubectl get --raw /apis/<group>/<version>    # or /api/v1 for the core group
+#   -> .resources[] | {name, namespaced}
+
+# then, per status.managed[] entry, assert:
+#   want = managedPath(apiVersion, resource, namespaced, namespace, name)
+#   got  = entry.path
+```
+
+Measured this way on krateo-057 (2.13.x, 85 compositions, 1184 entries): **1184 exact matches, 0
+mismatches, 0 entries in the defect cell**, with 162 cluster-scoped-and-empty entries as the
+positive control proving the check could see that cell at all. A differential with no positive arm
+is a zero with extra steps.
+
+### Four traps, each of which produced a plausible wrong number
+
+- **Do not key scope on the plural alone.** 10 plurals collide across groups on a stock Krateo
+  cluster — `pods`, `nodes`, `events`, `alerts`, `forms` among them. A plural-keyed map reported
+  **831** cluster-scoped entries carrying a namespace. Join on `apiVersion` **and** `resource`.
+- **Do not parse `kubectl api-resources -o wide` positionally.** `SHORTNAMES` and `CATEGORIES` are
+  optional columns, so position is unsound from either end; one attempt put `KIND` where
+  `NAMESPACED` belonged (`namespaced=Pod`) for **511 of 607** rows. Use the discovery API.
+- **Do not test the path with a `/namespaces/` substring.** A cluster-scoped `namespaces` entry's
+  *correct* path is `/api/v1/namespaces/<name>`, so it matches by construction. Compare the whole
+  path.
+- **Distinguish "group absent" from "cluster unreachable".** A `get` against an unreachable cluster
+  returns nothing and reads exactly like an estate with no compositions. Pair it with
+  `kubectl get --raw /version`.
+
+### What the field means on older lines
+
+`status.managed[].path` does not exist before the 3.0 line — a 2.4.x estate (CDC 0.17.31, 14,097
+entries across 188 compositions) has **zero** entries carrying one, because the namespace arrived
+already resolved at the source and there was no path to get wrong. Exposure to a malformed path
+scales with **versions that emit `path`**, not with blueprint count.
+
 ## Changing statusDataTemplate / apiRef re-renders the CDC (digest churn)
 
 The encoded `statusDataTemplate`, the `apiRef`, the projected-token volume, the
