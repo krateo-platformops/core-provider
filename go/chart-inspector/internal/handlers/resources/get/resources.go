@@ -17,6 +17,7 @@ import (
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	helmutils "github.com/krateo-platformops/plumbing/helm/utils"
+	helmv3 "github.com/krateo-platformops/plumbing/helm/v3"
 	"github.com/krateo-platformops/plumbing/http/response"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -213,6 +214,31 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),
 		)
+		// #265. A blueprint referencing a kind this cluster does not serve is the CALLER's
+		// blueprint disagreeing with the cluster, not a fault in this service. It used to answer
+		// 500/InternalError, which is the one class a caller is entitled to read as "not my fault,
+		// retry later" — so every consumer retried forever while the response body already carried
+		// the actionable sentence helm produces: "ensure CRDs are installed first".
+		//
+		// 422 rather than 400: the request is WELL-FORMED and semantically unprocessable right
+		// now. plumbing's status machinery already maps 422 to reason UnprocessableEntity
+		// (http/response/status.go:128); only the convenience helper is absent, so Encode/New is
+		// the supported call rather than a workaround.
+		//
+		// IT MEANS "NOT SATISFIABLE NOW", NOT "NOT SATISFIABLE", and a consumer must not latch on
+		// it. The detector cannot distinguish a kind that will never exist from one whose CRD was
+		// created moments ago and has not reached this process's RESTMapper — plumbing's own doc
+		// says so. What makes the classification sound HERE is the CRD informer: this client is
+		// built WithCRDInformer, which Resets the mapper on CRD arrival, so a miss that survives it
+		// is evidence of absence rather than of staleness. That reasoning lives in this handler;
+		// nothing in the detector supplies it.
+		if helmv3.IsRESTMappingMiss(err) {
+			log.ErrorContext(ctx, "chart references a kind this cluster does not serve",
+				slog.Any("err", err),
+			)
+			response.Encode(w, response.New(http.StatusUnprocessableEntity, err))
+			return
+		}
 		response.InternalError(w, err)
 		return
 	}

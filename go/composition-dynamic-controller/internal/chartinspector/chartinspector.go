@@ -134,7 +134,7 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 			return nil, fmt.Errorf("reading response body: %w", err)
 		}
 
-		return nil, fmt.Errorf("unexpected status code: %d - response body: %s", resp.StatusCode, string(bbody))
+		return nil, &StatusError{Code: resp.StatusCode, Body: string(bbody)}
 	}
 
 	defer resp.Body.Close()
