@@ -14,6 +14,7 @@ import (
 
 	"github.com/gobuffalo/flect"
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/chart/chartmeta"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/resolvers"
 	"github.com/krateo-platformops/core-provider/internal/tools/retry"
@@ -173,10 +174,23 @@ func ChartGroupVersionKind(tgzFS fs.FS, rootDir string) (schema.GroupVersionKind
 		return schema.GroupVersionKind{}, err
 	}
 
+	// Via chartmeta rather than res["version"].(string): the assertion PANICS, and sigs.k8s.io/yaml
+	// resolves YAML 1.1 just as yaml.v2 does (measured), so `name: y` / `no` / `on` / `off` arrive as
+	// bools and `version: 1.0` as a float64. All are valid Helm chart names, and a panic in a
+	// reconcile loop is a crash loop rather than a failed reconcile.
+	version, err := chartmeta.StringField(res, "version", rootDir+"/Chart.yaml")
+	if err != nil {
+		return schema.GroupVersionKind{}, err
+	}
+	name, err := chartmeta.StringField(res, "name", rootDir+"/Chart.yaml")
+	if err != nil {
+		return schema.GroupVersionKind{}, err
+	}
+
 	return schema.GroupVersionKind{
 		Group:   defaultGroup,
-		Version: fmt.Sprintf("v%s", strings.ReplaceAll(res["version"].(string), ".", "-")),
-		Kind:    flect.Pascalize(strutil.ToGolangName(res["name"].(string))),
+		Version: fmt.Sprintf("v%s", strings.ReplaceAll(version, ".", "-")),
+		Kind:    flect.Pascalize(strutil.ToGolangName(name)),
 	}, nil
 }
 
