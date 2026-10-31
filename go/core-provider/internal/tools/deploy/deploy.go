@@ -699,6 +699,17 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		// exactly the unverifiable case where proceeding is the destructive choice: revoking an
 		// identity from under a controller that is still reconciling loses writes, while leaving a
 		// ServiceAccount behind costs nothing and the next reconcile retries idempotently.
+		if errors.Is(err, ErrDrainUnobservable) {
+			// #270. The capability to observe the drain is missing, which no retry fixes. Decline
+			// to revoke the identity -- so no in-flight write can be lost -- and RETURN SUCCESS so
+			// the migration completes. The ServiceAccount and its RBAC are deliberately left
+			// behind; they are harmless and a later reconcile reclaims them once the grant exists.
+			log.Error(err, "Cannot observe the retiring controller's drain, so its identity will "+
+				"NOT be revoked and will be left in place. Grant the controller 'list' on core/v1 "+
+				"pods; the migration is completing without the drain guarantee",
+				"gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
+			return nil
+		}
 		log.Error(err, "Refusing to revoke the retiring controller's identity before it has drained",
 			"gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
 		return fmt.Errorf("waiting for retiring controller to drain: %w", err)
@@ -1032,6 +1043,21 @@ func ControllerDeploymentKey(namespace string, gvr schema.GroupVersionResource) 
 	})
 }
 
+// ErrDrainUnobservable reports that the retiring controller's pods could not be LISTED at all,
+// as distinct from being listed and still present. #270: the two demand opposite responses.
+//
+// Not-drained-yet is transient and waiting is correct. Cannot-observe, when the cause is a missing
+// RBAC rule, NEVER resolves by waiting — and #263 shipped in 2.13.45 with exactly that gap, so
+// every CompositionDefinition version bump failed its reconcile, retried, and failed again. A
+// permanent migration outage is strictly worse than the occasional lost status write #263 set out
+// to prevent, which is the trade the original fail-closed branch got wrong.
+//
+// The response to this error is to SKIP the identity deletion and let the reconcile converge:
+// nothing is revoked, so no in-flight write can be lost, and a leftover ServiceAccount costs
+// nothing and is reclaimed by a later reconcile once the permission exists. Fail-safe in both
+// directions rather than choosing which way to be unsafe.
+var ErrDrainUnobservable = errors.New("retiring controller's pods cannot be observed")
+
 // drainPollInterval is how often waitForControllerDrained re-lists the retiring controller's pods.
 // A migration is rare and operator-initiated, so a tight poll costs nothing and shortens the
 // common case — a controller with nothing in flight exits in well under a second.
@@ -1089,9 +1115,17 @@ func waitForControllerDrained(ctx context.Context, kube client.Client, dep *apps
 			client.InNamespace(dep.Namespace),
 			client.MatchingLabels(dep.Spec.Selector.MatchLabels),
 		); err != nil {
-			// A failed LIST is not evidence of absence. Returning nil here would be the
-			// list-failure-as-zero mistake: the identity would be revoked because we could not see
-			// the pod, which is precisely when we must not.
+			// A failed LIST is still not evidence of absence -- returning nil here would be the
+			// list-failure-as-zero mistake, revoking the identity because we could not see the pod,
+			// which is precisely when we must not.
+			//
+			// But FORBIDDEN is not a failed observation, it is an absent capability: no amount of
+			// retrying produces the permission, so treating it like a transient error wedges every
+			// migration forever (#270). It gets its own error so the caller can decline to revoke
+			// WITHOUT declining to converge.
+			if apierrors.IsForbidden(err) {
+				return fmt.Errorf("%w: %s/%s: %w", ErrDrainUnobservable, dep.Namespace, dep.Name, err)
+			}
 			return fmt.Errorf("listing pods of retiring controller %s/%s: %w", dep.Namespace, dep.Name, err)
 		}
 		if len(pods.Items) == 0 {

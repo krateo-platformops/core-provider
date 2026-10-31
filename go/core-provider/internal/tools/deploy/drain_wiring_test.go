@@ -2,14 +2,18 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/objects"
@@ -81,6 +85,46 @@ func TestUndeploy_DoesNotRevokeTheIdentityWhileAPodSurvives(t *testing.T) {
 		t.Errorf("Undeploy failed with %q; expected the drain refusal, so this test may be passing "+
 			"for an unrelated reason and asserting nothing about the wait", err)
 	}
+}
+
+// #270 WIRING. The classification in drain_test.go is useless unless Undeploy acts on it. This
+// drives the real Undeploy with a client that FORBIDS the pod LIST -- the production 2.13.45 state
+// -- and asserts the migration COMPLETES rather than wedging.
+//
+// The assertion is on Undeploy returning nil. Before #270 it returned
+// "waiting for retiring controller to drain: ..." on every reconcile forever, with the cluster
+// already in the correct state.
+func TestUndeploy_ForbiddenPodListCompletesWithoutRevokingTheIdentity(t *testing.T) {
+	dyn := keepSharedCluster()
+	kube := &wiringForbiddenClient{Client: clientfake.NewClientBuilder().Build()}
+
+	err := Undeploy(context.Background(), nil, UndeployOptions{
+		KubeClient:             kube,
+		DynamicClient:          dyn,
+		GVR:                    guardGVR,
+		Namespace:              keepSharedOldNS,
+		SkipCRD:                true,
+		DrainTimeout:           2 * time.Second,
+		RBACFolderPath:         "testdata",
+		DeploymentTemplatePath: "testdata/deploy.yaml",
+		ConfigmapTemplatePath:  "testdata/cm.yaml",
+		JsonSchemaTemplatePath: "testdata/configmap_jsonschema.yaml",
+		ServiceTemplatePath:    "testdata/service.yaml",
+	})
+
+	if err != nil {
+		t.Fatalf("Undeploy must COMPLETE when the pod LIST is forbidden, leaving the identity in "+
+			"place: a missing RBAC rule is not fixed by retrying, so returning an error wedges "+
+			"every CompositionDefinition version bump forever (#270). got: %v", err)
+	}
+}
+
+type wiringForbiddenClient struct {
+	client.Client
+}
+
+func (c *wiringForbiddenClient) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods"))
 }
 
 // CONTROL. The same Undeploy with NO surviving pod must complete — otherwise the test above would

@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -166,3 +167,59 @@ var scheme = struct{ Scheme *runtime.Scheme }{Scheme: func() *runtime.Scheme {
 	s.AddKnownTypeWithName(schema.GroupVersionKind{Version: "v1", Kind: "PodList"}, &corev1.PodList{})
 	return s
 }()}
+
+// #270. #263 shipped a pod LIST without the RBAC to perform it, so every CompositionDefinition
+// version bump on 2.13.45 wedged: the reconcile errored, retried, and errored again, with the
+// cluster state already correct — the retiring controller had drained and the new one was Running.
+//
+// Found on a live cluster by openstack-ironic-operator-kog, who also identified why the symptom
+// named the wrong layer: the informer swallows the 403 in its retry loop and reports
+// "Timeout: failed waiting for *v1.Pod Informer to sync" rather than "Forbidden".
+//
+// The RBAC rule is the real fix. This covers the second half: a MISSING CAPABILITY must not be
+// treated like a transient failure, because no amount of waiting supplies it.
+func TestWaitForControllerDrained_ForbiddenIsUnobservableNotTransient(t *testing.T) {
+	dep := drainDep(nil)
+	kube := &drainForbiddenClient{Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()}
+
+	err := waitForControllerDrained(context.Background(), kube, dep, 2*time.Second)
+	if err == nil {
+		t.Fatal("a Forbidden LIST must still refuse to confirm the drain: returning nil would " +
+			"revoke the identity because we could not look, which is the destructive reading")
+	}
+	if !errors.Is(err, ErrDrainUnobservable) {
+		t.Errorf("error %v does not wrap ErrDrainUnobservable, so Undeploy cannot tell an absent "+
+			"CAPABILITY from a transient failure and will wedge the migration forever (#270)", err)
+	}
+
+	// CONTROL. A non-Forbidden failure must NOT be classified as unobservable, or every transient
+	// apiserver blip would silently skip the drain guarantee this whole mechanism exists for.
+	transient := &drainListFailClient{Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()}
+	terr := waitForControllerDrained(context.Background(), transient, dep, 2*time.Second)
+	if terr == nil {
+		t.Fatal("control: a transient LIST failure must still be an error")
+	}
+	if errors.Is(terr, ErrDrainUnobservable) {
+		t.Error("control: a ServiceUnavailable was classified as unobservable. Then a one-second " +
+			"apiserver blip skips the drain and #263 is back, silently")
+	}
+
+	// And a still-present pod must not be unobservable either: it was observed, it is just there.
+	present := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(drainPod("p", dep.Spec.Selector.MatchLabels)).Build()
+	perr := waitForControllerDrained(context.Background(), present, dep, 2*time.Second)
+	if perr == nil || errors.Is(perr, ErrDrainUnobservable) {
+		t.Errorf("control: a pod that IS listed and still present must be a timeout, not "+
+			"unobservable; got %v", perr)
+	}
+}
+
+type drainForbiddenClient struct {
+	client.Client
+}
+
+func (c *drainForbiddenClient) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: "", Resource: "pods"}, "",
+		errors.New(`pods is forbidden: User "system:serviceaccount:krateo-system:krateo-core-provider" cannot list resource "pods" in API group "" in the namespace "krateo-system"`))
+}
