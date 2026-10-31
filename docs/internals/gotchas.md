@@ -241,6 +241,13 @@ is a zero with extra steps.
 - **Distinguish "group absent" from "cluster unreachable".** A `get` against an unreachable cluster
   returns nothing and reads exactly like an estate with no compositions. Pair it with
   `kubectl get --raw /version`.
+- **Assert the instrument collected something, because the same zero arrives from your own
+  tooling.** On one run the shell lost its `PATH` mid-script — `python3`, `awk`, `sort` and `head`
+  all "command not found" — and the script printed `scope-map entries: 0`. Without the error lines
+  that reads as *this cluster serves no resources*, which is the unreachable-cluster trap arriving
+  from the audit script rather than from the cluster. A scope map built from a real cluster has
+  hundreds of entries (383 on one estate, 607 on another), so assert a floor on it and fail loudly;
+  an instrument that silently collects nothing otherwise reports a clean result.
 
 ### What the field means on older lines
 
