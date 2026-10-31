@@ -486,6 +486,29 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// state it is a no-op: no revision, no hooks. ResourceUpToDate reflects whether the cluster
 	// already matched the desired state; the digest below is computed for STATUS REPORTING only,
 	// not as an up-to-date gate.
+	// #276 defect 1. Re-check for a deletion IMMEDIATELY before the apply. The guard at the top of
+	// Observe is 252 lines upstream of this line, so a reconcile that passed it before a delete was
+	// issued would otherwise self-heal — re-creating the children helm is concurrently uninstalling,
+	// as orphans with no release annotation that nothing will ever remove.
+	//
+	// A FAILED RE-READ PROCEEDS, deliberately, and this is the opposite of the choice made in #270.
+	// There, "could not confirm the pod is gone" had to refuse, because the destructive act was
+	// revoking an identity. Here the destructive act would be HALTING every reconcile on a
+	// transient read error, which is the wedge shape #270 was about. Proceeding degrades to exactly
+	// the pre-#276 behaviour rather than to a new failure mode, and PR plumbing#60 makes any orphan
+	// it produces non-fatal.
+	if deleting, derr := isBeingDeleted(ctx, mg, updateOpts); derr != nil {
+		log.Debug("could not re-check the composition for deletion before the self-heal; proceeding",
+			"error", derr.Error())
+	} else if deleting {
+		log.Info("Composition was deleted while this reconcile was in flight; skipping the self-heal "+
+			"so it does not re-create children the uninstall is removing", "package", pkg.URL)
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: true,
+		}, nil
+	}
+
 	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
 		return hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
 			ActionConfig: &helmconfig.ActionConfig{
