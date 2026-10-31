@@ -51,11 +51,26 @@ const (
 // controller can legitimately interpret them (tier 1). Everything else is a custom resource whose
 // vocabulary belongs to whoever wrote the CRD.
 //
-// "" is core/v1; the *.k8s.io groups are the rest of the built-ins. A child in one of these that we
-// do not model (ConfigMap, Service, RBAC, CRD...) is not a GAP — those kinds carry no readiness at
-// all, so existence genuinely is health for them.
+// "" is core/v1 and the *.k8s.io groups are most of the rest, but NOT all of them: `apps`, `batch`,
+// `autoscaling`, `policy` and the legacy `extensions` are built-in and carry no suffix. Testing the
+// suffix alone therefore called them custom, and that was a latent false negative — it did not show
+// until #256 made unmodelled apps and batch kinds fall through to here, at which point they were
+// classified childUnevaluated instead of childHealthy.
+//
+// The distinction matters even though both roll up without affecting Ready: childUnevaluated is
+// COUNTED as a gap, and that count is the adoption signal for blueprint authors attaching a
+// RESTAction (#121). Counting a built-in Kubernetes kind as a gap tells an author to describe
+// readiness for a resource that has none, so the number stops meaning what it is read as meaning.
+//
+// A child in one of these groups that we do not model (ConfigMap, Service, RBAC, CRD,
+// ControllerRevision...) is not a gap — those kinds carry no readiness at all, so existence
+// genuinely is health for them.
 func isNativeGroup(group string) bool {
-	return group == "" || strings.HasSuffix(group, ".k8s.io")
+	switch group {
+	case "", "apps", "batch", "autoscaling", "policy", "extensions":
+		return true
+	}
+	return strings.HasSuffix(group, ".k8s.io")
 }
 
 // healthVerdict is the composition-level rollup of its managed children.
@@ -419,11 +434,26 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 	switch {
 	case strings.HasSuffix(group, "krateo.io"):
 		return krateoReady(obj) // Krateo CRs (incl. child Compositions/CompositionDefinitions)
-	case group == "apps":
+	// Dispatch on group AND KIND, never on group alone (#256). Dispatching on group alone is how the
+	// CronJob wedge happened: batch/v1 sent a CronJob to jobReady, where both branches are
+	// unreachable against its schema, so every CronJob returned childConverging forever and its
+	// parent sat Ready=False with it.
+	//
+	// The handlers below cannot detect that themselves, because they infer the kind from WHICH STATUS
+	// FIELDS HAPPEN TO BE PRESENT. workloadReady reads desiredNumberScheduled to spot a DaemonSet and
+	// otherwise assumes a Deployment-shaped object with spec.replicas defaulting to 1 — so any apps
+	// kind carrying neither (apps/v1 ControllerRevision has no status at all) scores desired=1,
+	// ready=0 and converges forever. Field-sniffing cannot distinguish "this kind has no readiness"
+	// from "this kind is not ready yet", which is the whole of #256.
+	//
+	// So an unmodelled kind in a modelled group must fall through to the native default below rather
+	// than be guessed at. That makes the NEXT such kind existence-is-health — fail-safe — instead of
+	// wedging its composition until somebody writes a case for it.
+	case group == "apps" && isWorkloadKind(obj.GetKind()):
 		return workloadReady(obj)
 	case group == "batch" && obj.GetKind() == "CronJob":
 		return cronJobReady(obj)
-	case group == "batch":
+	case group == "batch" && obj.GetKind() == "Job":
 		return jobReady(obj)
 	// core/v1 (group "") — only the two kinds that actually carry readiness. Everything else in the
 	// core group (ConfigMap, Secret, Service, ServiceAccount, ...) is config: it has no notion of
@@ -573,6 +603,27 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 // holds readyReplicas at 0 — is CONVERGING, never failed (it self-progresses), so the composition
 // stays Ready=False (Creating) until the workload actually serves rather than merely being applied
 // (krateo-core-provider#96).
+// isWorkloadKind lists the apps/v1 kinds whose readiness workloadReady actually models. The group's
+// remaining kind, ControllerRevision, carries no status and therefore no readiness — it falls
+// through to existence-is-health rather than being judged by a handler that would read its missing
+// replica counts as "0 of 1 ready".
+//
+// A list rather than a negation: a new apps kind should arrive as unmodelled-and-healthy, which is
+// recoverable, instead of as silently-converging, which wedges a composition. Adding a kind here is
+// a deliberate claim that workloadReady reads it correctly.
+func isWorkloadKind(kind string) bool {
+	switch kind {
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
+		return true
+	}
+	return false
+}
+
+// workloadReady classifies an apps/v1 workload by its replica counts. It is reached only for the
+// kinds isWorkloadKind admits, because it identifies the kind by WHICH STATUS FIELDS ARE PRESENT
+// rather than by the kind itself: a DaemonSet is recognised by status.desiredNumberScheduled, and
+// anything else is assumed Deployment-shaped. That inference is sound for the four kinds it models
+// and silently wrong for any other, which is why the caller gates it (#256).
 func workloadReady(obj *unstructured.Unstructured) childState {
 	// DaemonSet: readiness is per-node (desiredNumberScheduled vs numberReady); numberUnavailable>0
 	// means some node's pod is not ready (e.g. crashing).
