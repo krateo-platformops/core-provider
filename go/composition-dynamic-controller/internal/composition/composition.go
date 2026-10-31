@@ -680,6 +680,15 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
 		})
 	if err != nil {
+		// #265. Name whose fault this is. A blueprint referencing a kind the cluster does not serve
+		// is a 422 and resolves itself once the CRD exists; chart-inspector failing is a 5xx and is
+		// not the blueprint's problem. Both used to arrive folded into Synced's message as an
+		// indistinguishable 500. Best-effort: the condition is a report, so failing to write it
+		// must not replace the real error with a reporting error.
+		reason, message := chartRenderableFailure(err)
+		if cerr := setChartRenderableCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
+			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
+		}
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	rbInstaller := rbac.NewRBACInstaller(dyn)
@@ -1294,6 +1303,15 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
 		})
 	if err != nil {
+		// #265. Name whose fault this is. A blueprint referencing a kind the cluster does not serve
+		// is a 422 and resolves itself once the CRD exists; chart-inspector failing is a 5xx and is
+		// not the blueprint's problem. Both used to arrive folded into Synced's message as an
+		// indistinguishable 500. Best-effort: the condition is a report, so failing to write it
+		// must not replace the real error with a reporting error.
+		reason, message := chartRenderableFailure(err)
+		if cerr := setChartRenderableCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
+			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
+		}
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 
