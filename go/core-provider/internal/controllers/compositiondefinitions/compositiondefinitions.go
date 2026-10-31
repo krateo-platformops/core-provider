@@ -1067,6 +1067,40 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
 
+	// #269. Available must mean "the API answers", not "I wrote a CRD". Everything above this point
+	// is satisfied by a CRD the apiserver has merely ACCEPTED: RefreshCompositionDefinitionStatus
+	// reads crd.Spec.Group and crd.Spec.Names.Kind, which exist from the moment the object is
+	// admitted, so nothing already on this path can tell an accepted CRD from a served one.
+	//
+	// That matters because docs/api.md tells consumers to read status.apiVersion / status.kind /
+	// status.resource rather than derive them. Those fields were correct before this change and the
+	// API they name could still 404 — correct fields pointing at an endpoint that does not answer
+	// yet, which is the worst shape for a consumer gating on readiness.
+	//
+	// Creating, NOT Unavailable: an accepted CRD becomes Established on its own within
+	// milliseconds, so this is converging rather than failed. It matches the vocabulary the
+	// Composition rollup already uses, where workloadReady deliberately caps an unready workload at
+	// converging and never returns failed because it self-progresses.
+	//
+	// The window is normally very short, which is the argument FOR gating rather than against: a
+	// defect that fires rarely and silently gets diagnosed as something else. It widens with a
+	// conversion webhook, a slow apiserver, or names that fail NamesAccepted — where Established may
+	// never arrive at all and the old code would have reported Available indefinitely.
+	//
+	// crdclient.Get above is a live read (kube.Get against the apiserver), so Status.Conditions is
+	// populated here. Gating on a GENERATED crd would wedge every definition at Creating forever.
+	if !crdclient.IsReady(crd) {
+		log.Debug("CRD accepted but not yet Established", "gvr", gvr.String())
+		cr.SetConditions(rtv1.Creating().
+			WithMessage(fmt.Sprintf("crd for '%s' is accepted but not yet Established", gvr.String())))
+		// Still up-to-date: there is nothing to DO about this, and returning false would dispatch an
+		// Update that cannot help and would run again on every resync until the apiserver catches up.
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: true,
+		}, nil
+	}
+
 	cr.SetConditions(rtv1.Available())
 
 	return reconciler.ExternalObservation{
