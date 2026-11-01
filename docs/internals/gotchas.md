@@ -286,6 +286,20 @@ true  <- y  yes  on   true        two keys from ONE bucket = a key is destroyed
 false <- n  no   off  false       one from each = both keys survive, both renamed
 ```
 
+Verified independently by the `frontend` session across the full matrix, including a neutral control:
+
+```
+y + on       1 key of 2   {"true": "beta"}                   alpha destroyed
+yes + true   1 key of 2   {"true": "beta"}                   alpha destroyed  (same bucket,
+                                                             different spellings)
+y + n        2 keys of 2  {"true":"alpha","false":"beta"}     renamed only
+on + off     2 keys of 2                                     renamed only
+x + z        2 keys       unchanged                          CONTROL — not boolean-ish
+```
+
+`yes + true` is the case worth noticing: the two keys share no characters and still collide, because
+the bucket is about *resolved value* rather than spelling.
+
 Both parsers this repository pins behave this way, so there is no "we are on the newer library"
 escape: `gopkg.in/yaml.v2 v2.4.0` and `sigs.k8s.io/yaml v1.6.0` both resolve 1.1. They differ in
 *scope* — `sigs.k8s.io/yaml` converts keys because it round-trips through JSON, while
