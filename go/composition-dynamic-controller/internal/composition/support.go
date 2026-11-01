@@ -171,6 +171,24 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		setManagedResources(mg, managed)
 		logManagedSetChange(ctx, previous, mg)
 
+		// #230. Persist what the count WAS, because the Ready message has to keep saying so after the
+		// reconcile that noticed. This is history, not a consistency check — #273's digest stamp
+		// cannot help here, since during a legitimate mid-bump shrink `managed` accurately describes
+		// the current release and nothing is inconsistent.
+		//
+		// It MUST be stored rather than computed. Observe stamps the Ready message on every reconcile
+		// and passes recordManaged: false, so it has no `previous` of its own: a caveat composed only
+		// here would survive exactly one reconcile and then be overwritten by the next Observe. That
+		// is precisely how #121's coverage caveat shipped unreachable — computed every time and
+		// discarded every time.
+		//
+		// Needs no reset, unlike a high-water mark: it is overwritten by the next Update, so a chart
+		// that legitimately renders fewer children forever stops carrying the caveat as soon as one
+		// render agrees with the one before it.
+		if err := maps.SetNestedField(mg.Object, int64(len(previous)), "status", "previousManagedCount"); err != nil {
+			return fmt.Errorf("setting previous managed count in status: %w", err)
+		}
+
 		// #273. Stamp the inventory with the digest of the release it was decoded from. Both callers
 		// that set recordManaged take `resources` and `digest` from the SAME DecodeMinRelease call
 		// (composition.go:809 in Create, :1013 in Update), so this is that release's digest and not
@@ -303,6 +321,17 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 
 	if opts.absentChildren != nil {
 		*opts.absentChildren = v.absent
+	}
+
+	// #230. Set once here rather than on each of the rollup's four return paths: those differ in
+	// which children they name, not in how many the inventory used to list, and a field that has to
+	// be remembered at four sites is a field that will be missed at one.
+	//
+	// Read AFTER the recordManaged branch above, which is what wrote it — so on a recording reconcile
+	// this is the count before the render that just replaced it, and on an Observe (recordManaged
+	// false) it is whatever the last Update stored. Both are the comparison the caveat wants.
+	if prev, found, err := unstructured.NestedInt64(mg.Object, "status", "previousManagedCount"); err == nil && found {
+		v.previousTotal = int(prev)
 	}
 
 	return stampReady(mg, resolveReady(readProjectedHealth(mg), opts.message, v), opts.force)
