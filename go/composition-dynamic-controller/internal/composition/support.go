@@ -67,6 +67,26 @@ func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool)
 	return setReadyCondition(mg, condition.Available(), message, force)
 }
 
+// setAvailablePartialCoverageStatus stamps Ready=TRUE with reason AvailablePartialCoverage: the
+// composition is available, and the rollup assessed a MINORITY of the children it names.
+//
+// Status stays True for the same reason childUnevaluated rolls up as healthy — those children are
+// unevaluated, not unhealthy, and flipping the verdict would hold a working composition back for as
+// long as its widgets publish no conditions, which is indefinitely (#72). Only the reason moves, so
+// a gate or dashboard can distinguish the two without parsing the message's prose.
+func setAvailablePartialCoverageStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, availablePartialCoverageCondition(), message, force)
+}
+
+// availablePartialCoverageCondition is Available's condition with a different reason. Built here
+// rather than in internal/condition because the distinction is this rollup's, not the shared
+// vocabulary's — nothing outside the child-health rollup can produce it.
+func availablePartialCoverageCondition() metav1.Condition {
+	c := condition.Available()
+	c.Reason = ReasonAvailablePartialCoverage
+	return c
+}
+
 // Also Type=Ready (reason ReconcileGracefullyPaused), so it could hold the same contradiction.
 func setGracefullyPausedCondition(mg *unstructured.Unstructured, force bool) error {
 	return setReadyCondition(mg, compositionCondition.ReconcileGracefullyPaused(), "Composition is gracefully paused.", force)
@@ -357,6 +377,18 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setZeroEvidenceStatus(mg, out.message, force)
 	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
+	case ReasonAvailablePartialCoverage:
+		// Available with a different REASON, so a machine can tell Ready=True-over-most from
+		// Ready=True-over-a-minority. Same Status=True and the same stamping call: the unevaluated
+		// children are not unhealthy, and reporting them not-ready would hold a working composition
+		// back for as long as its widgets publish no conditions, which is indefinitely (#72).
+		//
+		// This case EXISTS because the error arm below caught its absence. I added the reason in
+		// resolveReady and my tests passed — they exercise availableReason and resolveReady and stop
+		// one function short of here, so every composition with majority-unevaluated children would
+		// have failed its status write with "unknown ready reason" and wedged. The guard is doing
+		// precisely the job its comment claims, on the next person to add a reason, who was me.
+		return setAvailablePartialCoverageStatus(mg, out.message, force)
 	}
 	// Available is an EXPLICIT case above and this is an error, not a fallback. The arm used to be
 	// `default: setAvaibleStatus`, which meant a reason added to resolveReady without a case here

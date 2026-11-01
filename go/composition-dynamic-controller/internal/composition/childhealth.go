@@ -418,8 +418,49 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 	}
 	// Both caveats, innermost first: the shrink is about the SET, the coverage gap is about our
 	// reading of it, and a composition mid-bump can honestly have both.
-	return readyOutcome{reason: "Available",
+	return readyOutcome{reason: availableReason(v.unevaluated, v.total),
 		message: withUnevaluated(withShrunkSet(msg, v.total, v.previousTotal), v.unevaluated, v.total)}
+}
+
+// ReasonAvailablePartialCoverage is Available where the rollup assessed a MINORITY of the children
+// it names. Still Ready=True — those children are unevaluated, not unhealthy — but the claim covers
+// less than half of what it is about, which is a different statement from Available.
+const ReasonAvailablePartialCoverage = "AvailablePartialCoverage"
+
+// availableReason distinguishes "I assessed most of this composition" from "I assessed a minority of
+// it", because Ready=True means materially different things in the two cases and nothing a machine
+// reads could previously tell them apart.
+//
+// The coverage gap is deliberate and documented (#121 tier 1): the rollup declines to invent a
+// verdict for a kind whose readiness semantics it does not own, and tier 2 — a health RESTAction on
+// the CompositionDefinition — is how a blueprint author supplies one. Adoption of tier 2 is 0 of 44.
+//
+// What was missing is not the information but its LOCATION. The count has been in the condition
+// MESSAGE since #121, and a message is prose: a dependency gate, a dashboard and a post-roll check
+// all read the reason and none of them parse English. So the gap was invisible to everything that
+// acts on it, which is why nobody noticed how large it had become. Measured by the installer
+// session, first quantification:
+//
+//	krateo-057  (2.13.46)  30 of 85 compositions, 396 of 725 children unevaluated  55%
+//	day2        (2.13.51)  16 of 37 compositions, 631 of 790 children unevaluated  80%
+//	worst: PortalAgents/portal-agents  118 of 121 unevaluated, Ready=True  97.5%
+//
+// Every portal Page composition is a widget container, and widgets publish `status: {}` — measured,
+// 97 flexes / 139 cards / 52 buttons with ZERO conditions between them, against 152 of 152
+// Deployments carrying them. So those children are not skipped by kind: krateoReady reads them and
+// finds nothing to read. That is the honest reason they are unevaluated, and it is also why they
+// could be fixed at the source — a widget that published a Ready condition would be assessed.
+//
+// THE MAJORITY LINE IS THE THRESHOLD, and it is chosen to be principled rather than tuned. Ready=True
+// asserts health about the children a composition names; once most of them were not assessed, the
+// assertion is about a minority of its own subject. That is a qualitative change, not a matter of
+// degree, so it does not need a percentage anyone has to defend. A composition with 1 of 121
+// unevaluated stays plain Available, which is right — the claim still covers what it is about.
+func availableReason(unevaluated, total int) string {
+	if total > 0 && unevaluated*2 > total {
+		return ReasonAvailablePartialCoverage
+	}
+	return "Available"
 }
 
 // childHealth GETs one managed child (as the controller SA) and classifies it. Any read it cannot
