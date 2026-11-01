@@ -114,6 +114,37 @@ func (r *RBACInstaller) ApplyNamespace(ctx context.Context, namespace *corev1.Na
 		return nil, fmt.Errorf("failed to convert unstructured to Namespace: %w", err)
 	}
 
+	// NEVER TAKE OWNERSHIP FROM ANOTHER MANAGER (#294, second attempt).
+	//
+	// CreateNamespace stamps `app.kubernetes.io/managed-by: Helm` plus meta.helm.sh/* so that HELM
+	// WILL ADOPT a namespace we are about to have it manage. On a namespace somebody else already
+	// owns, writing that is not a merge — it is a claim, and it overwrites the label that records
+	// the real owner.
+	//
+	// A Kyverno-generated tenant namespace carries `managed-by: kyverno`. Our loop below writes our
+	// value wherever it differs, so it changed kyverno -> Helm, and Kyverno 1.19.2's
+	// protect-generation-labels webhook denied it: "Kyverno generate labels can only be set by
+	// Kyverno". Every tenant onboarded after that upgrade failed its RBAC install, 136 identical
+	// attempts in 22 minutes on one.
+	//
+	// MY FIRST FIX WAS WRONG AND SHIPPED. I changed the full PUT to a merge patch on the theory that
+	// the request body was what the webhook objected to. ADMISSION WEBHOOKS RECEIVE THE RESULTING
+	// OBJECT, NOT THE PATCH BODY — the apiserver applies the patch before admission runs — so the
+	// request shape was never the variable, and the patch still carried managed-by: Helm anyway. The
+	// re-test on 2.13.53 failed identically.
+	//
+	// So: if the namespace exists and declares a different manager, leave it entirely alone. We did
+	// not create it and Helm has nothing to adopt.
+	//
+	// Deliberately keyed on a DIFFERENT manager rather than on Kyverno specifically: the next
+	// controller to own a namespace we touch will not be Kyverno, and a Kyverno-shaped check would
+	// have to be written again. A namespace with NO manager is still merged into, because claiming
+	// an unowned namespace takes it from nobody.
+	if owner := existing.Labels["app.kubernetes.io/managed-by"]; owner != "" &&
+		owner != namespace.Labels["app.kubernetes.io/managed-by"] {
+		return existing, nil
+	}
+
 	modified := false
 	if len(namespace.Labels) > 0 && existing.Labels == nil {
 		existing.Labels = map[string]string{}
