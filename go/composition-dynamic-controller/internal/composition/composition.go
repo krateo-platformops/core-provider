@@ -561,8 +561,24 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// which is why 62,783 revisions on git-provider went unnoticed for 28 days. A self-heal is
 		// a real event about the cluster, not controller noise, and it is bounded by how often
 		// children actually drift rather than by the reconcile cadence.
+		// The COUNTS alone left #175 half-answered: "patched=1" a hundred times an hour says that a
+		// child drifted and gives no way to reach which one. Establishing that for one real case
+		// took a differential across five compositions — comparing child kinds, revision rates from
+		// secret timestamps, and rendered-versus-live specs — to find that three of them render a
+		// Config Connector ComputeInstance whose state-into-spec: merge writes GCP state back into
+		// the spec helm owns. changedObjects names that child on the first line instead.
+		//
+		// Added to THIS line rather than a new one, and at Info rather than Debug, for the reason
+		// the comment above gives: detail at Debug is invisible on every cluster that runs at Info,
+		// which is the defect, not the fix for it. No new call site and no new rate — the line is
+		// already gated on Changed, the same gate that decides whether a revision is written.
+		//
+		// Bounded by the cap in plumbing (ten identities plus an omitted count). Measured worst
+		// case in the fleet: steady-state drift is ONE child, so ~108 bytes per line at 120
+		// lines/hour.
 		log.Info("Composition drift detected and self-healed", "package", pkg.URL,
-			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated)
+			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated,
+			"changedObjects", reconcileRes.ChangedObjects, "changedObjectsOmitted", reconcileRes.ChangedObjectsOmitted)
 		return controller.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
