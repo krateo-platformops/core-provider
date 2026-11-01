@@ -92,6 +92,13 @@ type healthVerdict struct {
 	// total is len(status.managed), kept so the unevaluated caveat can be composed by resolveReady
 	// rather than baked into the rollup's own message — which resolveReady discards.
 	total int
+	// previousTotal is status.previousManagedCount: how many children the inventory listed BEFORE
+	// the last render replaced it. Zero when never recorded.
+	//
+	// Kept here for the same reason as total — so the shrink caveat is composed by resolveReady,
+	// which is the only place a message survives (#230). Read from status rather than compared
+	// in-flight because Observe stamps the message on every reconcile and has no `previous`.
+	previousTotal int
 }
 
 // rollupManagedChildren GETs each child listed in status.managed and rolls their health into one
@@ -277,6 +284,27 @@ func withUnevaluated(base string, unevaluated, total int) string {
 	return fmt.Sprintf("%s (%d of %d managed children not health-evaluated)", base, unevaluated, total)
 }
 
+// withShrunkSet appends the denominator to the message when the inventory lists FEWER children than
+// it did before the last render (#230).
+//
+// `Ready=True` asserts "what I render is healthy". A reader takes it to mean "the composition is
+// complete", and those differ exactly during a multi-component version bump — which is the moment
+// anyone is watching. 122 -> 108 -> 122 is indistinguishable from 122 -> 122 in the condition, and a
+// post-roll gate read five minutes in reported 14 of 17 components as DISAPPEARED when they were
+// simply in the prune window. The reporter nearly escalated a 14-component outage that did not exist.
+//
+// Like withUnevaluated this APPENDS and changes no verdict. It is a statement about the set the
+// rollup examined, not a competing claim about health, and a human who reads it waits instead of
+// escalating. It deliberately does NOT protect an automated gate: `inst.depsReady` keys on the
+// condition and never reads messages. That remains open as a verdict change, which is a decision on
+// a hot path and not something to slip into a message fix.
+func withShrunkSet(base string, total, previousTotal int) string {
+	if previousTotal <= total {
+		return base
+	}
+	return fmt.Sprintf("%s (%d of %d previously-managed children rendered)", base, total, previousTotal)
+}
+
 // readyOutcome is the final Ready decision: a reason ("Available" | "Creating" | "Unavailable" |
 // "ZeroEvidence") and the message to stamp.
 type readyOutcome struct {
@@ -388,7 +416,10 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 	if p.present && p.message != "" {
 		msg = p.message
 	}
-	return readyOutcome{reason: "Available", message: withUnevaluated(msg, v.unevaluated, v.total)}
+	// Both caveats, innermost first: the shrink is about the SET, the coverage gap is about our
+	// reading of it, and a composition mid-bump can honestly have both.
+	return readyOutcome{reason: "Available",
+		message: withUnevaluated(withShrunkSet(msg, v.total, v.previousTotal), v.unevaluated, v.total)}
 }
 
 // childHealth GETs one managed child (as the controller SA) and classifies it. Any read it cannot
