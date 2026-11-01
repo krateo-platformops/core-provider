@@ -256,6 +256,70 @@ entries across 188 compositions) has **zero** entries carrying one, because the 
 already resolved at the source and there was no path to get wrong. Exposure to a malformed path
 scales with **versions that emit `path`**, not with blueprint count.
 
+## A chart whose rendered manifest has two boolean-ish keys in one mapping LOSES one of them
+
+YAML 1.1 resolves `y`, `yes`, `on`, `true` to `true` and `n`, `no`, `off`, `false` to `false` — for
+**map keys** as well as values. The conversion to JSON then turns the key into the string `"true"` or
+`"false"`, so two keys from the same truth bucket become **one key**, and one value is destroyed with
+no error anywhere.
+
+Measured through `kubectl v1.36.2` (`create --dry-run=client -o json`, which is the same
+YAML-to-JSON path Helm's `kube.Client.Build` uses, so it is also what happens when the cdc applies a
+rendered manifest):
+
+```
+data:                      ->   "data": {"true": "beta"}
+  y: alpha                        1 key out of 2 in; "alpha" is GONE
+  on: beta
+
+data:                      ->   "data": {"true": "alpha", "false": "beta"}
+  y: alpha                        2 keys out of 2 — both survive, RENAMED only
+  n: beta
+```
+
+**The second case is the control and it is why the rule is narrower than it first looks.** Two
+boolean-ish keys are not enough: they must resolve to the *same* boolean. `y` with `n` is a renaming
+problem; `y` with `on` is data loss.
+
+```
+true  <- y  yes  on   true        two keys from ONE bucket = a key is destroyed
+false <- n  no   off  false       one from each = both keys survive, both renamed
+```
+
+Verified independently by the `frontend` session across the full matrix, including a neutral control:
+
+```
+y + on       1 key of 2   {"true": "beta"}                   alpha destroyed
+yes + true   1 key of 2   {"true": "beta"}                   alpha destroyed  (same bucket,
+                                                             different spellings)
+y + n        2 keys of 2  {"true":"alpha","false":"beta"}     renamed only
+on + off     2 keys of 2                                     renamed only
+x + z        2 keys       unchanged                          CONTROL — not boolean-ish
+```
+
+`yes + true` is the case worth noticing: the two keys share no characters and still collide, because
+the bucket is about *resolved value* rather than spelling.
+
+Both parsers this repository pins behave this way, so there is no "we are on the newer library"
+escape: `gopkg.in/yaml.v2 v2.4.0` and `sigs.k8s.io/yaml v1.6.0` both resolve 1.1. They differ in
+*scope* — `sigs.k8s.io/yaml` converts keys because it round-trips through JSON, while
+`gopkg.in/yaml.v2` converts only values and leaves keys as keys.
+
+**The remedy is quoting**, and it is verified rather than assumed: with `"y"` and `"on"` quoted, all
+keys survive unchanged. Chart authors writing axis keys (`x`/`y`, exactly how `@ant-design/plots`
+config is written) or short flags are the realistic exposure.
+
+Not a defect in this component — it is the behaviour of the YAML-to-JSON conversion that kubectl and
+Helm share — but core-provider is what renders and applies those charts, so a reader here is who
+needs to know. A lint for it is proposed in `krateo-platformops/frontend#575`; the finding is the
+`frontend` session's, measured first through `js-yaml` (which is YAML **1.2** and does none of this)
+against `kubectl` (1.1), and corroborated from the library end here.
+
+Two framings worth keeping because each sends the reader to the wrong place: the **apiserver is not
+the 1.1 component** (the API is JSON over HTTP and never parses YAML — kubectl and Helm convert
+client-side), and **no upgrade caused this** (`js-yaml` has been 1.2 since v4, so the split has been
+live the whole time).
+
 ## Changing statusDataTemplate / apiRef re-renders the CDC (digest churn)
 
 The encoded `statusDataTemplate`, the `apiRef`, the projected-token volume, the
