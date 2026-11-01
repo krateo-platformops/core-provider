@@ -1,8 +1,10 @@
 package generation
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/itchyny/gojq"
@@ -23,14 +25,22 @@ type StatusField struct {
 
 // reservedStatusFields are the baseline status properties the controller owns. A declared
 // forPath must not collide with these on its top segment.
+// Every entry here must also be declared in statics/status.schema.json, and vice versa: this list
+// stops a blueprint colliding with a baseline field, while the schema is what makes the baseline
+// field survive a write at all. A field in one and not the other is a silent defect in whichever
+// direction it is missing — out of the schema, the apiserver prunes the controller's own write
+// (#293, and observedGeneration before it); out of this list, a blueprint can declare a forPath
+// that the controller then overwrites. TestReservedStatusFieldsMatchSchema asserts the two agree.
 var reservedStatusFields = map[string]struct{}{
-	"helmChartUrl":       {},
-	"helmChartVersion":   {},
-	"digest":             {},
-	"previousDigest":     {},
-	"managed":            {},
-	"conditions":         {},
-	"observedGeneration": {},
+	"helmChartUrl":         {},
+	"helmChartVersion":     {},
+	"digest":               {},
+	"previousDigest":       {},
+	"managed":              {},
+	"managedDigest":        {},
+	"previousManagedCount": {},
+	"conditions":           {},
+	"observedGeneration":   {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision
@@ -146,4 +156,32 @@ func leafSchema(f StatusField) apiextensionsv1.JSONSchemaProps {
 		return apiextensionsv1.JSONSchemaProps{Type: f.Type}
 	}
 	return apiextensionsv1.JSONSchemaProps{Type: "string"}
+}
+
+// BaselineStatusProperties returns the status property names the baseline schema declares — the
+// fields the CONTROLLER owns, as opposed to a blueprint's statusDataTemplate declarations.
+//
+// Exported so a test can assert the two hand-maintained lists agree: a field the cdc writes but
+// this schema does not declare is PRUNED by the apiserver on every write, silently (#293, and
+// observedGeneration before it). Nothing else makes them agree.
+func BaselineStatusProperties() ([]string, error) {
+	var doc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(statusJsonSchema), &doc); err != nil {
+		return nil, fmt.Errorf("parsing the baseline status schema: %w", err)
+	}
+	names := make([]string, 0, len(doc.Properties))
+	for n := range doc.Properties {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// IsReservedStatusField reports whether name is a controller-owned baseline status field, i.e. one
+// a blueprint's statusDataTemplate forPath must not collide with.
+func IsReservedStatusField(name string) bool {
+	_, ok := reservedStatusFields[name]
+	return ok
 }
