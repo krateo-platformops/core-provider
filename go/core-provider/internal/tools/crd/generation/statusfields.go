@@ -30,7 +30,13 @@ type StatusField struct {
 // field survive a write at all. A field in one and not the other is a silent defect in whichever
 // direction it is missing — out of the schema, the apiserver prunes the controller's own write
 // (#293, and observedGeneration before it); out of this list, a blueprint can declare a forPath
-// that the controller then overwrites. TestReservedStatusFieldsMatchSchema asserts the two agree.
+// that the controller then overwrites.
+//
+// TestBaselineStatusWritesAreAllReserved (internal/tools/crd) asserts the agreement, in all three
+// directions. An earlier version of this comment cited "TestReservedStatusFieldsMatchSchema", which
+// has never existed in this repo — and the arm it described, reserved -> schema, was in fact the one
+// missing. A mutant (remove a field from the schema, leave it reserved) survived the whole package.
+// Name a test only if you have just run it.
 var reservedStatusFields = map[string]struct{}{
 	"helmChartUrl":         {},
 	"helmChartVersion":     {},
@@ -39,6 +45,7 @@ var reservedStatusFields = map[string]struct{}{
 	"managed":              {},
 	"managedDigest":        {},
 	"previousManagedCount": {},
+	"lastReconcileTime":    {},
 	"conditions":           {},
 	"observedGeneration":   {},
 }
@@ -184,4 +191,21 @@ func BaselineStatusProperties() ([]string, error) {
 func IsReservedStatusField(name string) bool {
 	_, ok := reservedStatusFields[name]
 	return ok
+}
+
+// ReservedStatusFieldNames returns every reserved field name, sorted.
+//
+// Exported so a test can assert that each reserved field is DECLARED in statics/status.schema.json.
+// IsReservedStatusField answers "is this one of them" and cannot enumerate, so without this the
+// agreement test would need its own copy of the list — a fourth hand-maintained list, which is the
+// problem rather than a check on it. An undeclared reserved field means the apiserver prunes the
+// controller's own write (#293, #273), and that arm went unasserted while a comment here claimed
+// otherwise.
+func ReservedStatusFieldNames() []string {
+	names := make([]string, 0, len(reservedStatusFields))
+	for n := range reservedStatusFields {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
