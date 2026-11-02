@@ -25,6 +25,7 @@ func baselineStatusWrites() map[string]any {
 		"helmChartUrl":         "oci://ghcr.io/krateo-platformops/charts/demo",
 		"helmChartVersion":     "1.2.3",
 		"observedGeneration":   int64(4),
+		"lastReconcileTime":    "2026-11-01T12:00:00Z", // #298 — the replacement liveness signal
 	}
 }
 
@@ -62,6 +63,34 @@ func TestBaselineStatusWritesAreAllReserved(t *testing.T) {
 		if _, ok := declaredSet[path]; !ok {
 			t.Errorf("the cdc writes status.%s but the baseline schema does not declare it — "+
 				"the apiserver will prune it (#293)", path)
+		}
+	}
+
+	// THE THIRD ARM, and it was missing while a comment claimed it existed.
+	//
+	// There are THREE hand-maintained lists that must agree: statics/status.schema.json,
+	// reservedStatusFields, and baselineStatusWrites above. The arms above cover
+	// schema->reserved and writes->schema. NOTHING covered reserved->schema, so a field could sit
+	// in reservedStatusFields and be absent from the schema — the apiserver would prune the
+	// controller's own write, which is #293 exactly.
+	//
+	// Proved by mutation, not by inspection: removing lastReconcileTime from the schema while
+	// leaving it in reservedStatusFields passed the whole file. The surviving mutant is the only
+	// reason this arm exists.
+	//
+	// And statusfields.go claimed `TestReservedStatusFieldsMatchSchema asserts the two agree` —
+	// a test of that name has never existed in this repo (1 occurrence, in that comment; control:
+	// the two tests that DO exist are each found by the same search). A comment citing a test by
+	// name is worth less than the test, and reads as stronger.
+	for _, name := range crdutils.ReservedStatusFieldNames() {
+		if name == "conditions" {
+			// The documented exception: crdgen emits conditions from the Go type rather than from
+			// statics/status.schema.json, so it is legitimately reserved-but-not-declared.
+			continue
+		}
+		if _, ok := declaredSet[name]; !ok {
+			t.Errorf("status.%s is in reservedStatusFields but the baseline schema does not declare "+
+				"it — the apiserver will PRUNE the controller's own write of it (#293, #273)", name)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
@@ -244,6 +245,30 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		return fmt.Errorf("setting chart version in status: %w", err)
 	}
 
+	// status.lastReconcileTime — the LIVENESS signal, written on EVERY reconcile whether or not
+	// anything changed (#298).
+	//
+	// It replaces an accidental one. The Ready condition's LastTransitionTime used to advance every
+	// reconcile, which operators read as freshness — but it moved for a DEFECTIVE reason: Observe,
+	// Create and Update supplied three different messages for one Available state, so
+	// setReadyCondition's `cur.Message == message` guard could never fire while the phases
+	// alternated. Unifying the message (readyMessageAvailable) makes that timestamp honest, and
+	// honest means STILL — it now moves only when readiness actually changes. This field is what
+	// `kubectl get` can still show to answer "is the controller alive".
+	//
+	// UNCONDITIONAL on purpose, and it is free: every caller of setStatus follows it with an
+	// unconditional updateStatusWithRetry (composition.go:617 in Observe, :882 in Create, :1106 in
+	// Update), so the status subresource is already written once per reconcile. This adds a field to
+	// a request that was happening anyway, not a request.
+	//
+	// It is a change signal for NOTHING: do not gate anything on it, and do not diff it. Two
+	// controllers writing one field is how #273's oscillation started, and a field that changes
+	// every reconcile would make any content-comparison a permanent false positive.
+	err = maps.SetNestedField(mg.Object, time.Now().UTC().Format(time.RFC3339), "status", "lastReconcileTime")
+	if err != nil {
+		return fmt.Errorf("setting last reconcile time in status: %w", err)
+	}
+
 	// Project the declarative status fields (statusDataTemplate) and observedGeneration.
 	// Built-in sources self/spec/status come from mg; helm is built here. Projection is
 	// degrade-only: a bad mapping affects just its field, never the baseline status.
@@ -332,7 +357,21 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Unstructured, opts *statusManagerOpts) error {
 	// Default the rollup to healthy so a missing/unusable client never regresses a working
 	// composition (fail-safe toward Available).
-	v := healthVerdict{ready: true, reason: "Available", message: opts.message}
+	//
+	// THE MESSAGE IS THE CONSTANT, NOT opts.message, AND THAT IS STRUCTURAL (#298). The Available
+	// state's message is a property of the state, so it is fixed here at the single funnel every
+	// phase passes through — rather than supplied by each caller, which is how Observe, Create and
+	// Update came to send three different strings for one state and defeat setReadyCondition's
+	// message guard on every reconcile.
+	//
+	// opts.message is still honoured for ConditionTypeCreating and ConditionTypeUnavailable
+	// (support.go switch, above), where a phase-specific message is genuinely informative. Deleting
+	// the field outright would have conflated those paths with this one.
+	//
+	// The point of putting it here rather than at the three call sites: a call site can drift back
+	// and no unit test would see it, because the testable seam is below this line. Now there is
+	// nothing to drift.
+	v := healthVerdict{ready: true, reason: "Available", message: readyMessageAvailable}
 	if h.kubeconfig != nil {
 		if dyn, err := dynamicclient.NewForConfig(h.kubeconfig); err == nil {
 			v = h.rollupManagedChildren(ctx, dyn, mg)
@@ -354,7 +393,10 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 		v.previousTotal = int(prev)
 	}
 
-	return stampReady(mg, resolveReady(readProjectedHealth(mg), opts.message, v), opts.force)
+	// readyMessageAvailable, not opts.message — same reason as the verdict above. This is the
+	// defaultMsg resolveReady falls back to for the Available arm, so a per-phase string here would
+	// reach the condition even with the verdict fixed.
+	return stampReady(mg, resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), opts.force)
 }
 
 // stampReady writes the Ready condition a readyOutcome calls for.

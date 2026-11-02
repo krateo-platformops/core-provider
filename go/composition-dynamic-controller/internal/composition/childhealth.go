@@ -133,7 +133,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		// It is only distinguishable from the absent case because setStatus now records an empty
 		// render explicitly (#248). Before that, `managed: []` was never written and this branch
 		// was unreachable.
-		return healthVerdict{ready: true, reason: "Available", message: "Composition is up-to-date"}
+		return healthVerdict{ready: true, reason: "Available", message: readyMessageAvailable}
 	}
 	if !found {
 		// NO RECORDED CHILDREN IS NOT EVIDENCE OF HEALTH (#248). This branch used to return
@@ -409,9 +409,21 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 		}
 		return readyOutcome{reason: "ZeroEvidence", message: v.message}
 	}
-	// Available. The base is the phase message the caller supplied ("Composition is up-to-date",
-	// "Composition values updated"), or the author's projected message when they wrote one — NOT
-	// v.message, which hardcodes "Composition is up-to-date" and would overwrite the phase.
+	// Available. The base is the caller's message, or the author's projected message when they
+	// wrote one.
+	//
+	// THE PHASE NO LONGER VARIES THIS, AND THAT IS THE POINT (#298). Observe, Create and Update used
+	// to supply three different strings for one Available state — "Composition is up-to-date",
+	// "Composition created", "Composition values updated". setReadyCondition's guard is
+	// `cur.Message == message && cur.Status == cond.Status`, so whenever the phases alternated the
+	// message differed every time, the guard could never fire, and the condition was rewritten with a
+	// fresh LastTransitionTime on every reconcile. The timestamp then claimed the composition had
+	// just become ready when it had been ready for hours — provably so: a sibling's pods were Ready
+	// ten minutes before one such condition's own timestamp.
+	//
+	// A condition's message describes the STATE; the phase that happened to observe it is not part
+	// of the state. Which phase ran is already recorded in events and logs, and freshness now has
+	// its own field (status.lastReconcileTime), so nothing is lost by making this stable.
 	msg := defaultMsg
 	if p.present && p.message != "" {
 		msg = p.message
@@ -421,6 +433,20 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 	return readyOutcome{reason: availableReason(v.unevaluated, v.total),
 		message: withUnevaluated(withShrunkSet(msg, v.total, v.previousTotal), v.unevaluated, v.total)}
 }
+
+// readyMessageAvailable is the ONE message for the Available state, shared by Observe, Create and
+// Update.
+//
+// It is a constant rather than three literals because setReadyCondition's idempotency guard compares
+// MESSAGES: `cur.Message == message && cur.Status == cond.Status`. Three per-phase strings meant the
+// guard could never fire while the phases alternated, so the condition — and its LastTransitionTime —
+// was rewritten on every single reconcile (#298). A guard keyed on a value that the caller varies is
+// not a guard.
+//
+// If you are tempted to add a phase-specific message back: the information you want is in the events
+// and the logs, and per-reconcile freshness is in status.lastReconcileTime. A condition message that
+// changes without the condition changing destroys the only thing LastTransitionTime is for.
+const readyMessageAvailable = "Composition is up-to-date"
 
 // ReasonAvailablePartialCoverage is Available where the rollup assessed a MINORITY of the children
 // it names. Still Ready=True — those children are unevaluated, not unhealthy — but the claim covers
