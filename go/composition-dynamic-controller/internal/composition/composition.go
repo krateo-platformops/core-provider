@@ -273,12 +273,29 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// v1.7.0). The handler never writes status, which is what makes the "Observe is a pure
 		// read" rule above structural rather than a request.
 		//
-		// Status True: a pause is a deliberate operator action, not a failure, and keeping it True
-		// means readiness-gating consumers are unaffected by someone pausing a composition.
+		// BOTH HALVES, because readiness and liveness are different axes (#241).
+		//
+		// Ready stays TRUE: a pause is a deliberate operator action, not a failure, so every
+		// readiness-gating consumer is unaffected by someone pausing a composition.
+		//
+		// Synced goes FALSE: nothing is converging this, and a `deps:` edge means "wait until
+		// converged". That is what #241 was asking for, and it is the shape the runtime's own
+		// annotation pause already uses — Synced=False/ReconcilePaused plus
+		// Ready=True/ReconcilePausedReady. Setting only the Ready half left two pause mechanisms
+		// reporting differently for no reason anyone chose.
+		//
+		// The Synced half only holds on unstructured-runtime with the handler-condition fix
+		// (runtime #41). Before it, the runtime stamped ReconcileSuccess (Synced=True) over
+		// whatever the handler returned on the up-to-date path — which is the path this return
+		// takes — so this condition would have been overwritten on the same reconcile. That is
+		// why #241 could not be implemented here alone.
 		return controller.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: true,
-			Conditions:       []metav1.Condition{compositionCondition.ReconcileGracefullyPaused()},
+			Conditions: []metav1.Condition{
+				compositionCondition.ReconcileGracefullyPaused(),
+				compositionCondition.SyncedGracefullyPaused(),
+			},
 		}, nil
 	}
 	// Observe MUST be a pure read of external state. It previously persisted metadata here (release

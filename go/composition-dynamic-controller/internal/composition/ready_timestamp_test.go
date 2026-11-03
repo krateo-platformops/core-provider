@@ -82,33 +82,68 @@ func TestAvailableConditionIsStampedOnceAcrossPhases(t *testing.T) {
 	}
 }
 
-// THE DIFFERENTIAL, and it is what makes the test above meaningful. The same sequence with the OLD
-// per-phase messages must MOVE the timestamp — reproducing the defect. If this arm ever stops
-// failing to hold the timestamp still, the test above has stopped proving anything.
+// THE DIFFERENTIAL, and it had to change its INSTRUMENT because another repo's fix removed the old
+// one.
+//
+// It used to assert that a per-phase message MOVES LastTransitionTime. That worked while
+// condition.Upsert replaced a condition wholesale — but unstructured-runtime #36 now PRESERVES
+// LastTransitionTime whenever Status is unchanged, per the Kubernetes convention that the field
+// tracks status transitions. Two writes at Status=True therefore leave the timestamp alone whatever
+// their messages say, and this arm began failing with its own message claiming "the guard no longer
+// compares messages" — which was a FALSE DIAGNOSIS baked into the assertion text. The guard is
+// intact; the timestamp simply stopped being an observable proxy for "was the condition rewritten".
+//
+// So the differential now observes what the guard still controls: whether the condition's CONTENT
+// was replaced. A per-phase message changes the stored Message; the unified constant does not. That
+// is a property of setReadyCondition rather than of Upsert, so it cannot be taken away by a change
+// in the runtime's timestamp policy.
+//
+// Worth keeping as a lesson rather than quietly rewriting: a test whose observable belongs to a
+// DEPENDENCY can be invalidated by that dependency being improved, and it will fail with a message
+// that blames the wrong thing.
 func TestPerPhaseMessagesDoRewriteTheCondition(t *testing.T) {
 	mg := composition(t)
 
-	if err := setAvaibleStatus(mg, "Composition is up-to-date", false); err != nil {
+	if err := setAvaibleStatus(mg, readyMessageAvailable, false); err != nil {
 		t.Fatalf("Observe-phase stamp: %v", err)
 	}
-	first := readyStamp(t, mg)
-	if first.IsZero() {
-		t.Fatal("no Ready condition after the first stamp")
+	firstMsg := readyMessage(t, mg)
+	if firstMsg == "" {
+		t.Fatal("no Ready condition after the first stamp — the assertions below would compare two " +
+			"empty strings and pass over a condition that was never written")
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	// A SECOND stamp with the SAME message must leave the content untouched: this is the arm that
+	// proves the guard fires at all.
+	if err := setAvaibleStatus(mg, readyMessageAvailable, false); err != nil {
+		t.Fatalf("second stamp with the same message: %v", err)
+	}
+	if got := readyMessage(t, mg); got != firstMsg {
+		t.Errorf("an identical re-assertion changed the message %q -> %q", firstMsg, got)
+	}
 
-	// The message Create used to supply for the SAME Available state.
+	// Now the message Create used to supply for the SAME Available state. The guard compares
+	// messages, so this one DOES get through — which is precisely why three per-phase strings
+	// rewrote the condition on every reconcile (#298).
 	if err := setAvaibleStatus(mg, "Composition created", false); err != nil {
 		t.Fatalf("Create-phase stamp: %v", err)
 	}
-	second := readyStamp(t, mg)
-
-	if second.Equal(first) {
-		t.Fatal("a DIFFERENT message left LastTransitionTime unchanged — the guard no longer " +
-			"compares messages, so TestAvailableConditionIsStampedOnceAcrossPhases would pass " +
-			"even if the three phases diverged again, and #298 could return unnoticed")
+	if got := readyMessage(t, mg); got == firstMsg {
+		t.Fatal("a DIFFERENT message did NOT replace the stored message, so setReadyCondition has " +
+			"stopped comparing messages. TestAvailableConditionIsStampedOnceAcrossPhases would then " +
+			"pass even if the three phases diverged again, and #298 could return unnoticed")
 	}
+}
+
+// readyMessage returns the Ready condition's message, or "" if absent.
+func readyMessage(t *testing.T, mg *unstructured.Unstructured) string {
+	t.Helper()
+	for _, c := range unstructuredtools.GetConditions(mg) {
+		if c.Type == "Ready" {
+			return c.Message
+		}
+	}
+	return ""
 }
 
 // THE STRUCTURAL ASSERTION, and it is the one that makes the mutant inert rather than uncaught.
