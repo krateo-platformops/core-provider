@@ -209,12 +209,39 @@ func TestObserve_PausedBranchMakesThePauseObservable(t *testing.T) {
 	// nothing. The runtime applies observation.Conditions after its re-fetch — covered end to end
 	// by unstructured-runtime's TestObservationConditionsAreApplied, which reads back from a
 	// cluster. Here we assert the handler hands over the right condition.
-	if len(obs.Conditions) != 1 {
-		t.Fatalf("returned %d conditions, want exactly 1 (the paused Ready)", len(obs.Conditions))
+	// BOTH HALVES, because readiness and liveness are different axes (#241). This asserted exactly
+	// ONE condition until the Synced half was added; the count is kept as an assertion rather than
+	// relaxed to ">= 1" so that a third condition appearing here has to be a deliberate decision.
+	if len(obs.Conditions) != 2 {
+		t.Fatalf("returned %d conditions, want exactly 2 (the paused Ready AND the paused Synced)",
+			len(obs.Conditions))
 	}
-	c := obs.Conditions[0]
-	if c.Type != "Ready" {
-		t.Errorf("condition type = %q, want Ready", c.Type)
+
+	byType := map[string]metav1.Condition{}
+	for _, cc := range obs.Conditions {
+		byType[cc.Type] = cc
+	}
+
+	// The LIVENESS half. #241 asked whether a paused composition should hold back its dependents;
+	// the answer was to leave Ready alone and say "nothing is converging this" on Synced, which is
+	// the shape the runtime's own annotation pause already uses.
+	synced, ok := byType["Synced"]
+	if !ok {
+		t.Fatal("no Synced condition returned: a `deps:` edge means \"wait until converged\", and a " +
+			"paused composition is not converging. Without this, the only signal is a reason string " +
+			"on Ready, which is what #241 declined to make consumers match on (#241)")
+	}
+	if synced.Status != metav1.ConditionFalse {
+		t.Errorf("Synced status = %v, want False — nothing is reconciling a paused composition",
+			synced.Status)
+	}
+	if synced.Reason != "ReconcileGracefullyPaused" {
+		t.Errorf("Synced reason = %q, want ReconcileGracefullyPaused", synced.Reason)
+	}
+
+	c, ok := byType["Ready"]
+	if !ok {
+		t.Fatal("no Ready condition returned")
 	}
 	if c.Reason != "ReconcileGracefullyPaused" {
 		t.Errorf("condition reason = %q, want ReconcileGracefullyPaused. A runbook gate on this "+
