@@ -751,7 +751,8 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// bucketed correctly all along.
 			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
-			stringField(cm, "reason") == "NotObserved":
+			stringField(cm, "reason") == "NotObserved",
+			stringField(cm, "reason") == "ObserveFailed":
 			// NotObserved is PROVIDER-RUNTIME's reason, and only provider-runtime's. Confirmed at
 			// krateo-platformops/provider-runtime 499ea69: markNotObserved (pkg/reconciler/
 			// ready.go:60) writes prv1.NotObserved() from reconciler.go:869 (Connect failed) and
@@ -761,8 +762,43 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// that this Ready-based rollup never reads. Two repos, one constructor name, different
 			// objects; the collision is why this says which repo.
 			//
-			// It means "the external resource could not be observed" — an Observe or Connect
-			// failure, with the raw error left on Synced. It
+			// A LITERAL, NOT condition.ReasonObserveFailed, and the reason is the point of #320.
+			// The const does not exist in the unstructured-runtime version the cdc pins (it was
+			// added later), and even once it does, importing it would be WRONG here: these three
+			// reasons arrive on CHILDREN, written by the children's own controllers on their own
+			// release schedules, so a const resolves to OUR pin's value while the string on the
+			// object is THEIRS. Tying a child's reason to our pin is exactly the inference this
+			// file's ObserveFailed deferral got wrong. Contrast ReasonZeroEvidence above, which the
+			// cdc EMITS about itself — there the const is right, and reasoncontract_test.go pins
+			// its value because a third repo matches on it.
+			//
+			// ObserveFailed JOINS IT HERE, and that is a decision Diego took rather than a
+			// tidy-up. The two reasons are THE SAME CLAIM from two runtimes: provider-runtime
+			// writes NotObserved when a provider's Connect or Observe returns an error;
+			// unstructured-runtime writes ObserveFailed when a handler's Observe returns one.
+			// Bucketing them differently meant one situation got two verdicts, decided by which
+			// runtime the provider happened to be built on — which no consumer of this rollup can
+			// see. Confirmed by the provider-runtime session against their own call sites, who
+			// also corrected my belief that NotObserved meant "the runtime never got an answer":
+			// it does not, it is the provider's error path.
+			//
+			// UNEVALUATED AND NOT CONVERGING, of the two uniform answers, because converging is
+			// the one that states something false. Converging asserts progress; nothing is
+			// progressing. Unknown asserts nothing, which is exactly what is known. The earlier
+			// reasoning for leaving ObserveFailed on the converging default — that it does not
+			// say transient or persistent — argues for this bucket rather than against it.
+			//
+			// THE COST, NAMED: a persistently unobservable child now passes installer's dependency
+			// gate, because an all-unevaluated parent reports ZeroEvidence and the gate accepts
+			// exactly that. The honest fix is NOT to mis-state the child's health to force the
+			// gate's hand — it is that the parent cannot currently say WHY it has no evidence, so
+			// "no children recorded" and "children nobody could read" are indistinguishable to the
+			// gate. That capability is #318 (unreadableChildrenCount plus a distinct reason), and
+			// the unobservable case belongs to the same family as the forbidden one. Until it
+			// lands, the two runtimes at least agree.
+			//
+			// Both mean "the external resource could not be observed" — an Observe or Connect
+			// failure, with the raw error left on Synced. They
 			// belongs HERE and not in the converging branch below for the same reason ZeroEvidence
 			// does, and the distinction is the whole point: the child is not reporting that it is
 			// unhealthy or that it is still coming up. It is reporting that NOTHING ASSESSED IT.

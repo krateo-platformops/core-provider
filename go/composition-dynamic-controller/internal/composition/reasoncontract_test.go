@@ -93,7 +93,8 @@ func TestAvailablePartialCoverageReasonStringIsStable(t *testing.T) {
 func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 	unevaluated := map[string]bool{
 		condition.ReasonZeroEvidence: true,
-		"NotObserved":                true, // provider-runtime v1.8.x, apis/common/v1
+		"NotObserved":                true, // provider-runtime, apis/common/v1
+		"ObserveFailed":              true, // unstructured-runtime, pkg/tools/unstructured/condition
 	}
 
 	for reason := range unevaluated {
@@ -204,11 +205,24 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 		t.Errorf("Unavailable maps to %d, want childFailed (%d)", got, childFailed)
 	}
 
-	// And the one that is coming, asserted as NOT YET mapped so the bump cannot forget it: when
-	// this starts failing, the pin has been raised and the mapping is owed in the same change.
-	if got := krateoReady(krateoCR("Unknown", "ObserveFailed", true)); got == childUnevaluated {
-		t.Error("ObserveFailed now maps to childUnevaluated -- if that was deliberate, add it to " +
-			"the set above and delete this arm. If the unstructured-runtime pin was just raised " +
-			"without adding the mapping, that is the gap this arm exists to catch")
+	// This arm used to assert the opposite -- that ObserveFailed was NOT unevaluated -- with the
+	// instruction "if that was deliberate, add it to the set above and delete this arm". It was
+	// deliberate, so it is in the set and the arm is replaced by its converse: the two reasons must
+	// stay TOGETHER, whichever bucket they are in.
+	//
+	// They are the same claim from two runtimes. provider-runtime writes NotObserved when a
+	// provider's Connect or Observe returns an error (markNotObserved, pkg/reconciler/ready.go:60,
+	// from reconciler.go:869 and :909); unstructured-runtime writes ObserveFailed when a handler's
+	// Observe returns one. Splitting them gives one situation two verdicts, decided by which
+	// runtime the provider was built on -- which nothing downstream can see, so nothing downstream
+	// can compensate for it.
+	//
+	// Asserted as an EQUALITY rather than as two memberships, so that moving one bucket without
+	// the other fails here rather than in a cluster.
+	if a, b := krateoReady(krateoCR("Unknown", "NotObserved", true)), krateoReady(krateoCR("Unknown", "ObserveFailed", true)); a != b {
+		t.Errorf("NotObserved maps to %d and ObserveFailed to %d. They are the same claim from two "+
+			"runtimes -- a provider's Observe returned an error -- and the only thing that differs "+
+			"is which runtime the provider happens to be built on. Whichever bucket is right, both "+
+			"belong in it", a, b)
 	}
 }
