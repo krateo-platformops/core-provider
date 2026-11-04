@@ -106,8 +106,36 @@ spec:
                     description: 'Credentials: credentials for private repos'
                     properties:
                       passwordRef:
-                        description: 'PasswordRef: reference to secret containing
-                          password for private repo'
+                        description: |-
+                          PasswordRef: reference to secret containing password for private repo.
+
+                          PRIVILEGE BOUNDARY, stated here because this is where someone writing a
+                          CompositionDefinition will read it. The namespace is caller-supplied and is NOT confined to
+                          the CompositionDefinition's own namespace: the referenced Secret is read with
+                          core-provider's ServiceAccount, which can read Secrets cluster-wide, and nothing checks that
+                          the author of this object was entitled to that Secret.
+
+                          So the credential named here travels to whatever `spec.chart.url` says. Granting create or
+                          update on compositiondefinitions is therefore equivalent to granting cluster-wide Secret
+                          READ, and should be treated as a privileged grant when writing RBAC — scope it the way you
+                          would scope secrets access, not the way you would scope an application CR.
+
+                          THIS IS INTENDED AND WAS RULED ON, not an oversight (core-provider#306; Diego,
+                          2026-11-04). Cross-namespace references are a supported capability — deploy.go detects the
+                          cross-namespace case and provisions a Role in the Secret's namespace so the fetch works, and
+                          the equivalent surface in snowplow measured 23 of 26 references as cross-namespace. The
+                          alternative considered was an RBAC check for a `use` verb against the requesting user, as
+                          snowplow#1168 rules for its own endpoint Secrets. core-provider has no requesting user on a
+                          reconcile: there is no SubjectAccessReview, UserInfo, impersonation or admission webhook
+                          anywhere in this repo, so a reconcile sees this object and nothing about who wrote it. A
+                          ServiceAccount substituted for the absent user would be a confused deputy with an
+                          authorization check bolted on, which reads as authorised while being nothing of the kind.
+                          The control therefore lives on who may write a CompositionDefinition at all.
+
+                          What is NOT in scope of that decision, and is fixed separately: the DESTINATION. A
+                          credentialed fetch refuses link-local (including the cloud metadata service at
+                          169.254.169.254), unspecified and multicast addresses, checked at dial time on the resolved
+                          address (plumbing dialguard, snowplow#1131).
                         properties:
                           key:
                             description: The key to select.
@@ -420,8 +448,36 @@ spec:
                               description: 'Credentials: credentials for private repos'
                               properties:
                                 passwordRef:
-                                  description: 'PasswordRef: reference to secret containing
-                                    password for private repo'
+                                  description: |-
+                                    PasswordRef: reference to secret containing password for private repo.
+
+                                    PRIVILEGE BOUNDARY, stated here because this is where someone writing a
+                                    CompositionDefinition will read it. The namespace is caller-supplied and is NOT confined to
+                                    the CompositionDefinition's own namespace: the referenced Secret is read with
+                                    core-provider's ServiceAccount, which can read Secrets cluster-wide, and nothing checks that
+                                    the author of this object was entitled to that Secret.
+
+                                    So the credential named here travels to whatever `spec.chart.url` says. Granting create or
+                                    update on compositiondefinitions is therefore equivalent to granting cluster-wide Secret
+                                    READ, and should be treated as a privileged grant when writing RBAC — scope it the way you
+                                    would scope secrets access, not the way you would scope an application CR.
+
+                                    THIS IS INTENDED AND WAS RULED ON, not an oversight (core-provider#306; Diego,
+                                    2026-11-04). Cross-namespace references are a supported capability — deploy.go detects the
+                                    cross-namespace case and provisions a Role in the Secret's namespace so the fetch works, and
+                                    the equivalent surface in snowplow measured 23 of 26 references as cross-namespace. The
+                                    alternative considered was an RBAC check for a `use` verb against the requesting user, as
+                                    snowplow#1168 rules for its own endpoint Secrets. core-provider has no requesting user on a
+                                    reconcile: there is no SubjectAccessReview, UserInfo, impersonation or admission webhook
+                                    anywhere in this repo, so a reconcile sees this object and nothing about who wrote it. A
+                                    ServiceAccount substituted for the absent user would be a confused deputy with an
+                                    authorization check bolted on, which reads as authorised while being nothing of the kind.
+                                    The control therefore lives on who may write a CompositionDefinition at all.
+
+                                    What is NOT in scope of that decision, and is fixed separately: the DESTINATION. A
+                                    credentialed fetch refuses link-local (including the cloud metadata service at
+                                    169.254.169.254), unspecified and multicast addresses, checked at dial time on the resolved
+                                    address (plumbing dialguard, snowplow#1131).
                                   properties:
                                     key:
                                       description: The key to select.
