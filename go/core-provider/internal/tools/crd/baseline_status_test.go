@@ -26,6 +26,10 @@ func baselineStatusWrites() map[string]any {
 		"helmChartVersion":     "1.2.3",
 		"observedGeneration":   int64(4),
 		"lastReconcileTime":    "2026-11-01T12:00:00Z", // #298 — the replacement liveness signal
+		// The resolved release name. Listed here for the writes->schema arm: the cdc writes it in
+		// setStatus, so an undeclared field would be pruned exactly as managedDigest was (#293),
+		// and the whole point of the field is to be readable afterwards.
+		"releaseName": "lab-ha-54xd86b6",
 	}
 }
 
