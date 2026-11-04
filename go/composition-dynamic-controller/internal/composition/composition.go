@@ -589,6 +589,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return controller.ExternalObservation{}, fmt.Errorf("getting previous digest from status: %w", err)
 	}
 
+	// selfHealed defers the drift return until after the status write below. See #337 at the end of
+	// this block.
+	selfHealed := false
 	if reconcileRes.Changed {
 		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
 		// was done about it, and at Debug it was invisible on every cluster that runs at Info —
@@ -613,10 +616,29 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		log.Info("Composition drift detected and self-healed", "package", pkg.URL,
 			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated,
 			"changedObjects", reconcileRes.ChangedObjects, "changedObjectsOmitted", reconcileRes.ChangedObjectsOmitted)
-		return controller.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		// A FLAG, NOT A RETURN (#337). This returned here, BEFORE the setStatus/persist pair below,
+		// so a reconcile whose self-heal changed any object reported drift without ever computing
+		// or writing Ready. The two later drift returns sit AFTER the write and were always fine;
+		// this one was earlier than the write by accident of where it was added.
+		//
+		// The runtime cannot compensate: its !ResourceUpToDate branch persists only the conditions
+		// the handler RETURNED (worker.go, persistHandlerConditions), and this path returns none —
+		// exactly one return in this file carries Conditions, the graceful-pause branch.
+		//
+		// Normally invisible, because a composition that has been reconciling keeps whatever Ready
+		// a previous pass wrote. It shows only when nothing else ever writes it: a NEW composition
+		// whose first Observe self-heals, followed by an Update that fails. Measured by the
+		// openstack-ironic-operator-kog session on a constructed probe — `Synced` present and
+		// `Ready` ABSENT, which reads to every consumer as "not evaluated yet", indefinitely.
+		//
+		// AND IT GOT WORSE AS THE CODE GOT BETTER. On 2.13.59 this Observe ERRORED at the
+		// chart-inspector call, so the runtime's error path wrote a Ready — a wrong value, but a
+		// value. #330 made Observe succeed, and success returns through here, which writes nothing.
+		//
+		// Deliberately a flag rather than a second setStatus call: one status write before every
+		// drift return removes the whole class, where a duplicated write leaves the next person to
+		// add a return free to put it in the wrong place again.
+		selfHealed = true
 	}
 
 	// #261: a child recorded in status.managed but ABSENT from the cluster is drift by definition —
@@ -651,6 +673,16 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	_, err = updateStatusWithRetry(ctx, mg, updateOpts)
 	if err != nil {
 		return controller.ExternalObservation{}, err
+	}
+
+	// #337. The self-heal drift return, moved to AFTER the status write and no further: a Changed
+	// reconcile previously returned before the checks below and must keep doing so, or this fix
+	// quietly changes which drift reason an operator sees.
+	if selfHealed {
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
 	}
 
 	// #273: the inverse direction of the absentChildren check above. That one catches a child
