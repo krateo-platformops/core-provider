@@ -1,6 +1,7 @@
 package composition
 
 import (
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestInventoryStale_RenderGrewAfterTheInventoryWasRecorded(t *testing.T) {
 
 	// The release now renders eleven: the six BaremetalHosts appeared once the PKI Secret existed.
 	// Observe computes the current digest from that release.
-	reason, err := inventoryStaleReason(mg, "eleven-entry-render")
+	reason, err := inventoryStaleReason(mg, "eleven-entry-render", &helmconfig.Release{Name: "r"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestInventoryStale_MatchingStampIsNotDrift(t *testing.T) {
 		managedEntry("baremetalhosts", "cp-blade01", "krateo-system"),
 	}, "current")
 
-	reason, err := inventoryStaleReason(mg, "current")
+	reason, err := inventoryStaleReason(mg, "current", &helmconfig.Release{Name: "r"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestInventoryStale_RenderShrank(t *testing.T) {
 		managedEntry("baremetalhosts", "cp-blade02", "krateo-system"),
 	}, "two-entry-render")
 
-	reason, err := inventoryStaleReason(mg, "one-entry-render")
+	reason, err := inventoryStaleReason(mg, "one-entry-render", &helmconfig.Release{Name: "r"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestInventoryStale_UnstampedInventoryIsUnverifiableSoItReportsDrift(t *test
 		managedEntry("secrets", "lab-ha-kubeadm-pki", "krateo-system"),
 	}, "")
 
-	reason, err := inventoryStaleReason(mg, "current")
+	reason, err := inventoryStaleReason(mg, "current", &helmconfig.Release{Name: "r"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,21 +131,63 @@ func TestInventoryStale_UnstampedInventoryIsUnverifiableSoItReportsDrift(t *test
 	}
 }
 
-// #248's distinction must survive. An ABSENT inventory is "never evaluated", already reported as
-// ZeroEvidence/Unknown, and is not this check's business: reporting drift on it would dispatch an
-// Update for a composition that may not have been created yet.
+// An ABSENT inventory used to be excluded unconditionally, on the reasoning that it is #248's
+// ZeroEvidence and that reporting drift would dispatch an Update for a composition that may not
+// have been created yet. #326 split that: the reasoning holds when there is NO RELEASE and is false
+// when there is one, and conflating them made the state self-perpetuating — no drift, so no Update,
+// and Update is the only writer of status.managed.
 //
-// Present-and-empty is a DIFFERENT state — "rendered, found nothing" — and is deliberately NOT
-// excluded here: it is a recorded inventory like any other and its stamp is checked.
-func TestInventoryStale_AbsentInventoryIsZeroEvidenceNotDrift(t *testing.T) {
+// Both arms in one test, because the value of either depends entirely on the other being different.
+// A test that only asserted the no-release arm would pass against the defect.
+func TestInventoryStale_AbsentInventoryDependsOnWhetherAReleaseExists(t *testing.T) {
 	mg := compositionWithInventory(nil, "")
 
-	reason, err := inventoryStaleReason(mg, "current")
+	// NO RELEASE: unchanged. Nothing has installed anything, so there is nothing to inventory and
+	// an Update here would run against a composition that may genuinely not be created yet.
+	reason, err := inventoryStaleReason(mg, "current", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != "" {
-		t.Errorf("an absent inventory is #248's ZeroEvidence, not drift, got %q", reason)
+		t.Errorf("an absent inventory with NO release is #248's ZeroEvidence, not drift, got %q", reason)
+	}
+
+	// A RELEASE EXISTS: drift, so Update rewrites the inventory. This is #326, measured on d4 as
+	// heat holding one deployed release and 12 running pods while reporting
+	// Ready=Unknown/ZeroEvidence indefinitely — with magnum never emitted, because its only
+	// unsatisfied dependency was heat.
+	reason, err = inventoryStaleReason(mg, "current", &helmconfig.Release{Name: "r"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason == "" {
+		t.Error("an absent inventory beside an EXISTING release reported no drift. Nothing else " +
+			"writes status.managed: Observe passes recordManaged false precisely so it cannot, so " +
+			"this composition reports ZeroEvidence forever and every consumer gating on its " +
+			"readiness waits forever with it")
+	}
+}
+
+// Present-and-empty is a DIFFERENT state — "rendered, found nothing" — and is deliberately NOT
+// excluded: it is a recorded inventory like any other and its stamp is checked. Asserted beside the
+// absent case because the two are one bit apart in the status and opposite in treatment.
+func TestInventoryStale_PresentAndEmptyIsNotTheAbsentCase(t *testing.T) {
+	mg := compositionWithInventory([]any{}, "matching")
+
+	// Stamped and matching: no drift, with and without a release.
+	for name, rel := range map[string]*helmconfig.Release{
+		"no release":       nil,
+		"release existing": {Name: "r"},
+	} {
+		reason, err := inventoryStaleReason(mg, "matching", rel)
+		if err != nil {
+			t.Fatalf("unexpected error (%s): %v", name, err)
+		}
+		if reason != "" {
+			t.Errorf("a recorded empty inventory whose stamp MATCHES reported drift (%s): %q. "+
+				"#326's new arm must not swallow the present-and-empty case, which is an honest "+
+				"record of a chart that renders nothing", name, reason)
+		}
 	}
 }
 
@@ -152,7 +195,7 @@ func TestInventoryStale_EmptyInventoryIsRecordedAndStillChecked(t *testing.T) {
 	// "rendered, found nothing", stamped against a render that has since changed.
 	mg := compositionWithInventory([]any{}, "empty-render")
 
-	reason, err := inventoryStaleReason(mg, "now-renders-something")
+	reason, err := inventoryStaleReason(mg, "now-renders-something", &helmconfig.Release{Name: "r"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +205,7 @@ func TestInventoryStale_EmptyInventoryIsRecordedAndStillChecked(t *testing.T) {
 }
 
 func TestInventoryStale_NilComposition(t *testing.T) {
-	if _, err := inventoryStaleReason(nil, "current"); err == nil {
+	if _, err := inventoryStaleReason(nil, "current", &helmconfig.Release{Name: "r"}); err == nil {
 		t.Error("a nil composition must error rather than report no drift: 'could not determine' " +
 			"must not read as 'nothing to do'")
 	}

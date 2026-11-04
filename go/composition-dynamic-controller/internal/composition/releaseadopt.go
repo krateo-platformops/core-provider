@@ -15,10 +15,29 @@ import (
 // adoptableStates are the release statuses whose objects may still be in the cluster, and therefore
 // the ones worth adopting.
 //
-// ListDeployed ALONE IS THE DEFAULT AND WOULD MISS THE CASE THIS EXISTS FOR. The release that
-// caused #303's measured outage was `failed` at revision 6, sitting beside a second `deployed`
-// release at revision 2 — so a deployed-only list would have found the wrong one, or on a cluster
-// with only the failed release, nothing at all, and minted a new name exactly as before.
+// AN EXPLICIT MASK IS LOAD-BEARING, AND MY FIRST STATEMENT OF WHY WAS WRONG. This comment used to
+// say "ListDeployed alone is the default", which is true of neither layer:
+//
+//	plumbing helm/v3/config.go:113   applyListConfig OVERWRITES client.StateMask unconditionally,
+//	                                 so an unset ListConfig.StateMask sets the mask to 0 -- and
+//	                                 helm's filterStateMask skips every release when the mask is
+//	                                 0, returning an EMPTY list with a nil error (plumbing#74).
+//	helm action.NewList              sets ListDeployed|ListFailed. Its own comment says
+//	                                 "The default is ListDeployed" and is wrong about its own code.
+//
+// So the real hazard is worse than a narrow default: omitting the mask here would have listed
+// NOTHING, every time, and "no release exists" means install a second one beside the live one --
+// the exact outage #303 is about. The plausible value is the destructive one.
+//
+// What the mask has to span is still the same, and the measured case proves it: the release that
+// caused #303's outage was `failed` at revision 6, sitting beside a second `deployed` release at
+// revision 2. A deployed-only list would have found the wrong one.
+//
+// And for anyone reaching for the CLI to look: a `failed` release is NOT hidden by default --
+// `helm list` shows deployed AND failed, measured on v3.19.0 by the openstack-ironic-operator-kog
+// session, and stated in helm's own `list --help`. What `--all` adds is `superseded`,
+// `uninstalled`, `uninstalling` and the `pending-*` family, and `pending-install` is the one that
+// matters here: a second install that never completed is invisible without it.
 //
 // Uninstalled and uninstalling are deliberately EXCLUDED: their objects are gone, helm cannot
 // upgrade a release with no deployed revision, and adopting such a name would turn the install into

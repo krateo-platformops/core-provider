@@ -668,7 +668,12 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// such composition, once, after which the stamp is set — and that Update is what repairs an
 	// already-frozen inventory. An absent stamp with no inventory is #248's ZeroEvidence and is left
 	// alone.
-	staleInventory, err := inventoryStaleReason(mg, digest)
+	// The RELEASE is handed over, not a flag. An earlier draft passed `true` here, which a mutant
+	// flipped to `false` with nothing failing — this call site cannot be exercised without a chart
+	// fixture this repository does not have, so a literal here is unguarded by construction.
+	// Passing the object Observe already holds means a wrong value has to be written as `nil`,
+	// which reads as a lie rather than as a plausible flag.
+	staleInventory, err := inventoryStaleReason(mg, digest, upgradedRel)
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("checking whether the recorded set matches the release: %w", err)
 	}
