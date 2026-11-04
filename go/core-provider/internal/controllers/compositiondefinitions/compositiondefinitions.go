@@ -931,9 +931,58 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
+	// A DELETING DEFINITION STOPS HERE, and this is not an optimisation.
+	//
+	// Everything below computes DRIFT — the dry-run deploy, the two digest comparisons, the
+	// migration and prune checks — and none of it is read on the deletion path: provider-runtime
+	// routes a deleted object straight to Delete and consults only ResourceExists
+	// (reconciler.go:991-996).
+	//
+	// Continuing was SELF-DEADLOCKING. The drift check dry-run-deploys the per-version controller
+	// and its RBAC, and a server-side dry-run Apply is still an admission request — which the
+	// apiserver REFUSES in a terminating namespace:
+	//
+	//	observe failed: error deploying dynamic controller in dry-run mode:
+	//	roles.rbac.authorization.k8s.io "keystones-v0-3-30" is forbidden: unable to create new
+	//	content in namespace openstack because it is being terminated
+	//
+	// So Observe errored, Delete never ran, finalizer.managedresource.krateo.io was never removed,
+	// and the namespace could never finish terminating — which is what kept the dry-run failing.
+	// A loop whose own diagnostic step prevents the exit.
+	//
+	// Measured on a0-openstack-d4 by the installer session: 35 CompositionDefinitions stuck for
+	// over twenty minutes with exactly that message, after the composition instances had already
+	// been cleared. Clearing them was necessary and could never have been sufficient.
+	//
+	// WHY THIS FIXES IT RATHER THAN ONLY AVOIDING IT: Undeploy performs no creates. Every operation
+	// in it is a delete (the ConfigMaps, the Deployment, the RBAC) plus a pod LIST for the drain
+	// wait, and a terminating namespace permits deletes — it refuses only NEW CONTENT. So once
+	// Observe stops erroring, the teardown completes on its own and the namespace finishes.
+	//
+	// ResourceExists is TRUE because the CRD and its version were just confirmed above, and that is
+	// the field Delete is gated on. ResourceUpToDate is meaningless for an object being deleted and
+	// is reported true so that nothing routes to Update if the deletion is somehow abandoned.
+	// THE INVARIANT, which is stronger than this one guard and is the thing to preserve:
+	//
+	//	NOTHING ON THE PATH FROM HERE TO Delete MAY CREATE OR DRY-RUN CONTENT.
+	//
+	// A deletionTimestamp check on one call site holds only until someone adds a second call site
+	// above it. The invariant survives that, and it is the form the oasgen-provider session
+	// proposed after auditing their own Observe for this same wedge — theirs is safe only because
+	// its dry-run sits 239 lines after its deletion return, which is protection by line ordering
+	// that nothing would catch the removal of.
+	//
+	// A terminating namespace refuses NEW CONTENT and permits DELETES. So anything that reads, or
+	// deletes, is fine here; anything that creates or dry-run-applies reintroduces the deadlock.
+	if deleted {
+		log.Debug("CompositionDefinition is being deleted; skipping drift detection so Delete can run",
+			"gvr", gvr.String())
+		return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+	}
+
 	// A follower defers the CRD, the controller and the migrations of this Kind+version to the
-	// definition that owns them (controllerowner.go). A definition being deleted takes the normal
-	// path, so Delete still runs.
+	// definition that owns them (controllerowner.go). A definition being deleted returned above, so
+	// this check is now unconditional in practice; the guard is kept for clarity.
 	if !deleted {
 		owner, err := e.controllerOwner(ctx, cr, chartGVK)
 		if err != nil {
