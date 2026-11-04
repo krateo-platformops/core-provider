@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 )
 
 // inventoryStaleReason answers one question: is status.managed still the inventory of what the
@@ -18,7 +20,17 @@ import (
 // of reality with every other status field independently correct — and the health rollup, which can
 // only iterate what the inventory lists, reported Available over children it had never heard of.
 //
-// It is deliberately a pure function of the stored status and the current digest: Observe cannot
+// THE RELEASE IS PASSED, NOT A BOOLEAN, and not inferred from a non-empty currentDigest. The
+// inference looks free and is wrong — MEASURED, not assumed: ComputeReleaseDigest returns "" for an
+// empty manifest, so `currentDigest != ""` means "a release exists AND renders something", and a
+// hooks-only release (helm keeps hooks out of Manifest by construction, #311) would be read as no
+// release at all. A boolean would have been worse than either: a literal at the call site that any
+// edit can flip with nothing failing, which is what a surviving mutant demonstrated.
+//
+// rel is consulted ONLY for existence, never for content, so it cannot disagree with currentDigest
+// about anything this function uses.
+//
+// It is deliberately a pure function of the stored status, the current digest and that object: Observe cannot
 // afford a DecodeMinRelease per reconcile (15-27x the digest-only path, up to 125MB of allocation
 // for a 5MB manifest — the measurement that settled #261), and it does not need one. The digest
 // stamped beside the inventory at record time is sufficient to detect divergence in BOTH
@@ -28,20 +40,43 @@ import (
 // without a chart fixture this repository does not have, and a guard that cannot be tested directly
 // is a guard that asserts its own mention (#232). The caller contributes nothing but the current
 // digest.
-func inventoryStaleReason(mg *unstructured.Unstructured, currentDigest string) (string, error) {
+func inventoryStaleReason(mg *unstructured.Unstructured, currentDigest string, rel *helmconfig.Release) (string, error) {
 	if mg == nil {
 		return "", fmt.Errorf("composition is nil")
 	}
 
-	// An absent inventory is #248's ZeroEvidence and is not this check's business: "never recorded"
-	// is already reported as Unknown rather than as healthy, and reporting drift on it would
-	// dispatch an Update for a composition that may simply not have been created yet.
 	_, hasManaged, err := unstructured.NestedSlice(mg.Object, "status", "managed")
 	if err != nil {
 		return "", fmt.Errorf("reading status.managed: %w", err)
 	}
 	if !hasManaged {
-		return "", nil
+		// AN ABSENT INVENTORY USED TO RETURN HERE UNCONDITIONALLY, and the rationale was that
+		// "never recorded" is already reported as Unknown rather than as healthy, so reporting
+		// drift would only dispatch an Update for a composition that may simply not have been
+		// created yet.
+		//
+		// That is sound for a composition with no release and FALSE for one that has a release,
+		// and the two were not distinguished — which made the state self-perpetuating (#326):
+		//
+		//	status.managed absent -> no drift reported -> Observe says up-to-date -> no Update
+		//	-> Update is the only writer of status.managed -> absent forever
+		//
+		// Observe passes resources: nil and recordManaged: false precisely so it cannot overwrite
+		// the list (#248's mirror), so nothing in the system repaired it. #248 made this state
+		// VISIBLE — it used to report Ready=True over objects it had never heard of — and left it
+		// unrepairable. Measured on d4: heat holding one deployed release and 12 running pods,
+		// reporting Ready=Unknown/ZeroEvidence, with magnum never emitted because its only
+		// unsatisfied dependency was heat.
+		//
+		// Note the asymmetry that hid it. The present-but-UNSTAMPED arm below already reports
+		// drift, justified as "the one Update it costs, once per composition, is precisely what
+		// rewrites an inventory that has been frozen for weeks". The absent case wanted the same
+		// treatment and was the only one excluded.
+		if rel == nil {
+			return "", nil
+		}
+		return "a release exists but no inventory was ever recorded, so the health rollup has " +
+			"nothing to iterate", nil
 	}
 
 	// unstructured.NestedString, NOT maps.NestedString: the latter treats an ABSENT key as an access
