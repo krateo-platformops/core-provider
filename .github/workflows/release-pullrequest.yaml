@@ -243,24 +243,41 @@ jobs:
           # on main and the anchor matched 0 times -- so the control REFUSED, correctly, instead of
           # silently proving nothing. An anchor that spans code it does not need to touch inherits
           # every change to that code.
-          pat = re.compile(r'^\s*stringField\(cm, "reason"\) == "NotObserved":\s*$')
-          hits = [i for i, l in enumerate(lines) if pat.match(l)]
+          # THE TERMINATOR IS NOT PART OF THE ANCHOR, and that is this control's second lesson of
+          # the same kind. The first version required the term to end in a COLON, i.e. to be the
+          # last term of the case. #320 then added ObserveFailed to the same arm, which made
+          # NotObserved a middle term ending in a comma -- the anchor matched 0 lines and the
+          # control refused, correctly, having proved nothing. #312 had already done this once with
+          # the ZeroEvidence literal. Both times the anchor described more of the line than the
+          # thing it wanted to delete, and both times the code it had no need to read is what moved.
+          pat = re.compile(r'^\s*stringField\(cm, "reason"\) == "NotObserved"\s*([,:])\s*$')
+          hits = [(i, m) for i, l in enumerate(lines) for m in [pat.match(l)] if m]
           if len(hits) != 1:
               sys.exit("control NOT APPLIED: the NotObserved term matched %d lines, not 1 -- the "
                        "code moved and this control is measuring nothing" % len(hits))
-          i = hits[0]
+          i, m = hits[0]
           if i == 0:
               sys.exit("control NOT APPLIED: the NotObserved term is the first line of the file")
 
-          # It must be the LAST term of a multi-term case, i.e. the line above ends in a comma.
-          # Removing it then requires turning that comma into the colon this line was carrying.
-          prev = lines[i - 1].rstrip("\n")
-          if not prev.endswith(","):
-              sys.exit("control NOT APPLIED: the line above the NotObserved term does not end in a "
-                       "comma (%r) -- the case was restructured, so deleting one line would not "
-                       "leave valid Go" % prev)
-
-          lines[i - 1] = prev[:-1] + ":\n"
+          if m.group(1) == ":":
+              # LAST term of the case: the colon it carries must move onto the line above, which
+              # therefore has to be another term ending in a comma.
+              prev = lines[i - 1].rstrip("\n")
+              if not prev.endswith(","):
+                  sys.exit("control NOT APPLIED: NotObserved is the last term of its case but the "
+                           "line above does not end in a comma (%r) -- the case was restructured, "
+                           "so deleting one line would not leave valid Go" % prev)
+              lines[i - 1] = prev[:-1] + ":\n"
+          else:
+              # MIDDLE or FIRST term: it ends in a comma and the case keeps its colon on another
+              # line, so deleting this line alone leaves valid Go. Checked rather than assumed,
+              # because "the mutant does not compile" is one of the failure modes that exits 0 and
+              # reads as a pass.
+              nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+              if not nxt.startswith('stringField(cm, "reason")'):
+                  sys.exit("control NOT APPLIED: NotObserved ends in a comma but the line after it "
+                           "(%r) is not another term of the same case -- deleting one line would "
+                           "not leave valid Go" % nxt)
           del lines[i]
           open(p, "w").writelines(lines)
           print("control applied: removed the NotObserved term from the unevaluated arm")
