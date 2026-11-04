@@ -79,6 +79,9 @@ func TestRBACGen_Generate(t *testing.T) {
 			CompositionDefinitionGroup:     params.CompositionDefintionGVR.Group,
 			CompositionDefinitionVersion:   params.CompositionDefintionGVR.Version,
 			CompositionDefinitionResource:  params.CompositionDefintionGVR.Resource,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(mockResources, nil)
@@ -123,6 +126,9 @@ func TestRBACGen_Generate(t *testing.T) {
 			CompositionGroup:     params.CompositionGVR.Group,
 			CompositionVersion:   params.CompositionGVR.Version,
 			CompositionResource:  params.CompositionGVR.Resource,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(mockResources, nil)
@@ -156,6 +162,9 @@ func TestRBACGen_Generate(t *testing.T) {
 		expectedParams := chartinspector.Parameters{
 			CompositionName:      params.CompositionName,
 			CompositionNamespace: params.CompositionNamespace,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(mockResources, nil)
@@ -187,6 +196,9 @@ func TestRBACGen_Generate(t *testing.T) {
 		expectedParams := chartinspector.Parameters{
 			CompositionName:      params.CompositionName,
 			CompositionNamespace: params.CompositionNamespace,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(mockResources, nil)
@@ -214,6 +226,9 @@ func TestRBACGen_Generate(t *testing.T) {
 		expectedParams := chartinspector.Parameters{
 			CompositionName:      params.CompositionName,
 			CompositionNamespace: params.CompositionNamespace,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(nil, errors.New("some error"))
@@ -243,6 +258,9 @@ func TestRBACGen_Generate(t *testing.T) {
 		expectedParams := chartinspector.Parameters{
 			CompositionName:      params.CompositionName,
 			CompositionNamespace: params.CompositionNamespace,
+			// #329: the resolved release name is sent explicitly, because
+			// chart-inspector cannot read it off the live object on an adoption path.
+			ReleaseName: "test-base",
 		}
 
 		mockInspector.On("Resources", mock.Anything, expectedParams).Return(mockResources, nil)

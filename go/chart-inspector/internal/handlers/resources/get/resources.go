@@ -14,7 +14,6 @@ import (
 	"github.com/krateo-platformops/chart-inspector/internal/handlers/resources"
 	"github.com/krateo-platformops/chart-inspector/internal/helper"
 	"github.com/krateo-platformops/chart-inspector/internal/tracer"
-	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	helmutils "github.com/krateo-platformops/plumbing/helm/utils"
 	helmv3 "github.com/krateo-platformops/plumbing/helm/v3"
@@ -66,6 +65,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	compositionDefinitionNamespace := r.URL.Query().Get("compositionDefinitionNamespace")
 	compositionVersion := r.URL.Query().Get("compositionVersion")
 	compositionResource := r.URL.Query().Get("compositionResource")
+	releaseName := r.URL.Query().Get("releaseName")
 
 	compositionGroup := helper.GetQueryParamWithDefault(r, "compositionGroup", "composition.krateo.io")
 	compositionDefinitionGroup := helper.GetQueryParamWithDefault(r, "compositionDefinitionGroup", "core.krateo.io")
@@ -81,6 +81,33 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if compositionName == "" || compositionNamespace == "" || compositionDefinitionName == "" || compositionDefinitionNamespace == "" || compositionVersion == "" || compositionResource == "" {
 		log.ErrorContext(ctx, "missing required query parameters")
 		response.BadRequest(w, fmt.Errorf("missing required query parameters"))
+		return
+	}
+
+	// releaseName is REQUIRED and is checked SEPARATELY so the error names it (#329).
+	//
+	// This used to be read off the composition's krateo.io/release-name LABEL, from the live object
+	// fetched below. That couples this service to the CALLER'S PERSISTENCE SCHEDULE, which is not
+	// something a callee can see — and on core-provider's #303 adoption path the label does not
+	// exist yet: a recreated CR has none (its absence is what triggers adoption), the cdc resolves
+	// the adopted name in memory, and its Observe is a pure read that must not persist. So the
+	// Install below ran with release name "" and helm answered `no name provided`, as a 500.
+	//
+	// A 500 is a claim about THIS SERVER. The caller then read "not my fault, retry later" and
+	// retried at 1s, 2s, 4s, 8s, 16s forever, while the one sentence that resolved it sat in the
+	// response body — and because the failure was in Observe, the caller never reached the phase
+	// that would have written the label. The retry could not have worked.
+	//
+	// 400 WITH THE PARAMETER NAMED, not a silent fall back to the label. Falling back is what hid
+	// this: an empty release name is indistinguishable from a caller that did not send one, and
+	// guessing turns a caller's bug into this service's 500. See #325 for the same shape with a
+	// different cause.
+	if releaseName == "" {
+		log.ErrorContext(ctx, "missing required query parameter releaseName")
+		response.BadRequest(w, fmt.Errorf("missing required query parameter \"releaseName\": the "+
+			"caller must send the helm release name it resolved for this composition. It is NOT "+
+			"derived from the composition's krateo.io/release-name label here, because that label "+
+			"may not be persisted yet on an adoption path (core-provider#329)"))
 		return
 	}
 
@@ -209,7 +236,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Install with DryRun to get templated manifest using global helm client with tracer integration
-	rel, err := h.HelmClient.Install(ctx, compositionMeta.GetReleaseName(composition), compositionDefinition.Spec.Chart.Url, installCfg)
+	// releaseName from the QUERY, never compositionMeta.GetReleaseName(composition). See the
+	// validation above: the label on the live object is not the caller's resolved name on every
+	// path, and reading it here produced a permanent retry loop (#329).
+	rel, err := h.HelmClient.Install(ctx, releaseName, compositionDefinition.Spec.Chart.Url, installCfg)
 	if err != nil {
 		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),

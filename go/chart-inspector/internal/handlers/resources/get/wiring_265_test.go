@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -88,7 +89,10 @@ func doRequest(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/resources?"+
 		"compositionName=fw&compositionNamespace=krateo-system"+
 		"&compositionDefinitionName=fireworksapp&compositionDefinitionNamespace=krateo-system"+
-		"&compositionVersion=v1-0-0&compositionResource=fireworks", nil)
+		"&compositionVersion=v1-0-0&compositionResource=fireworks"+
+		// releaseName is REQUIRED since #329. Without it the handler answers 400 before reaching
+		// the render step, and this test's own vacuity guard says so rather than passing.
+		"&releaseName=fw-abcdefgh", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -142,4 +146,73 @@ func TestHandler_UnrelatedFailureStillAnswers500(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for an unrelated failure. body: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// recordingHelmClient captures the release name the handler passes to Install.
+type recordingHelmClient struct {
+	helmconfig.Client
+	got *string
+}
+
+func (c recordingHelmClient) Install(_ context.Context, name string, _ string, _ *helmconfig.InstallConfig) (*helmconfig.Release, error) {
+	*c.got = name
+	return nil, errors.New("install failed: recorded and stopped")
+}
+
+// #329. THE NAME THE SERVER USES MUST BE THE CALLER'S, not the composition's label.
+//
+// This exists because a mutant survived: replacing `releaseName` with `""` at the Install call
+// broke nothing. The 400-when-absent test does not cover it — a server that accepts the parameter
+// and then ignores it passes that test and reproduces the original defect exactly.
+//
+// The fixture's composition deliberately carries NO krateo.io/release-name label, which is the
+// adoption path's state: if the handler ever reads the label again, it gets "" and this fails,
+// which is the failure the openstack-ironic-operator-kog session measured as a permanent retry
+// loop on a live cluster.
+func TestHandler_UsesTheCallersReleaseNameNotTheCompositionLabel(t *testing.T) {
+	var got string
+	rec := doRequest(t, wiringFixture(t, recordingHelmClient{got: &got}))
+	requireReachedRender(t, rec)
+
+	if got != "fw-abcdefgh" {
+		t.Errorf("Install was called with release name %q, want %q (the releaseName query "+
+			"parameter). The fixture's composition has NO krateo.io/release-name label, so %q "+
+			"means the handler went back to reading the label -- which on an adoption path is "+
+			"empty, makes helm answer `no name provided`, and wedges the caller in a retry loop "+
+			"it cannot escape (core-provider#329)", got, "fw-abcdefgh", got)
+	}
+}
+
+// #329. An absent releaseName must be a 400 that NAMES the parameter.
+//
+// Lives here rather than beside the other required-parameter cases because those are in
+// resources_test.go, which is behind `//go:build integration` and does not run in the default
+// suite — so the mutant that deletes this guard SURVIVED until this test existed. A case in a
+// file the default build excludes is coverage of the integration job, not of the package.
+//
+// 400 AND NOT 500, and the distinction is the whole defect. A 500 is the one class a caller is
+// entitled to read as "not my fault, retry later", so core-provider retried at 1s, 2s, 4s, 8s,
+// 16s forever — and no amount of retrying can supply a parameter the caller never sent. The
+// parameter name is in the body because the one sentence that resolves this must not require
+// reading this source.
+func TestHandler_MissingReleaseNameIs400AndNamesTheParameter(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/resources?"+
+		"compositionName=fw&compositionNamespace=krateo-system"+
+		"&compositionDefinitionName=fireworksapp&compositionDefinitionNamespace=krateo-system"+
+		"&compositionVersion=v1-0-0&compositionResource=fireworks", nil)
+	rec := httptest.NewRecorder()
+	wiringFixture(t, unservedKindHelmClient{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. Every other required parameter is present, so this can "+
+			"only be about releaseName -- and a 500 here is what sent the caller into a permanent "+
+			"retry loop. body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "releaseName") {
+		t.Errorf("the 400 body does not name the parameter: %s", rec.Body.String())
+	}
+
+	// CONTROL: the same fixture WITH the parameter must get past this guard and reach the render
+	// step. Without it, a handler that rejected every request would satisfy the assertions above.
+	requireReachedRender(t, doRequest(t, wiringFixture(t, unservedKindHelmClient{})))
 }
