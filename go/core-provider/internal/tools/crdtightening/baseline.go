@@ -25,33 +25,57 @@ package crdtightening
 // core-provider. Measured, with the denominator: of 68 entries the only match on "core" is
 // `core-provider-agent`, and nothing names chart `core-provider` or `core-provider-crds`.
 //
-// The obvious suggestion — "ask installer to add a pin entry" — is the WRONG one here, and the
-// installer session said so before anyone acted on it. core-provider is not pinned as a composition
-// at all: `core-provider` and `core-provider-crds` are the two subchart DEPENDENCIES the umbrella
-// declares in its own `chart/Chart.yaml`. There is no pin entry to add, so this needs a different
-// resolver rather than a change on their side.
+// The obvious fix — "ask installer to add a pin entry" — is the WRONG one here, and the installer
+// session said so before anyone acted on it. core-provider is not pinned as a composition at all:
+// `core-provider` and `core-provider-crds` are the two subchart DEPENDENCIES the umbrella declares
+// in its own Chart.yaml. There is no entry to add, so this needs a different resolver rather than a
+// change on their side.
 //
-// It is still a pin in every sense that matters: a reviewable number that moves only through a PR in
-// installer's repo, and the version actually deployed. At the time of writing it reads 2.13.57 —
-// which is the CDC version running on krateo-057, while latest-published is 2.13.61. That gap is the
-// whole argument: latest-published would have measured against a chart no cluster is running.
+// SO THE SOURCE IS THE RELEASED UMBRELLA CHART, AND NOT ITS `main`. That distinction is the whole
+// design, and it is installer's correction to a first version of this file that read `main`:
 //
-// So the order is: an explicit version, else the umbrella's declared dependency, else
-// latest-published. The last is a fallback and not a default, and Source names which rule was used
-// on every run, because a baseline that moves when this repo publishes means a tightening introduced
-// and published in one release compares against itself — and the run log is the only place that
-// becomes visible.
+//	1. the cluster                  exact, and unavailable to a CI gate
+//	2. the RELEASED installer chart  lags deployment by at most one roll     <- what this uses
+//	3. installer main                AHEAD of deployment by every unreleased merge
+//	4. latest published              no relationship to deployment at all
+//
+// AHEAD IS THE DANGEROUS DIRECTION for this gate. Its job is to fail on a tightening against the
+// version in the field. A baseline that advances the instant a pin MERGES absorbs the tightening
+// before any cluster has the version — so a narrowing shipped in 2.13.58..2.13.61, which no cluster
+// has ever run, becomes invisible. The released chart still catches it. A merged pin describes no
+// cluster; installer's main currently carries eleven merged-but-unreleased changes, several of them
+// pins, and PR #658 would move those two dependency versions to 2.13.61 while every cluster stays
+// on 2.13.57.
+//
+// Today all the deployed-ish sources agree and only latest-published is wrong, by four versions:
+//
+//	released installer 0.3.506 Chart.yaml   core-provider-crds  2.13.57
+//	installer main                          core-provider-crds  2.13.57
+//	latest published core-provider-crds                         2.13.61
+//	cdc actually running   057 {2.13.57: 70, 2.13.45: 1}   demo {2.13.57: 42, 2.13.45: 2}
+//
+// The divergence is one merge away, which is why the source matters before it bites.
+//
+// Order: an explicit version, else the released umbrella's declared dependency, else
+// latest-published. The last is a FALLBACK, not a default, and says so in the run log along with
+// the reason the preferred resolver failed — because knowing only that a fallback was used hides
+// which of the two things went wrong, and they have different fixes ("the installer moved" versus
+// "the registry did not answer"). Under that fallback alone the baseline moves when this repo
+// publishes, so a tightening introduced and published in one release would compare against itself.
+//
+// NOT USED HERE, but recorded so nobody rediscovers it: installer publishes a
+// `krateo-installed-versions` ConfigMap written by the release actually installed, which is source
+// (1) rather than (2). It covers pin entries only today, so core-provider-crds is absent — and it
+// needs a cluster, which a CI gate does not have. If anyone later wants "what is deployed" rather
+// than "what the newest release declares", that is where it should come from.
 
 import (
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -89,9 +113,11 @@ func ResolveBaseline(registry, chart, version, dir string) (*Artifact, error) {
 	source := "explicit version"
 	if version == "" {
 		var declaredErr error
-		version, declaredErr = umbrellaDependencyVersion(chart)
+		var umbrella string
+		version, umbrella, declaredErr = releasedUmbrellaDependency(chart)
 		if declaredErr == nil {
-			source = "installer chart/Chart.yaml dependencies[] (the deployed, reviewable pin)"
+			source = fmt.Sprintf("released installer chart %s, dependencies[] (lags deployment "+
+				"by at most one roll)", umbrella)
 		} else {
 			var err error
 			version, err = latestPublished(ref)
@@ -100,12 +126,12 @@ func ResolveBaseline(registry, chart, version, dir string) (*Artifact, error) {
 				// apart from "clean" will report clean, and knowing only that the fallback failed
 				// hides that the preferred resolver failed first.
 				return nil, fmt.Errorf("could not determine a baseline version for %s. The "+
-					"umbrella's declared dependency could not be read (%v) and neither could the "+
-					"latest published version (%w)", chart, declaredErr, err)
+					"released umbrella's declared dependency could not be read (%v) and neither "+
+					"could the latest published version (%w)", chart, declaredErr, err)
 			}
 			// Named as a FALLBACK in the run log, because this is the one resolution under which
 			// the baseline moves when this repo publishes.
-			source = fmt.Sprintf("latest published — FALLBACK, the umbrella's declared "+
+			source = fmt.Sprintf("latest published — FALLBACK, the released umbrella's declared "+
 				"dependency could not be read (%v)", declaredErr)
 		}
 	}
@@ -137,76 +163,69 @@ func ResolveBaseline(registry, chart, version, dir string) (*Artifact, error) {
 	}, nil
 }
 
-// UmbrellaChartURL is installer's own Chart.yaml, where the two core-provider subcharts are pinned.
-const UmbrellaChartURL = "https://raw.githubusercontent.com/krateo-platformops/installer/main/" +
-	"chart/Chart.yaml"
+// UmbrellaChart is installer's own chart, where the two core-provider subcharts are pinned.
+// Resolved at its latest PUBLISHED version — see the note above on why not its `main`.
+const UmbrellaChart = "installer"
 
-// umbrellaDependencyVersion reads the version installer's umbrella DECLARES for `chart`.
+// releasedUmbrellaDependency reads the version the RELEASED umbrella declares for `chart`, and
+// returns the umbrella version it read it from so the run log can name the source exactly.
 //
-// Preferred over latest-published because it is the version actually deployed and it only moves
-// through a PR in that repo — the same two properties a `component-pins.yaml` entry has, which is
-// what makes this a real pin rather than a convenient guess.
-func umbrellaDependencyVersion(chart string) (string, error) {
-	// Three attempts: a transient blip should not red an unrelated PR. It must not SILENTLY fall
-	// through to latest-published either, which is why the caller records the reason in Source.
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(2*attempt) * time.Second)
-		}
-		resp, err := http.Get(UmbrellaChartURL)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("GET %s returned %d", UmbrellaChartURL, resp.StatusCode)
-			continue
-		}
-		return dependencyVersion(body, chart)
+// `helm show chart` on an OCI ref prints the chart's whole metadata, dependencies included, so this
+// is one registry call and no pull. It also means the answer comes from the published artifact
+// rather than from a branch — the distinction the note above is entirely about.
+func releasedUmbrellaDependency(chart string) (version, umbrella string, err error) {
+	ref := DefaultRegistry + "/" + UmbrellaChart
+	out, err := exec.Command("helm", "show", "chart", ref).CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("helm show chart %s: %w\n%s", ref, err, out)
 	}
-	return "", fmt.Errorf("after 3 attempts: %w", lastErr)
+	return parseUmbrella(out, chart)
 }
 
-// dependencyVersion is the parsing, split out so it is testable without the network.
-func dependencyVersion(chartYAML []byte, chart string) (string, error) {
+// parseUmbrella is the parsing, split out so it is testable without a registry.
+//
+// Parsed as YAML and never line-scanned. `version:` appears inside every dependencies[] entry as
+// well as at the top level, so a grep for it returns a subchart's version as often as the
+// umbrella's — and both are plausible-looking semvers, which is the shape of a wrong reading that
+// never announces itself.
+func parseUmbrella(chartYAML []byte, chart string) (version, umbrella string, err error) {
 	var doc struct {
+		Version      string `json:"version"`
 		Dependencies []struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"dependencies"`
 	}
 	if err := yaml.Unmarshal(chartYAML, &doc); err != nil {
-		return "", fmt.Errorf("parsing the umbrella Chart.yaml: %w", err)
+		return "", "", fmt.Errorf("parsing the umbrella chart metadata: %w", err)
 	}
 	for _, d := range doc.Dependencies {
-		if d.Name == chart {
-			if d.Version == "" {
-				return "", fmt.Errorf("the umbrella declares %s with no version", chart)
-			}
-			// A templated placeholder is not a version. The umbrella's own `version:` field reads
-			// CHART_VERSION until release time and a dependency could acquire the same treatment;
-			// resolving that string would produce a pull failure several steps later, attributed
-			// to the registry rather than to the placeholder.
-			//
-			// Asserted as a POSITIVE shape rather than by listing the placeholder spellings: a
-			// denylist of "contains { or $ or an underscore" passes the next placeholder nobody
-			// predicted, while "looks like a version" fails every one of them.
-			if !versionRe.MatchString(d.Version) {
-				return "", fmt.Errorf("the umbrella declares %s at %q, which is not a version — "+
-					"most likely a templated placeholder resolved at release time", chart, d.Version)
-			}
-			return d.Version, nil
+		if d.Name != chart {
+			continue
 		}
+		if d.Version == "" {
+			return "", "", fmt.Errorf("the umbrella declares %s with no version", chart)
+		}
+		// A templated placeholder is not a version. The umbrella's own `version`/`appVersion` read
+		// CHART_VERSION until release time; installer says the dependency pins are deliberately
+		// literal so they stay reviewable in a diff, and this holds them to it. Asserted as a
+		// POSITIVE shape rather than by listing placeholder spellings: a denylist of "contains { or
+		// $ or an underscore" passes the next placeholder nobody predicted, while "looks like a
+		// version" fails every one of them. Without it the string reaches `helm pull` and fails at
+		// the registry, where the error sends the reader to the wrong system entirely.
+		if !versionRe.MatchString(d.Version) {
+			return "", "", fmt.Errorf("the umbrella declares %s at %q, which is not a version — "+
+				"most likely a templated placeholder resolved at release time", chart, d.Version)
+		}
+		// The umbrella's own version is for the run log only, so a missing one is not fatal: the
+		// baseline is still correctly resolved, it is just less precisely attributed.
+		if doc.Version == "" {
+			return d.Version, "<version unknown>", nil
+		}
+		return d.Version, doc.Version, nil
 	}
-	return "", fmt.Errorf("the umbrella declares no dependency named %s (it declares %d)",
-		chart, len(doc.Dependencies))
+	return "", "", fmt.Errorf("the released umbrella declares no dependency named %s (it declares "+
+		"%d)", chart, len(doc.Dependencies))
 }
 
 // latestPublished asks the registry rather than git. `helm show chart` with no --version resolves
