@@ -104,7 +104,7 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 
 	// CONTROL: a reason that must NOT be unevaluated, or the assertions above would pass against a
 	// branch that swallowed everything.
-	for _, reason := range []string{"Creating", "Unavailable", "AuthorizationDenied"} {
+	for _, reason := range []string{"Creating", "Unavailable", "AuthorizationDenied", "CreateFailed", "UpdateFailed"} {
 		if got := krateoReady(krateoCR("Unknown", reason, true)); got == childUnevaluated {
 			t.Errorf("reason %q maps to childUnevaluated; a converging or failing child must keep "+
 				"holding its parent back", reason)
@@ -122,6 +122,32 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 		t.Errorf("AuthorizationDenied maps to %d, want childFailed (%d). A 403 with no rate-limit "+
 			"signal is a decision; reporting the parent as Creating says the opposite, indefinitely",
 			got, childFailed)
+	}
+
+	// CreateFailed and UpdateFailed must be FAILED, mapped BEFORE rest-dynamic-controller ships
+	// them (oasgen-provider is landing them in 0.53.0). That ordering is the correction to this
+	// file's own earlier mistake: the ObserveFailed deferral reasoned from core-provider's pin when
+	// the reason arrives from the CHILD's controller, so waiting for a reason to appear is waiting
+	// for the defect. An unmapped reason falls to converging — the exact inversion #320 is about.
+	//
+	// The verb is in the reason because the distinction used to live in prose the portal cannot
+	// branch on; see childhealth.go's comment for the #42/#433 resolution behind it.
+	for _, reason := range []string{"CreateFailed", "UpdateFailed"} {
+		if got := krateoReady(krateoCR("False", reason, true)); got != childFailed {
+			t.Errorf("reason %q maps to %d, want childFailed (%d). A create or update that FAILED "+
+				"is not one still in progress; reporting the parent as Creating says the opposite, "+
+				"indefinitely", reason, got, childFailed)
+		}
+	}
+
+	// DeleteFailed must NOT be in that arm, and its absence is a decision. A refused delete holds
+	// the finalizer (#261); a terminal-looking Ready reason invites the finalizer removal that
+	// orphans a paid resource. Asserted so that someone extending the arm "for symmetry" has to
+	// argue with this rather than discover it.
+	if got := krateoReady(krateoCR("False", "DeleteFailed", true)); got == childFailed {
+		t.Error("DeleteFailed maps to childFailed. A refused delete must hold its finalizer, so it " +
+			"must not acquire a terminal Ready reason here -- see #261. If rest-dynamic-controller " +
+			"ever emits this, it needs its own decision, not this arm")
 	}
 
 	// And the generic reason still buckets the same way, so the fix above did not come at the cost

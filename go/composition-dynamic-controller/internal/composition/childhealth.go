@@ -662,6 +662,34 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
+		case stringField(cm, "reason") == "CreateFailed",
+			stringField(cm, "reason") == "UpdateFailed":
+			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to
+			// one still in progress. Both are permanent-pending-human, so both are failures here.
+			//
+			// MAPPED BEFORE THE REASONS SHIP, deliberately, and that is the correction to a mistake
+			// in this very file. The ObserveFailed deferral used to be justified with "core-provider
+			// pins v1.7.5 ... so no cluster can produce a reason this rollup does not understand" —
+			// false the day it was written, because the rollup reads CHILDREN and a child's reason
+			// comes from the child's own controller, on the child's own release schedule
+			// (core-provider#320). Waiting for the reason to appear is waiting for the defect.
+			//
+			// An unmapped reason falls to the converging default, which is the inversion this whole
+			// issue is about: the reason invented to say "this will not progress" would report as
+			// "still working on it". Adding the case early costs nothing if the reason never
+			// arrives.
+			//
+			// WHY THE VERB IS IN THE REASON AT ALL, since it was previously in the message: the
+			// runtime sets Creating on BOTH create outcomes and the distinction lived in prose
+			// ("message=create failed: 422"). The portal cannot branch on free text that is ours to
+			// reword, which was the frontend session's objection and the reason oasgen-provider
+			// moved the verb into the reason instead (their #42/#433 resolution).
+			//
+			// NO DeleteFailed, and its absence is a decision rather than an omission. A refused
+			// delete must HOLD the finalizer (#261): giving it a terminal-looking Ready reason
+			// invites exactly the finalizer removal that orphans a paid resource. If a
+			// `DeleteFailed` ever appears, it does not belong in this arm.
+			return childFailed
 		case stringField(cm, "reason") == "AuthorizationDenied":
 			// rest-dynamic-controller's reason for a refusal that WILL NOT BE RETRIED — a 403 with
 			// no rate-limit signal is a decision, and nothing the controller does next can change
