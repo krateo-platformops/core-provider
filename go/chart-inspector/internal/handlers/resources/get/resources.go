@@ -265,6 +265,42 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.WarnContext(ctx, "could not read the rendered manifest; leaving observed verbs unnarrowed",
 				slog.Any("err", rerr))
 		} else {
+			// LIFECYCLE HOOKS, which neither half of the evidence above can see (core-provider#311).
+			//
+			// The tracer records a DRY-RUN install, and a dry run executes no hooks. helm then keeps
+			// hooks OUT of Manifest by construction, so renderedObjects cannot see them either. The
+			// result was that no grant was ever generated for a hook object — and a `pre-delete`
+			// hook turned teardown into an uninstall that could never succeed, because helm must
+			// DELETE the previous hook object under before-hook-creation.
+			//
+			// Added BEFORE narrowLookupVerbs, and recorded in rendered.owned, which is the whole
+			// trick: that function narrows any superset entry whose key it cannot find in the owned
+			// set, and a hook is absent from Manifest by definition. Appending the entries without
+			// the keys would see them immediately demoted to get/list/watch — reintroducing the
+			// exact bug with extra steps.
+			hookRes, hookKeys, hookUnresolved := hookObjects(rel.GetHooks(), composition.GetNamespace(), h.Plurarizer)
+			for _, k := range hookKeys {
+				rendered.owned[k] = struct{}{}
+			}
+			resLi = append(resLi, hookRes...)
+
+			// A hook whose kind we could not resolve is REPORTED at install time rather than
+			// discovered at teardown, and its group is marked opaque so nothing in it is narrowed
+			// on evidence we do not have. This is the loud install-time failure that the rejected
+			// alternative — refusing any chart with uncoverable hooks — was reaching for, without
+			// rejecting the charts that work today because an ordinary resource happens to need
+			// the same kind.
+			if len(hookUnresolved) > 0 {
+				for g := range hookGroupsOf(rel.GetHooks()) {
+					rendered.opaqueGroups[g] = struct{}{}
+				}
+				log.WarnContext(ctx, "could not derive RBAC for every lifecycle hook; a teardown may fail",
+					slog.Any("hooks", hookUnresolved), slog.Int("hooksCovered", len(hookRes)))
+			} else if len(hookRes) > 0 {
+				log.InfoContext(ctx, "granted RBAC for lifecycle hook objects",
+					slog.Int("hookObjects", len(hookRes)))
+			}
+
 			var narrowed int
 			resLi, narrowed = narrowLookupVerbs(resLi, rendered)
 			if narrowed > 0 {
