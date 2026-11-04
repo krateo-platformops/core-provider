@@ -667,6 +667,22 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to
 			// one still in progress. Both are permanent-pending-human, so both are failures here.
 			//
+			// NOT SHIPPING YET, and the register matters because the arm beside this one taught me
+			// that. Verified at krateo-platformops/oasgen-provider, branch feat/053-readyassessed,
+			// commit 236d067, path go/rest-dynamic-controller/internal/controllers/condition/
+			// condition.go: both constructors exist, Type=TypeReady, Status=False. That branch is
+			// an UNMERGED DRAFT (their PR #438) targeting 0.53.0 -- not merged, not tagged, not
+			// released. Contrast DriftNotConverging below, which is released and whose arm was
+			// therefore fixing a live defect rather than pre-empting one.
+			//
+			// AND NARROWER THAN THE NAME SUGGESTS. The only permanence their author was willing to
+			// establish is a POLICY REFUSAL -- PermitsURL's six refusals now wrap a sentinel, so a
+			// request that was never sent is distinguishable from a vendor having a bad minute. No
+			// status-code permanence rule was invented: a 500 stays transient, with a control arm
+			// proving it. So this fires for "the allowlist forbids this endpoint", not for every
+			// failed create, which is the right conservatism and worth knowing before anyone reads
+			// the absence of this reason as evidence a create succeeded.
+			//
 			// MAPPED BEFORE THE REASONS SHIP, deliberately, and that is the correction to a mistake
 			// in this very file. The ObserveFailed deferral used to be justified with "core-provider
 			// pins v1.7.5 ... so no cluster can produce a reason this rollup does not understand" —
