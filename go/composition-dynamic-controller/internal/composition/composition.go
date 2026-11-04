@@ -613,8 +613,37 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// Bounded by the cap in plumbing (ten identities plus an omitted count). Measured worst
 		// case in the fleet: steady-state drift is ONE child, so ~108 bytes per line at 120
 		// lines/hour.
+		// intendedDeletions is logged BESIDE deleted, and the pair is the whole point (#304). A
+		// bare `deleted:0` cannot distinguish "nothing was removed from the render" from "the
+		// merge was asked to remove something and did not" — and those two have different causes
+		// in different repositories:
+		//
+		//	intended 0, deleted 0   nothing to remove, OR the removal was already lost upstream
+		//	                        (the stored manifest no longer lists the child, so helm's
+		//	                        original.Difference(target) is legitimately empty)
+		//	intended >0, deleted 0  helm was asked and did not do it. Its deletion loop sits AFTER
+		//	                        both error returns in update() (pkg/kube/client.go), so ONE
+		//	                        failed patch skips every deletion — and updateResource appends
+		//	                        to res.Updated "regardless" of failure, so a non-zero patched
+		//	                        count does not rule this out.
+		//
+		// The live report this exists for was `created:0 deleted:0 patched:10` on a node removed
+		// from spec, with the child still present sixteen minutes later. With only those three
+		// numbers the two rows above are indistinguishable, and the issue has three candidate
+		// mechanisms precisely because nobody could tell them apart. plumbing has carried
+		// IntendedDeletions since v1.21.0 — the version this module already requires — and nothing
+		// here read it.
+		//
+		// A LOG RATHER THAN A CONDITION, deliberately: this is a diagnostic for distinguishing
+		// mechanisms, not a state a consumer should gate on. Once the mechanism is known, the fix
+		// belongs where the deletion is lost, and a condition asserting "a deletion was skipped"
+		// would be reporting a cause we have not yet established.
 		log.Info("Composition drift detected and self-healed", "package", pkg.URL,
 			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated,
+			"intendedDeletions", reconcileRes.IntendedDeletions,
+			"intendedDeletionsCount", len(reconcileRes.IntendedDeletions),
+			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
+			"deletionsSkipped", len(reconcileRes.IntendedDeletions) > 0 && reconcileRes.Deleted == 0,
 			"changedObjects", reconcileRes.ChangedObjects, "changedObjectsOmitted", reconcileRes.ChangedObjectsOmitted)
 		// A FLAG, NOT A RETURN (#337). This returned here, BEFORE the setStatus/persist pair below,
 		// so a reconcile whose self-heal changed any object reported drift without ever computing
