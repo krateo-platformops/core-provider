@@ -30,6 +30,25 @@ import (
 // rel is consulted ONLY for existence, never for content, so it cannot disagree with currentDigest
 // about anything this function uses.
 //
+// THE COVERAGE TABLE, BY INPUT STATE rather than by the arms that exist. This form is the
+// openstack-as-a-service session's, and the reason for it is the defect it exposes: reasoning about
+// the arms reads only the branches someone wrote, while enumerating the inputs shows the row with
+// no answer. The missing row was an EARLY RETURN:
+//
+//	managed ABSENT,  release exists     -> drift     #326  (this was the missing row)
+//	managed ABSENT,  no release         -> silent          may not be created yet
+//	managed present, digest ''          -> drift     #273  the unverifiable case
+//	managed present, digest != current  -> drift     #273  the stale case
+//	managed present, digest == current  -> silent          verified current
+//
+// The #273 digest arms had shipped, were tested, and were cited as covering exactly the case they
+// could not see: the early return on an absent inventory sat in FRONT of them, so the digest
+// comparison was unreachable precisely for the population with no digest. A check that is correct,
+// shipped, tested, and structurally unable to reach its own case.
+//
+// So when someone says a check already covers a case -- including when the someone is me -- the
+// question is not which arms exist but WHAT RETURNS BEFORE IT, AND ON WHAT CONDITION.
+//
 // It is deliberately a pure function of the stored status, the current digest and that object: Observe cannot
 // afford a DecodeMinRelease per reconcile (15-27x the digest-only path, up to 125MB of allocation
 // for a 5MB manifest — the measurement that settled #261), and it does not need one. The digest
