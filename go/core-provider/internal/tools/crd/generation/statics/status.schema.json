@@ -66,6 +66,18 @@
     "previousManagedCount": {
       "type": "integer",
       "description": "How many children status.managed listed BEFORE the last render replaced it, so the Ready message can say the recorded set shrank (#230). A multi-component bump legitimately renders fewer resources mid-flight; the rollup then evaluates the smaller set, finds it healthy and reports Available, and 122 -> 108 -> 122 is otherwise indistinguishable from 122 -> 122. Persisted rather than compared in flight because Observe stamps the message on every reconcile and has no previous inventory of its own. MUST BE DECLARED HERE for the same reason as managedDigest (#293)."
+    },
+    "managedChildrenCount": {
+      "type": "integer",
+      "description": "How many children status.managed currently lists. The denominator for healthEvaluatedChildren and unreadableChildrenCount, written on every rollup so that full coverage reads as an equality rather than as an absent field."
+    },
+    "healthEvaluatedChildren": {
+      "type": "integer",
+      "description": "How many of the managed children this controller could actually health-evaluate. Less than managedChildrenCount means the Ready condition asserts something about a subset."
+    },
+    "unreadableChildrenCount": {
+      "type": "integer",
+      "description": "How many managed children this controller's ServiceAccount was REFUSED a read of (HTTP 403). Non-zero is a gap in the generated RBAC, not a problem with the children; the child names are in the Ready condition message."
     }
   }
 }
