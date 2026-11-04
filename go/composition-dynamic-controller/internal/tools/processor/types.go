@@ -19,6 +19,12 @@ type Metadata struct {
 	Namespace string `json:"namespace"`
 	// Use the map to capture annotations, including the helm hook
 	Annotations map[string]string `json:"annotations"`
+	// Labels carries the post-renderer's krateo.io/composition-* stamps, which are the only
+	// RECORDED statement of which composition a stored release belongs to. The release name is
+	// not that statement: it is derived from the CR's UID, which a recreated CR does not have, and
+	// it can be overridden outright by the krateo.io/release-name label. See
+	// composition.compositionIdentity.
+	Labels map[string]string `json:"labels"`
 }
 
 // MinimalMetadata holds only the necessary fields for reference extraction.
@@ -31,6 +37,10 @@ type MinimalMetadata struct {
 
 func (m *MinimalMetadata) GetAnnotations() map[string]string {
 	return m.Metadata.Annotations
+}
+
+func (m *MinimalMetadata) GetLabels() map[string]string {
+	return m.Metadata.Labels
 }
 
 func (m *MinimalMetadata) GetNamespace() string {

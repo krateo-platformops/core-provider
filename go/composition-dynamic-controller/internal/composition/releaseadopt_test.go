@@ -6,11 +6,6 @@ import (
 	"testing"
 
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-
-	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 )
 
 // #303. A composition CR that is RECREATED gets a new UID, so a release name minted from that UID
@@ -22,186 +17,273 @@ import (
 // Diego's statement of the requirement: when a new version is served in a generated CRD,
 // core-provider should not uninstall and reinstall but do a helm upgrade.
 //
+// THE IDENTITY CHANGED AFTER DIEGO REFUTED THE FIRST ONE. The original decision matched the
+// release NAME by shape (prefix + a suffix of the generator's length). He pointed out that two
+// compositions can share a name in one namespace — different CompositionDefinitions are different
+// CRDs — and that the name can be overridden outright. Both break a name-shaped identity, and the
+// tests below are written against the cases he named rather than around them.
+//
 // These tests cover the DECISION, which is the half that can be wrong in a way that costs
 // workloads. The listing above it is I/O.
 
-func crNamed(name string, uid types.UID) *unstructured.Unstructured {
-	u := &unstructured.Unstructured{}
-	u.SetName(name)
-	u.SetNamespace("openstack")
-	u.SetUID(uid)
-	u.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "composition.krateo.io", Version: "v0-3-28", Kind: "MariaDB",
-	})
-	return u
+// mariadb and postgres are two compositions SHARING A NAME in one namespace, which is the
+// configuration the name-shaped identity could not represent.
+var (
+	mariadb  = compositionIdentity{Group: "composition.krateo.io", Resource: "mariadbs", Name: "db", Namespace: "openstack"}
+	postgres = compositionIdentity{Group: "composition.krateo.io", Resource: "postgresqls", Name: "db", Namespace: "openstack"}
+)
+
+// owns builds a candidate release that records the given identity, as helm stores it after
+// plumbing's post-renderer has stamped every object.
+func owns(releaseName string, ids ...compositionIdentity) releaseCandidate {
+	return releaseCandidate{Name: releaseName, Identities: ids, Decoded: true}
 }
 
 // THE FIX. A release minted for the OLD UID must be adopted by the CR bearing the NEW one, so the
 // reconcile becomes an upgrade of that release instead of an install of a second.
 func TestPickAdoptableRelease_AdoptsThePriorReleaseAfterTheCRIsRecreated(t *testing.T) {
-	old := crNamed("mariadb", types.UID("92wd4czz-1111-2222-3333-444444444444"))
-	new := crNamed("mariadb", types.UID("9c847c79-5555-6666-7777-888888888888"))
-
-	oldRelease := compositionMeta.CalculateReleaseName(old, true)
-	minted := compositionMeta.CalculateReleaseName(new, true)
-
-	// PRECONDITION, and the whole defect in one assertion: the two UIDs produce DIFFERENT names.
-	// If they did not, there would be nothing to fix and every arm below would pass vacuously.
-	if oldRelease == minted {
-		t.Fatalf("precondition: two different UIDs produced the same release name %q, so this "+
-			"suite cannot exercise the recreation case", oldRelease)
-	}
-
-	got, err := pickAdoptableRelease([]string{oldRelease}, new.GetName(), minted, true)
+	got, err := pickAdoptableRelease([]releaseCandidate{owns("db-oldoldol", mariadb)}, mariadb, "db-newnewne")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != oldRelease {
-		t.Errorf("picked %q, want the existing release %q. Returning the minted name %q is what "+
-			"makes Observe report ResourceExists=false and install a SECOND release", got, oldRelease, minted)
+	if got != "db-oldoldol" {
+		t.Errorf("picked %q, want the existing release %q. Returning the minted name is what "+
+			"installs a second release beside the first (#303)", got, "db-oldoldol")
 	}
 }
 
-// THE DESTRUCTIVE DIRECTION, and the arm I care about most: a release belonging to a DIFFERENT
-// composition whose name merely starts with this one's must never be adopted. Adopting it hands
-// this composition another component's workloads, which is strictly worse than the split.
-func TestPickAdoptableRelease_DoesNotAdoptAnotherCompositionsRelease(t *testing.T) {
-	// `mariadb-extra` is a real naming shape, and its release name begins with "mariadb-".
-	sibling := compositionMeta.CalculateReleaseName(
-		crNamed("mariadb-extra", types.UID("aaaaaaaa-1111-2222-3333-444444444444")), true)
-	if !strings.HasPrefix(sibling, "mariadb-") {
-		t.Fatalf("precondition: %q does not start with \"mariadb-\", so this arm tests nothing", sibling)
-	}
-
-	me := crNamed("mariadb", types.UID("9c847c79-5555-6666-7777-888888888888"))
-	minted := compositionMeta.CalculateReleaseName(me, true)
-
-	got, err := pickAdoptableRelease([]string{sibling}, me.GetName(), minted, true)
+// DIEGO'S CASE, AND THE ONE THE OLD DESIGN GOT CATASTROPHICALLY WRONG. mariadb has been recreated
+// and its own release is GONE (a version-migration handover that lost its race uninstalled it).
+// postgres, sharing the name `db` in this namespace, still has its release.
+//
+// Under the name-shaped identity, `db-ppppppp1` matched `db-` + 8 chars, so it was the SINGLE
+// candidate and was adopted: a helm upgrade of postgres's release with mariadb's chart, replacing
+// one composition's workloads with another's. Exactly what ErrAmbiguousRelease was written to
+// prevent, reached through the arm that does not fire.
+func TestPickAdoptableRelease_DoesNotAdoptASameNamedCompositionsRelease(t *testing.T) {
+	got, err := pickAdoptableRelease([]releaseCandidate{owns("db-ppppppp1", postgres)}, mariadb, "db-mmmmmmm1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got == sibling {
-		t.Errorf("adopted %q, which belongs to composition \"mariadb-extra\". A prefix match alone "+
-			"is not identity; the suffix length is what separates them", sibling)
-	}
-	if got != minted {
-		t.Errorf("picked %q, want the minted name %q: with no release of its own, this really is a "+
-			"first install", got, minted)
+	if got != "db-mmmmmmm1" {
+		t.Errorf("picked %q, want the minted name %q. The only existing release belongs to a "+
+			"DIFFERENT composition that merely shares the name `db`; adopting it upgrades "+
+			"postgres's release with mariadb's chart", got, "db-mmmmmmm1")
 	}
 }
 
-// AMBIGUITY MUST REFUSE, not guess in either direction. Adopting one of two arbitrarily could take
-// over the wrong workloads; minting a fresh name would silently reproduce the split.
-func TestPickAdoptableRelease_RefusesWhenTwoReleasesCouldBelongToIt(t *testing.T) {
-	a := compositionMeta.CalculateReleaseName(crNamed("mariadb", types.UID("11111111-a-b-c-d")), true)
-	b := compositionMeta.CalculateReleaseName(crNamed("mariadb", types.UID("22222222-a-b-c-d")), true)
-	if a == b {
-		t.Fatalf("precondition: both UIDs produced %q, so there is no ambiguity to test", a)
+// And the improvement, not merely the absence of the bug: with BOTH releases present, the recorded
+// identity resolves it. The name-shaped identity saw two candidates here and refused — safe, but
+// the composition could then never converge again.
+func TestPickAdoptableRelease_PicksItsOwnWhenASameNamedCompositionAlsoHasARelease(t *testing.T) {
+	got, err := pickAdoptableRelease([]releaseCandidate{
+		owns("db-ppppppp1", postgres),
+		owns("db-oldoldol", mariadb),
+	}, mariadb, "db-mmmmmmm1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v. Two releases whose names are both shaped like this "+
+			"composition's is not an ambiguity once the identity is recorded", err)
 	}
+	if got != "db-oldoldol" {
+		t.Errorf("picked %q, want %q", got, "db-oldoldol")
+	}
+}
 
-	me := crNamed("mariadb", types.UID("33333333-a-b-c-d"))
-	got, err := pickAdoptableRelease([]string{a, b}, me.GetName(),
-		compositionMeta.CalculateReleaseName(me, true), true)
+// DIEGO'S OTHER CASE: the release name can be OVERRIDDEN. SetReleaseName is write-once, so a
+// krateo.io/release-name on the object wins and need not begin with the CR name at all. A recreated
+// CR has lost that label, so a name-shaped matcher filters out the composition's OWN release and
+// mints — leaving #303 unfixed for precisely those compositions. A recorded identity never looks at
+// the name.
+func TestPickAdoptableRelease_AdoptsAReleaseWhoseNameWasOverridden(t *testing.T) {
+	got, err := pickAdoptableRelease([]releaseCandidate{owns("legacy-stack-db", mariadb)}, mariadb, "db-mmmmmmm1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "legacy-stack-db" {
+		t.Errorf("picked %q, want the overridden name %q: nothing about an adopted release's name "+
+			"has to resemble the CR's", got, "legacy-stack-db")
+	}
+}
 
+// The collision Diego named for safeReleaseName=false, where the release name IS the CR name. Both
+// compositions compute `db`, and the second to arrive would UPGRADE the first one's release with
+// its own chart. Refusing is the only safe answer: installing destroys postgres's workloads, and
+// silently minting a different name is #303 under a new cause.
+//
+// This is the arm the deleted `if !h.safeReleaseName { return minted }` early return skipped.
+func TestPickAdoptableRelease_RefusesWhenTheMintedNameBelongsToAnotherComposition(t *testing.T) {
+	_, err := pickAdoptableRelease([]releaseCandidate{owns("db", postgres)}, mariadb, "db")
+	if !errors.Is(err, ErrReleaseNameTaken) {
+		t.Fatalf("err = %v, want ErrReleaseNameTaken. Returning the name would upgrade postgres's "+
+			"release with mariadb's chart", err)
+	}
+	if !strings.Contains(err.Error(), "postgresqls") {
+		t.Errorf("error does not name the composition holding it, so an operator cannot act on "+
+			"it: %v", err)
+	}
+}
+
+// Two stored releases both CLAIMING this composition. Nothing produces that today, so the point is
+// that the answer is an error rather than a guess about which one holds the live objects.
+func TestPickAdoptableRelease_RefusesWhenTwoReleasesClaimIt(t *testing.T) {
+	_, err := pickAdoptableRelease([]releaseCandidate{
+		owns("db-oldoldol", mariadb),
+		owns("db-oldero1d", mariadb),
+	}, mariadb, "db-mmmmmmm1")
 	if !errors.Is(err, ErrAmbiguousRelease) {
-		t.Errorf("error %v does not wrap ErrAmbiguousRelease, so a caller cannot tell this apart "+
-			"from a transient failure", err)
-	}
-	if got != "" {
-		t.Errorf("returned %q alongside the error; a name returned on an ambiguous answer is one a "+
-			"caller may use", got)
+		t.Fatalf("err = %v, want ErrAmbiguousRelease", err)
 	}
 }
 
-// CONTROL: with no existing releases at all, the minted name is returned unchanged. Without this,
-// every arm above could pass against a function that always returned its input.
+// The ordinary first install, asserted so that none of the refusals above can be satisfied by a
+// decision that refuses everything.
 func TestPickAdoptableRelease_MintsWhenNothingExists(t *testing.T) {
-	me := crNamed("mariadb", types.UID("9c847c79-5555-6666-7777-888888888888"))
-	minted := compositionMeta.CalculateReleaseName(me, true)
-
-	got, err := pickAdoptableRelease(nil, me.GetName(), minted, true)
+	got, err := pickAdoptableRelease(nil, mariadb, "db-mmmmmmm1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != minted {
-		t.Errorf("picked %q, want %q", got, minted)
-	}
-
-	// And an unrelated release in the same namespace must not change that.
-	other := compositionMeta.CalculateReleaseName(
-		crNamed("memcached", types.UID("bbbbbbbb-1111-2222-3333-444444444444")), true)
-	got, err = pickAdoptableRelease([]string{other}, me.GetName(), minted, true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != minted {
-		t.Errorf("picked %q with only an unrelated release present, want %q", got, minted)
+	if got != "db-mmmmmmm1" {
+		t.Errorf("picked %q, want the minted name %q", got, "db-mmmmmmm1")
 	}
 }
 
-// safeReleaseName=false makes the release name the CR name, so a recreated CR already resolves to
-// the same release and there is nothing to adopt. Asserted so that the adoption path cannot start
-// firing for the unsafe mode, where the name carries no suffix to distinguish siblings.
-func TestPickAdoptableRelease_UnsafeModeResolvesByNameAlone(t *testing.T) {
-	me := crNamed("mariadb", types.UID("9c847c79-5555-6666-7777-888888888888"))
-	minted := compositionMeta.CalculateReleaseName(me, false)
-	if minted != "mariadb" {
-		t.Fatalf("precondition: safeReleaseName=false produced %q, not the bare CR name", minted)
-	}
-
-	got, err := pickAdoptableRelease([]string{"mariadb", "mariadb-extra"}, me.GetName(), minted, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "mariadb" {
-		t.Errorf("picked %q, want \"mariadb\"", got)
-	}
-}
-
-// The matcher's own contract, asserted against the GENERATOR rather than against a restated format.
-// If CalculateReleaseName's shape ever changes, this fails rather than the matcher silently ceasing
-// to recognise what the generator produces.
-func TestReleaseNameCouldBelongTo_RoundTripsWithTheGenerator(t *testing.T) {
-	for _, name := range []string{"mariadb", "a", "keystone-api", "x-y-z"} {
-		cr := crNamed(name, types.UID("9c847c79-5555-6666-7777-888888888888"))
-		generated := compositionMeta.CalculateReleaseName(cr, true)
-
-		if !compositionMeta.ReleaseNameCouldBelongTo(generated, name, true) {
-			t.Errorf("the matcher does not recognise %q, which the generator just produced for %q",
-				generated, name)
-		}
-		// And it must not recognise it as belonging to a DIFFERENT composition.
-		if compositionMeta.ReleaseNameCouldBelongTo(generated, name+"-sibling", true) {
-			t.Errorf("%q matched composition %q", generated, name+"-sibling")
-		}
-		if name != "mariadb" && compositionMeta.ReleaseNameCouldBelongTo(generated, "mariadb", true) {
-			t.Errorf("%q (for %q) matched composition \"mariadb\"", generated, name)
-		}
-	}
-
-	// Explicit negatives that a prefix-only matcher would get wrong.
-	for _, tc := range []struct{ release, crName string }{
-		{"mariadb-extra-9c847c79", "mariadb"}, // sibling's release, longer suffix
-		{"mariadb-", "mariadb"},               // empty suffix
-		{"mariadb-9c847c7", "mariadb"},        // one char short
-		{"mariadb-9c847c799", "mariadb"},      // one char long
-		{"mariadb", "mariadb"},                // no suffix at all, in safe mode
-		{"other-9c847c79", "mariadb"},         // different composition entirely
-	} {
-		if compositionMeta.ReleaseNameCouldBelongTo(tc.release, tc.crName, true) {
-			t.Errorf("%q must not be treated as a release of %q", tc.release, tc.crName)
-		}
-	}
-}
-
-// THE STATE MASK IS A TRIP-WIRE, not a comment.
+// NO EVIDENCE IS NOT A NON-MATCH, and this arm is why Decoded and Identities are separate fields.
+// A release under this exact name carrying no composition labels at all was installed before the
+// post-renderer stamped them, or is a hooks-only chart whose recorded manifest is empty by
+// construction — helm splits hooks out of Manifest, which is how #311 happened.
 //
-// adoptableStates carries a comment saying ListDeployed alone would miss the case adoption exists
-// for — the release that caused #303's outage was `failed` at revision 6. But the mask lives in the
-// I/O half of this file, so nothing exercised it: a future simplification to `ListDeployed` on the
-// reasonable-sounding grounds that "a deployed release is the only one worth adopting" would break
-// no test and silently restore the defect.
-//
+// Returning minted here is the behaviour from before adoption existed (Create would GetRelease on
+// the name, find it, and upgrade), kept deliberately because there is nothing better to go on. It
+// is asserted so nobody later reads the absence of evidence as evidence of absence.
+func TestPickAdoptableRelease_MintsForAReleaseUnderItsNameWithNoRecordedIdentity(t *testing.T) {
+	got, err := pickAdoptableRelease([]releaseCandidate{{Name: "db-mmmmmmm1", Decoded: true}}, mariadb, "db-mmmmmmm1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "db-mmmmmmm1" {
+		t.Errorf("picked %q, want %q", got, "db-mmmmmmm1")
+	}
+}
+
+// ALL FOUR LABELS OR NOTHING. A partial identity is not a weaker match, it is a different claim:
+// composition-name alone matches every composition of that name in the namespace, which is the
+// confusion the type exists to remove.
+func TestIdentityFromLabels_RequiresEveryField(t *testing.T) {
+	full := map[string]string{
+		labelCompositionGroup:     "composition.krateo.io",
+		labelCompositionResource:  "mariadbs",
+		labelCompositionName:      "db",
+		labelCompositionNamespace: "openstack",
+	}
+	if got, ok := identityFromLabels(full); !ok || got != mariadb {
+		t.Fatalf("identityFromLabels(full) = %v, %v; want %v, true", got, ok, mariadb)
+	}
+
+	for _, missing := range []string{labelCompositionGroup, labelCompositionResource, labelCompositionName, labelCompositionNamespace} {
+		partial := map[string]string{}
+		for k, v := range full {
+			if k != missing {
+				partial[k] = v
+			}
+		}
+		if _, ok := identityFromLabels(partial); ok {
+			t.Errorf("identityFromLabels accepted an identity missing %q; a partial identity "+
+				"matches more compositions than it names", missing)
+		}
+	}
+}
+
+// THE TWO LABELS THAT MUST NOT BE IN THE IDENTITY, asserted because each would look like
+// precision and each defeats the entire purpose. composition-id is the UID, which a recreated CR
+// does not have; composition-installed-version changes on every bump, and a bump is the event
+// adoption exists for. A match including either would never fire in the case it was built for.
+func TestCompositionIdentity_ExcludesTheUIDAndTheVersion(t *testing.T) {
+	labels := map[string]string{
+		labelCompositionGroup:     "composition.krateo.io",
+		labelCompositionResource:  "mariadbs",
+		labelCompositionName:      "db",
+		labelCompositionNamespace: "openstack",
+		// Present on every real object, and deliberately not read.
+		"krateo.io/composition-id":                "9c847c79-5555-6666-7777-888888888888",
+		"krateo.io/composition-installed-version": "v0-3-28",
+	}
+	got, ok := identityFromLabels(labels)
+	if !ok {
+		t.Fatal("identityFromLabels rejected a complete set of labels")
+	}
+	if got != mariadb {
+		t.Fatalf("identity = %v, want %v", got, mariadb)
+	}
+
+	// The same composition after a bump and a recreation: new UID, new served version, SAME
+	// identity. If either field were read, this would differ and adoption would mint.
+	labels["krateo.io/composition-id"] = "aaaaaaaa-0000-0000-0000-000000000000"
+	labels["krateo.io/composition-installed-version"] = "v0-3-29"
+	after, ok := identityFromLabels(labels)
+	if !ok {
+		t.Fatal("identityFromLabels rejected the post-bump labels")
+	}
+	if after != got {
+		t.Errorf("identity changed across a bump and a recreation (%v -> %v); whichever of "+
+			"composition-id or composition-installed-version leaked into it, adoption can never "+
+			"fire in the case it exists for", got, after)
+	}
+}
+
+// candidateFromRelease reads helm's OWN record of what it installed. Asserted against a manifest
+// in the shape plumbing's post-renderer produces, and against an empty one — the hooks-only chart,
+// which must come back decoded-but-unidentified rather than as a non-match.
+func TestCandidateFromRelease_ReadsTheRecordedIdentity(t *testing.T) {
+	manifest := `apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: openstack
+  labels:
+    krateo.io/composition-group: composition.krateo.io
+    krateo.io/composition-resource: mariadbs
+    krateo.io/composition-name: db
+    krateo.io/composition-namespace: openstack
+    krateo.io/composition-id: 9c847c79-5555-6666-7777-888888888888
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: openstack
+  labels:
+    krateo.io/composition-group: composition.krateo.io
+    krateo.io/composition-resource: mariadbs
+    krateo.io/composition-name: db
+    krateo.io/composition-namespace: openstack
+`
+	cand := candidateFromRelease(&helmconfig.Release{Name: "db-oldoldol", Manifest: manifest})
+	if !cand.Decoded {
+		t.Fatal("candidateFromRelease could not decode a well-formed manifest")
+	}
+	if len(cand.Identities) != 1 {
+		t.Fatalf("identities = %v, want exactly one (two objects of the same composition must "+
+			"not count twice)", cand.Identities)
+	}
+	if !cand.Owns(mariadb) {
+		t.Errorf("candidate does not claim %v; identities = %v", mariadb, cand.Identities)
+	}
+	if cand.Owns(postgres) {
+		t.Errorf("candidate claims %v, which it must not", postgres)
+	}
+
+	// The hooks-only chart. helm keeps hooks OUT of Manifest by construction, so the recorded
+	// manifest is empty and there is no identity to read. Decoded with no identities is the
+	// no-evidence case; reporting it as a non-match would be a claim the record cannot support.
+	empty := candidateFromRelease(&helmconfig.Release{Name: "db-hookonly", Manifest: ""})
+	if len(empty.Identities) != 0 {
+		t.Errorf("an empty manifest yielded identities %v", empty.Identities)
+	}
+	if empty.Owns(mariadb) {
+		t.Error("an empty manifest claims this composition; no evidence must never read as a match")
+	}
+}
+
 // Raised by the openstack-as-a-service session, who predicted exactly that simplification. It is
 // the shape three sessions spent today hunting — a comment asserting a safety property no test
 // covers — and this file had one within an hour of the comment being written.
