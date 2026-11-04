@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/krateo-platformops/chart-inspector/internal/handlers/resources"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -169,4 +170,138 @@ func isSuperset(verbs []string) bool {
 		return true
 	}
 	return len(verbs) == 1 && verbs[0] == "*"
+}
+
+// hookObjects reads a release's lifecycle hooks into the two things the RBAC derivation needs:
+// resource entries the composition's ServiceAccount must be granted, and renderedKeys marking them
+// as chart-owned.
+//
+// # Why hooks need this at all (core-provider#311)
+//
+// The resource set comes from a tracer over a DRY-RUN install, narrowed against the release's
+// Manifest. A dry run executes no hooks, and helm keeps hooks OUT of Manifest by construction
+// (releaseutil.SortManifests splits them into their own slice). So a hook object was invisible to
+// both halves and NO grant was ever generated for it.
+//
+// Measured: a chart whose single template renders a ServiceAccount, a Role, a RoleBinding and a Job
+// — only the Job annotated `helm.sh/hook: pre-delete` — got grants for three of the four. The hook
+// did not, and `helm uninstall` could then never succeed, because helm must delete the hook object
+// under before-hook-creation and lacked `delete` on jobs. A composition that installs fine for
+// weeks cannot be torn down, and the failure is invisible until the one moment it matters.
+//
+// # THE MANAGEMENT VERB SET, NOT THE NARROWED ONE
+//
+// A hook is created AND deleted by helm. `delete` is exactly the verb that was missing, so these
+// entries carry the superset, and the renderedKeys are what stop narrowLookupVerbs from demoting
+// them: that function narrows any superset entry whose key it cannot find in the owned set, and a
+// hook is absent from Manifest by definition. Adding the keys is not a bypass — a hook IS rendered
+// from a chart template, so the chart genuinely owns it; Manifest simply is not where helm files it.
+//
+// # Events are deliberately ignored
+//
+// An object needs its permissions regardless of which phase fires it, and before-hook-creation
+// makes helm delete a previous hook object whatever its phase. Filtering by event would grant a
+// pre-delete hook nothing until a delete was already underway, which is the failure this fixes.
+//
+// Unresolvable kinds are RETURNED rather than swallowed, so the caller can report at INSTALL time
+// what it could not cover — the loud failure that the alternative design (refusing such charts
+// outright) was reaching for, without rejecting the charts that work today on incidental overlap.
+func hookObjects(hooks []helmconfig.Hook, defaultNamespace string, pl kindPluralizer) ([]resources.Resource, []renderedKey, []string) {
+	var (
+		out        []resources.Resource
+		keys       []renderedKey
+		unresolved []string
+		seen       = map[renderedKey]struct{}{}
+	)
+	for _, h := range hooks {
+		if strings.TrimSpace(h.Manifest) == "" {
+			// A hook with no manifest is nothing we can grant for. Reported, not skipped silently:
+			// it means helm gave us a hook whose content we cannot read.
+			unresolved = append(unresolved, fmt.Sprintf("%s (%s): empty manifest", h.Name, h.Path))
+			continue
+		}
+		reader := k8syaml.NewYAMLReader(bufio.NewReader(strings.NewReader(h.Manifest)))
+		for {
+			doc, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				unresolved = append(unresolved, fmt.Sprintf("%s (%s): unreadable manifest: %v", h.Name, h.Path, err))
+				break
+			}
+			if len(strings.TrimSpace(string(doc))) == 0 {
+				continue
+			}
+			var u unstructured.Unstructured
+			if err := yaml.Unmarshal(doc, &u.Object); err != nil {
+				unresolved = append(unresolved, fmt.Sprintf("%s (%s): unparseable document: %v", h.Name, h.Path, err))
+				continue
+			}
+			if u.GetKind() == "" || u.GetAPIVersion() == "" || u.GetName() == "" {
+				continue
+			}
+			gvk := u.GroupVersionKind()
+			gvr, err := pl.GVKtoGVR(gvk)
+			if err != nil {
+				// Same reasoning as renderedObjects: we know the chart touches this group but
+				// cannot name the resource. Reported so an operator learns at install time, and the
+				// caller marks the group opaque so nothing in it is narrowed on evidence we lack.
+				unresolved = append(unresolved, fmt.Sprintf("%s (%s): cannot resolve %s: %v",
+					h.Name, h.Path, gvk.String(), err))
+				continue
+			}
+			ns := u.GetNamespace()
+			if ns == "" {
+				ns = defaultNamespace
+			}
+			r := resources.Resource{
+				Group:     gvk.Group,
+				Version:   gvk.Version,
+				Resource:  gvr.Resource,
+				Name:      u.GetName(),
+				Namespace: ns,
+				// The superset. See the comment above: helm creates and DELETES this object.
+				Verbs: []string{"*"},
+			}
+			k := renderedKey{group: gvk.Group, resource: gvr.Resource, namespace: ns, name: u.GetName()}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, r)
+			keys = append(keys, k)
+			// Both spellings, for the same reason renderedObjects records both: a cluster-scoped
+			// object carries no namespace in the trace while the manifest may have been defaulted.
+			keys = append(keys, renderedKey{group: gvk.Group, resource: gvr.Resource, namespace: "", name: u.GetName()})
+		}
+	}
+	return out, keys, unresolved
+}
+
+// hookGroupsOf returns the API groups named by hook documents, so a caller can mark a group opaque
+// when a hook's kind could not be resolved.
+func hookGroupsOf(hooks []helmconfig.Hook) map[string]struct{} {
+	groups := map[string]struct{}{}
+	for _, h := range hooks {
+		reader := k8syaml.NewYAMLReader(bufio.NewReader(strings.NewReader(h.Manifest)))
+		for {
+			doc, err := reader.Read()
+			if err != nil {
+				break
+			}
+			if len(strings.TrimSpace(string(doc))) == 0 {
+				continue
+			}
+			var u unstructured.Unstructured
+			if err := yaml.Unmarshal(doc, &u.Object); err != nil {
+				continue
+			}
+			if u.GetAPIVersion() == "" {
+				continue
+			}
+			groups[u.GroupVersionKind().Group] = struct{}{}
+		}
+	}
+	return groups
 }
