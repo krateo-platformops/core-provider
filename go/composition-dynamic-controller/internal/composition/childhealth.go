@@ -161,9 +161,10 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		// is nothing to record", and the only one of the two that is a defect.
 		return healthVerdict{
 			ready:  false,
-			reason: condition.ReasonZeroEvidence,
+			reason: ReasonInventoryNotRecorded,
 			message: "Composition health is unknown: no managed children are recorded, so none " +
-				"could be health-evaluated",
+				"could be health-evaluated. The inventory has never been written, which is a " +
+				"defect in this controller rather than a property of the composition",
 		}
 	}
 
@@ -395,7 +396,7 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 		return readyOutcome{reason: "Unavailable", message: v.message}
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
-	case condition.ReasonZeroEvidence:
+	case condition.ReasonZeroEvidence, ReasonInventoryNotRecorded:
 		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
 		// the author's health RESTAction IS evidence, and it is better evidence than the generic
 		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
@@ -407,6 +408,14 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 				msg = defaultMsg
 			}
 			return readyOutcome{reason: "Available", message: msg}
+		}
+		// TWO LITERALS, NOT v.reason, and the exhaustiveness test is why. It walks this function's
+		// AST to enumerate every reason resolveReady can produce and asserts stampReady handles
+		// each one; a variable defeats the walk, and it REFUSED rather than claiming the two sides
+		// agree ("the walk could not resolve 1 reason expression"). A guard that cannot read the
+		// code it guards must not pass, and this one does not.
+		if v.reason == ReasonInventoryNotRecorded {
+			return readyOutcome{reason: ReasonInventoryNotRecorded, message: v.message}
 		}
 		return readyOutcome{reason: condition.ReasonZeroEvidence, message: v.message}
 	}
@@ -448,6 +457,33 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 // and the logs, and per-reconcile freshness is in status.lastReconcileTime. A condition message that
 // changes without the condition changing destroys the only thing LastTransitionTime is for.
 const readyMessageAvailable = "Composition is up-to-date"
+
+// ReasonInventoryNotRecorded is Ready=Unknown where status.managed was NEVER WRITTEN, as opposed to
+// written-and-empty or written-and-unreadable.
+//
+// SPLIT OUT OF ZeroEvidence BY DIEGO'S DECISION, because one reason meant two things and a consumer
+// could not tell them apart:
+//
+//	the recorded children are all unreadable by this controller   permanent, not ours, NOTHING TO FIX
+//	the inventory was never recorded                              OUR DEFECT (#326)
+//
+// The distinction is load-bearing because of what reads it. installer's dependency gate allowlists
+// `Unknown/ZeroEvidence` as READY, justified in their chart as "a composition with no evaluable
+// children is not converging toward anything, so blocking its dependents forever would be wrong".
+// That justification is sound for the first meaning and was never true of the second — and the
+// installer session measured seven compositions on krateo-057 passing their gate on the strength of
+// it, each holding a deployed helm release whose children were simply never recorded.
+//
+// NOT ALLOWLISTED ANYWHERE, deliberately, and that is why this costs installer no change: their
+// gate has no else-arm, so a reason it does not know BLOCKS. A dependent built on "we never
+// recorded anything" is built on nothing, and after #326's fix this state clears itself on the next
+// Update — so the block is transient per composition rather than a permanent wedge.
+//
+// NOTE what does NOT use this reason: a composition that genuinely manages nothing. That is
+// `managed: []`, present and empty, and it reports Ready=TRUE/Available (see the first branch of
+// rollupManagedChildren). It has never reported ZeroEvidence, which is the part of installer's
+// justification that was wrong about this code rather than merely out of date.
+const ReasonInventoryNotRecorded = "InventoryNotRecorded"
 
 // ReasonAvailablePartialCoverage is Available where the rollup assessed a MINORITY of the children
 // it names. Still Ready=True — those children are unevaluated, not unhealthy — but the claim covers

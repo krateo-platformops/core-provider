@@ -111,6 +111,21 @@ func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force 
 	return setReadyCondition(mg, condition.ZeroEvidence(), message, force)
 }
 
+// setInventoryNotRecordedStatus stamps Ready=Unknown/InventoryNotRecorded.
+//
+// Built here rather than taken from unstructured-runtime's condition package, deliberately: this
+// reason is produced ONLY by this rollup and nothing outside it can emit it, which is the same
+// reason ReasonAvailablePartialCoverage lives in this repo. A constant in the runtime would invite
+// another component to report a missing composition inventory, which only this code can know about.
+func setInventoryNotRecordedStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionUnknown,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonInventoryNotRecorded,
+	}, message, force)
+}
+
 type ConditionType string
 
 const (
@@ -417,6 +432,12 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setCreatingStatus(mg, out.message, force)
 	case condition.ReasonZeroEvidence:
 		return setZeroEvidenceStatus(mg, out.message, force)
+	case ReasonInventoryNotRecorded:
+		// Unknown, like ZeroEvidence, and with a DIFFERENT reason so a consumer can tell "nothing
+		// is readable" from "nothing was recorded". See ReasonInventoryNotRecorded for why those
+		// must not share a word: installer's gate allowlists ZeroEvidence as ready, and seven
+		// compositions on krateo-057 were passing it on the strength of this defect.
+		return setInventoryNotRecordedStatus(mg, out.message, force)
 	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
 	case ReasonAvailablePartialCoverage:

@@ -72,9 +72,17 @@ func TestRollup_AbsentManagedIsNeverAvailable(t *testing.T) {
 			if v.ready {
 				t.Errorf("ready = true with no recorded children (reason %q)", v.reason)
 			}
-			if v.reason != "ZeroEvidence" {
-				t.Errorf("reason = %q, want ZeroEvidence: the state is an absence of evidence, and "+
-					"ZeroEvidence is the reason whose entire job is to say so", v.reason)
+			// InventoryNotRecorded, not ZeroEvidence, since Diego split them. This state is OUR
+			// DEFECT -- the inventory was never written -- and ZeroEvidence now means only "the
+			// recorded children are all unreadable by this controller", which is permanent and
+			// nothing to fix. The split exists because installer's gate allowlists ZeroEvidence as
+			// READY, and seven compositions on krateo-057 were passing it on the strength of this
+			// very state, each holding a deployed release whose children were never recorded.
+			if v.reason != ReasonInventoryNotRecorded {
+				t.Errorf("reason = %q, want %q: the inventory was never written, which is a defect "+
+					"in this controller. Reporting ZeroEvidence here is what made it pass a "+
+					"readiness gate whose justification was about a different state entirely",
+					v.reason, ReasonInventoryNotRecorded)
 			}
 		})
 	}
@@ -99,8 +107,42 @@ func TestRollup_AbsentManagedIsUnknownNotFalse(t *testing.T) {
 		t.Errorf("Ready status = %q, want Unknown. False would wedge every `deps:` edge and the "+
 			"installer gate on a steady state that never clears", status)
 	}
-	if reason != "ZeroEvidence" {
-		t.Errorf("Ready reason = %q, want ZeroEvidence", reason)
+	if reason != ReasonInventoryNotRecorded {
+		t.Errorf("Ready reason = %q, want %q", reason, ReasonInventoryNotRecorded)
+	}
+	// AND IT MUST NOT BE ZeroEvidence, asserted separately rather than implied by the line above,
+	// because that is the one wrong value with a CONSEQUENCE: installer's gate allowlists
+	// ZeroEvidence and has no else-arm, so this reason reverting to it would silently resume
+	// passing dependents on a composition whose children were never recorded.
+	if reason == "ZeroEvidence" {
+		t.Error("Ready reason is ZeroEvidence for a never-recorded inventory. That is the state " +
+			"installer's gate accepts as ready, and its justification -- 'a composition with no " +
+			"evaluable children is not converging toward anything' -- is about a different state. " +
+			"A composition that genuinely manages nothing reports Available, not this")
+	}
+}
+
+// Unknown stays Unknown and the two causes stay APART. A composition whose recorded children are
+// all unevaluable is the legitimate ZeroEvidence case -- permanent, not ours, and the one
+// installer's gate was always actually for. Asserted beside the absent case because the whole point
+// of the split is that these two are different, and a change that collapsed them would satisfy
+// every other assertion in this file.
+func TestRollup_AllUnevaluableIsZeroEvidenceNotInventoryNotRecorded(t *testing.T) {
+	h := &handler{}
+	opaque := namedKrateoCR("opaque", "", "", false) // childUnevaluated
+	mg := compositionWithStatus(map[string]any{})
+	setManaged(mg, krateoRef("opaque"))
+
+	v := h.rollupManagedChildren(context.Background(), fakeDynWith(opaque), mg)
+
+	if v.reason != "ZeroEvidence" {
+		t.Errorf("reason = %q, want ZeroEvidence: the inventory IS recorded here and its children "+
+			"simply publish nothing this controller can read. That is not a defect and there is "+
+			"nothing for an operator to fix, which is why it may pass a readiness gate", v.reason)
+	}
+	if v.reason == ReasonInventoryNotRecorded {
+		t.Error("a composition with a RECORDED child reports InventoryNotRecorded; the split has " +
+			"leaked and every zero-evidence composition would start blocking its dependents")
 	}
 }
 
