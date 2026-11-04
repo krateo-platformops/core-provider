@@ -112,9 +112,23 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 	}
 
 	// AuthorizationDenied must be FAILED, not merely not-unevaluated — and the distinction is the
-	// whole point of core-provider#320. It is rest-dynamic-controller's reason for a refusal that
-	// will not be retried; before this case existed it fell to the converging default, so the
-	// condition built to say "stop, this is permanent" reported as "still working on it" forever.
+	// whole point of core-provider#320. It is REPORTED by the oasgen-provider session as
+	// rest-dynamic-controller's reason for a refusal that will not be retried, and this mapping
+	// rests on the ordering argument rather than on that report: an unmapped reason falls to the
+	// converging default, so a condition built to say "stop, this is permanent" would report as
+	// "still working on it" forever.
+	//
+	// NOT independently verified, and the failed attempt is worth recording. A shallow clone of
+	// krateo-platformops/rest-dynamic-controller at main (217ccd0, 2026-08-07) contains the string
+	// "AuthorizationDenied" ZERO times, and exactly ONE place in it writes TypeReady at all --
+	// condition.go's Pending() constructor, whose only reason const is ReasonPending. Control:
+	// "ReasonPending" matches 3 times in the same clone, so the grep works. Separately, GitHub's
+	// code-search API returns 0 for that control too, so a zero from THAT instrument is not
+	// evidence of anything and was not used here.
+	//
+	// This does not make the arm wrong: mapping before a reason ships is the deliberate ordering
+	// (see the ObserveFailed note above), and a mapping for a reason that never arrives is inert.
+	// It does mean nobody should read this comment as a claim about what RDC emits today.
 	//
 	// Asserted separately from the loop above because "not unevaluated" is satisfied by converging
 	// too, which is exactly the bucket it was wrongly in.
