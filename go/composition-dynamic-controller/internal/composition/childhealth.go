@@ -662,6 +662,26 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
+		case stringField(cm, "reason") == "AuthorizationDenied":
+			// rest-dynamic-controller's reason for a refusal that WILL NOT BE RETRIED — a 403 with
+			// no rate-limit signal is a decision, and nothing the controller does next can change
+			// it (oasgen-provider#313). So it is a failure, not a convergence.
+			//
+			// Without this arm it fell to the default and the parent reported Ready=False/Creating:
+			// THE CONDITION BUILT SPECIFICALLY TO SAY "STOP, THIS IS PERMANENT" READ UPSTREAM AS
+			// "STILL WORKING ON IT", indefinitely. Found by the oasgen-provider session reading
+			// what RDC publishes against this mapping (their #436, core-provider#320).
+			//
+			// AND NOTE WHY IT WAS MISSED, because the next specific reason will arrive the same
+			// way: a GENERIC `Unavailable` would have bucketed correctly here all along. The more
+			// precise RDC made the child's reason, the less this rollup understood it. Specificity
+			// in a child's reason is a cost paid by every consumer that matches on reasons, and
+			// nothing in either repo makes that visible — the trip-wire in
+			// reasoncontract_test.go is the only thing that can.
+			//
+			// Keyed on the reason, not on Status=False, deliberately: a converging child also
+			// reports False and must keep holding the parent back rather than failing it.
+			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved":
 			// NotObserved is provider-runtime v1.8.0's reason for "the external resource could not
