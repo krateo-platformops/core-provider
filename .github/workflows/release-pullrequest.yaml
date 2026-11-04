@@ -131,7 +131,7 @@ jobs:
           set -uo pipefail
           rc=0
           n=0
-          for m in go/core-provider go/composition-dynamic-controller go/chart-inspector; do
+          for m in go/core-provider go/composition-dynamic-controller go/chart-inspector go/testprovider; do
             for tag in default integration e2e envtest; do
               if [ "$tag" = default ]; then args=""; else args="-tags $tag"; fi
               echo "::group::$m ($tag)"
@@ -145,8 +145,11 @@ jobs:
           done
           # A loop that examined nothing would exit 0 and look identical to success — the exact
           # failure mode this job exists to catch, so it must not have it.
-          if [ "$n" -ne 12 ]; then
-            echo "::error::checked $n module/tag combinations, expected 12 - this job proved nothing"
+          # 16 = 4 modules x 4 tags. go/testprovider joined the list when the #310 verification
+          # provider was added; it is built from inside an envtest test, so a compile break there
+          # would otherwise first surface as that test failing and point at the wrong file.
+          if [ "$n" -ne 16 ]; then
+            echo "::error::checked $n module/tag combinations, expected 16 - this job proved nothing"
             exit 1
           fi
           echo "compiled $n module/tag combinations"
@@ -178,6 +181,17 @@ jobs:
       - name: Install setup-envtest
         run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
 
+      # The #310 suite BUILDS go/testprovider from inside the test (a separate module, so that
+      # provider-runtime stays out of the cdc's dependency graph). Warm its module cache here:
+      # otherwise the first thing that fails on a cold runner is a `go build` inside a test, which
+      # reports as a test failure and sends the reader to the wrong file.
+      - name: "Pre-build the #310 test provider"
+        working-directory: go/testprovider
+        run: |
+          set -euo pipefail
+          go mod download
+          go build ./...
+
       - name: Run the cdc envtest suite
         working-directory: go/composition-dynamic-controller
         run: |
@@ -197,6 +211,79 @@ jobs:
             grep -- "--- SKIP" /tmp/envtest.log
             exit 1
           fi
+
+      # THE BRANCH-REMOVAL CONTROL for #310, which is the one control the Go suite cannot contain:
+      # a test cannot delete a branch from the code it is running. Without this, every #310 arm
+      # could be passing for a reason that has nothing to do with the NotObserved case.
+      #
+      # Delete the NotObserved term from krateoReady's unevaluated arm, leaving ZeroEvidence, and
+      # require the mixed-parent arm to FAIL. That is the pre-#310 behaviour: NotObserved falls to
+      # the default and the parent reports Ready=False/Creating.
+      #
+      # Every step is checked, because each failure mode of this control exits 0 and reads as a
+      # pass: an edit that did not apply, a mutant that does not compile, and a test run that
+      # errored for an unrelated reason all look identical to "the control worked".
+      - name: "Control — removing the #310 branch must break the #310 arm"
+        working-directory: go/composition-dynamic-controller
+        run: |
+          set -euo pipefail
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.36.0 -p path)"
+          F=internal/composition/childhealth.go
+          cp "$F" /tmp/childhealth.orig.go
+
+          python3 - "$F" <<'EOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p).read()
+          old = ('case stringField(cm, "reason") == "ZeroEvidence",\n'
+                 '\t\t\tstringField(cm, "reason") == "NotObserved":')
+          new = 'case stringField(cm, "reason") == "ZeroEvidence":'
+          n = s.count(old)
+          if n != 1:
+              sys.exit("control NOT APPLIED: the NotObserved arm matched %d times, not 1 — "
+                       "the code moved and this control is measuring nothing" % n)
+          open(p, "w").write(s.replace(old, new, 1))
+          print("control applied")
+          EOF
+
+          # A real diff, or the control proved nothing.
+          if diff -q "$F" /tmp/childhealth.orig.go >/dev/null; then
+            echo "::error::the control edit left the file unchanged"
+            cp /tmp/childhealth.orig.go "$F"; exit 1
+          fi
+
+          # A mutant that does not compile also makes the test "fail", for the wrong reason.
+          if ! go build ./... ; then
+            echo "::error::the control edit does not compile, so a test failure would prove nothing"
+            cp /tmp/childhealth.orig.go "$F"; exit 1
+          fi
+
+          set +e
+          go test -tags envtest -count=1 -timeout 15m \
+            -run 'NotObservedEnvtest_(OneNotObservedSiblingHealthyStaysTrue|AllHealthyIsAvailable)' \
+            ./internal/composition/ > /tmp/control.log 2>&1
+          rc=$?
+          set -e
+          cp /tmp/childhealth.orig.go "$F"
+          diff -q "$F" /tmp/childhealth.orig.go >/dev/null || { echo "::error::failed to restore $F"; exit 1; }
+
+          # The POSITIVE control inside the control: AllHealthyIsAvailable must still pass with the
+          # branch removed, since it has no NotObserved child. If BOTH arms fail, the mutant broke
+          # something general and this tells us nothing about the #310 arm specifically.
+          if grep -q -- "--- FAIL: TestNotObservedEnvtest_AllHealthyIsAvailable" /tmp/control.log; then
+            echo "::error::with the #310 branch removed the all-healthy arm ALSO failed - the edit broke something general, so this control is uninterpretable"
+            cat /tmp/control.log; exit 1
+          fi
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::removing the #310 NotObserved branch did NOT fail the #310 arm - the arm is not testing that branch"
+            cat /tmp/control.log; exit 1
+          fi
+          if ! grep -q -- "--- FAIL: TestNotObservedEnvtest_OneNotObservedSiblingHealthyStaysTrue" /tmp/control.log; then
+            echo "::error::the run failed but NOT at the #310 arm - the failure is unrelated, so the control proved nothing"
+            cat /tmp/control.log; exit 1
+          fi
+          echo "control OK: the #310 arm fails when and only when its branch is removed"
+          grep -- "--- \(FAIL\|PASS\)" /tmp/control.log
 
   e2e:
     # The e2e suite (internal/tools/crd/*_e2e_test.go, `//go:build e2e`) needs a REAL apiserver and
