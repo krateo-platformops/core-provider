@@ -232,18 +232,38 @@ jobs:
           cp "$F" /tmp/childhealth.orig.go
 
           python3 - "$F" <<'EOF'
-          import sys
+          import re, sys
           p = sys.argv[1]
-          s = open(p).read()
-          old = ('case stringField(cm, "reason") == "ZeroEvidence",\n'
-                 '\t\t\tstringField(cm, "reason") == "NotObserved":')
-          new = 'case stringField(cm, "reason") == "ZeroEvidence":'
-          n = s.count(old)
-          if n != 1:
-              sys.exit("control NOT APPLIED: the NotObserved arm matched %d times, not 1 — "
-                       "the code moved and this control is measuring nothing" % n)
-          open(p, "w").write(s.replace(old, new, 1))
-          print("control applied")
+          lines = open(p).read().splitlines(keepends=True)
+
+          # Anchor on the NotObserved TERM ALONE, never on the whole case expression.
+          #
+          # The first version of this control matched both terms as one literal, including
+          # `== "ZeroEvidence"`. #312 then replaced that literal with condition.ReasonZeroEvidence
+          # on main and the anchor matched 0 times -- so the control REFUSED, correctly, instead of
+          # silently proving nothing. An anchor that spans code it does not need to touch inherits
+          # every change to that code.
+          pat = re.compile(r'^\s*stringField\(cm, "reason"\) == "NotObserved":\s*$')
+          hits = [i for i, l in enumerate(lines) if pat.match(l)]
+          if len(hits) != 1:
+              sys.exit("control NOT APPLIED: the NotObserved term matched %d lines, not 1 -- the "
+                       "code moved and this control is measuring nothing" % len(hits))
+          i = hits[0]
+          if i == 0:
+              sys.exit("control NOT APPLIED: the NotObserved term is the first line of the file")
+
+          # It must be the LAST term of a multi-term case, i.e. the line above ends in a comma.
+          # Removing it then requires turning that comma into the colon this line was carrying.
+          prev = lines[i - 1].rstrip("\n")
+          if not prev.endswith(","):
+              sys.exit("control NOT APPLIED: the line above the NotObserved term does not end in a "
+                       "comma (%r) -- the case was restructured, so deleting one line would not "
+                       "leave valid Go" % prev)
+
+          lines[i - 1] = prev[:-1] + ":\n"
+          del lines[i]
+          open(p, "w").writelines(lines)
+          print("control applied: removed the NotObserved term from the unevaluated arm")
           EOF
 
           # A real diff, or the control proved nothing.
