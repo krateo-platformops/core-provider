@@ -23,6 +23,7 @@ import (
 	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
 	"github.com/krateo-platformops/core-provider/internal/tools/crd/fieldloss"
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
+	"github.com/krateo-platformops/core-provider/internal/tools/crd/releaseref"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -593,6 +594,47 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 		if insts != nil && len(insts.Items) > 0 {
 			kept = append(kept, fmt.Sprintf("%s:instances=%d", v.Name, len(insts.Items)))
 			continue // an instance still carries this version's label
+		}
+		// A HELM RELEASE REVISION may still NAME this version in its stored manifest (#305), and
+		// neither term above can see that.
+		//
+		// A PARENT composition's chart renders CHILD composition CRs, so the parent's stored
+		// manifest names the child's served version. helm must read that manifest back to compute a
+		// diff, so pruning the version wedges the parent indefinitely:
+		//
+		//	reconciling helm chart: reconcile: building current resource list: [resource mapping
+		//	not found for ... no matches for kind "BaremetalHost" in version
+		//	"composition.krateo.io/v0-6-1" ... ensure CRDs are installed first]
+		//
+		// A controller restart does not clear it, and nothing the chart author can do avoids it —
+		// the stale reference is inside helm's own stored manifest. The other two terms ask who
+		// DECLARES the version and who is LABELLED with it; this one asks what is STORED against
+		// it, which is the question helm will actually ask later.
+		//
+		// WHY NOT LEAVE THIS TO plumbing's dropUnservedFromStoredManifest: that repair exists for
+		// exactly this case and did not fire (#305). It runs AFTER the prune, so it is racing the
+		// thing it exists to survive, and it decides what to drop using a RESTMapper that may still
+		// know the pruned version — so it can report "nothing to repair" about a version that is
+		// already gone. Refusing to prune does not race.
+		//
+		// The trade is deliberate and asymmetric: a lingering served version costs a little schema
+		// surface, a stranded revision costs the composition entirely. So an error here keeps the
+		// version rather than pruning it.
+		refs, relErr := releaseref.ReferencingReleases(ctx, e.kube, gvk.Group+"/"+v.Name)
+		if relErr != nil {
+			return nil, nil, fmt.Errorf("checking helm releases referencing version %s: %w", v.Name, relErr)
+		}
+		if len(refs) > 0 {
+			names := make([]string, 0, len(refs))
+			for i := range refs {
+				if i == 3 {
+					names = append(names, fmt.Sprintf("...and %d more", len(refs)-3))
+					break
+				}
+				names = append(names, refs[i].String())
+			}
+			kept = append(kept, fmt.Sprintf("%s:release-revisions=%d:%v", v.Name, len(refs), names))
+			continue // a stored manifest still names this version
 		}
 		prunable = append(prunable, v.Name)
 	}
