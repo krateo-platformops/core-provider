@@ -63,10 +63,33 @@ func TestAvailablePartialCoverageReasonStringIsStable(t *testing.T) {
 // as opposed to "this child is unhealthy" or "this child is still coming up". Pinned as a SET so
 // that adding one is a deliberate edit here rather than a quiet widening of the branch.
 //
-// ObserveFailed is deliberately ABSENT: unstructured-runtime emits it as of its #43, but
-// core-provider pins v1.7.5 which predates the constant. The mapping lands in the same change that
-// bumps the pin -- so no cluster can produce a reason this rollup does not understand. Recorded
-// here rather than in a message so the sequencing is visible to whoever does the bump.
+// ObserveFailed is deliberately ABSENT, and an earlier version of this comment justified that with
+// a clause that was FALSE ON THE DAY IT WAS WRITTEN (core-provider#320):
+//
+//	"core-provider pins v1.7.5 which predates the constant ... so no cluster can produce a
+//	 reason this rollup does not understand."
+//
+// The pin was and is real, and v1.7.5 genuinely lacks the constant. But THIS ROLLUP READS CHILDREN,
+// and a child's conditions are written by THE CHILD'S OWN CONTROLLER -- a RestDefinition-managed
+// resource, a provider. core-provider's pin governs what the cdc writes about itself and governs
+// nothing about what reasons its children carry. unstructured-runtime v1.7.6 is released and emits
+// ObserveFailed from worker.go:649, so any component that has bumped is producing it on composition
+// children today.
+//
+// So the deferral was never load-bearing -- which is worse than a premise that expired, because an
+// expired premise leaves a date to check and this one named a real pin and a real absence and so
+// read as verified. What was wrong was the INFERENCE, and an inference is the part nobody rereads.
+//
+// ObserveFailed stays unmapped as a DECISION, not a deferral: it means "the handler's Observe
+// errored", which can be transient or persistent, and the reason does not say which. The fix
+// belongs at the source -- rest-dynamic-controller has IsAuthorizationDenied and can emit a
+// terminal reason for a permanent refusal instead of letting the runtime write the generic one
+// (oasgen-provider#436). Once it does, ObserveFailed honestly means "we do not know", and the
+// converging default is the right fail-safe for not knowing.
+//
+// Note that ObserveFailed is NOT the same claim as NotObserved: NotObserved means the runtime never
+// got an answer, ObserveFailed means the handler's Observe returned an error. Collapsing them would
+// make ObserveFailed mean whichever one the reader assumed.
 func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 	unevaluated := map[string]bool{
 		condition.ReasonZeroEvidence: true,
@@ -81,11 +104,31 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 
 	// CONTROL: a reason that must NOT be unevaluated, or the assertions above would pass against a
 	// branch that swallowed everything.
-	for _, reason := range []string{"Creating", "Unavailable"} {
+	for _, reason := range []string{"Creating", "Unavailable", "AuthorizationDenied"} {
 		if got := krateoReady(krateoCR("Unknown", reason, true)); got == childUnevaluated {
 			t.Errorf("reason %q maps to childUnevaluated; a converging or failing child must keep "+
 				"holding its parent back", reason)
 		}
+	}
+
+	// AuthorizationDenied must be FAILED, not merely not-unevaluated — and the distinction is the
+	// whole point of core-provider#320. It is rest-dynamic-controller's reason for a refusal that
+	// will not be retried; before this case existed it fell to the converging default, so the
+	// condition built to say "stop, this is permanent" reported as "still working on it" forever.
+	//
+	// Asserted separately from the loop above because "not unevaluated" is satisfied by converging
+	// too, which is exactly the bucket it was wrongly in.
+	if got := krateoReady(krateoCR("False", "AuthorizationDenied", true)); got != childFailed {
+		t.Errorf("AuthorizationDenied maps to %d, want childFailed (%d). A 403 with no rate-limit "+
+			"signal is a decision; reporting the parent as Creating says the opposite, indefinitely",
+			got, childFailed)
+	}
+
+	// And the generic reason still buckets the same way, so the fix above did not come at the cost
+	// of the case that already worked: a provider that reports Unavailable rather than a specific
+	// reason must keep failing its parent.
+	if got := krateoReady(krateoCR("False", "Unavailable", true)); got != childFailed {
+		t.Errorf("Unavailable maps to %d, want childFailed (%d)", got, childFailed)
 	}
 
 	// And the one that is coming, asserted as NOT YET mapped so the bump cannot forget it: when
