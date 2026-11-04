@@ -662,6 +662,50 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
+		case stringField(cm, "reason") == "CreateFailed",
+			stringField(cm, "reason") == "UpdateFailed":
+			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to
+			// one still in progress. Both are permanent-pending-human, so both are failures here.
+			//
+			// NOT SHIPPING YET, and the register matters because the arm beside this one taught me
+			// that. Verified at krateo-platformops/oasgen-provider, branch feat/053-readyassessed,
+			// commit 236d067, path go/rest-dynamic-controller/internal/controllers/condition/
+			// condition.go: both constructors exist, Type=TypeReady, Status=False. That branch is
+			// an UNMERGED DRAFT (their PR #438) targeting 0.53.0 -- not merged, not tagged, not
+			// released. Contrast DriftNotConverging below, which is released and whose arm was
+			// therefore fixing a live defect rather than pre-empting one.
+			//
+			// AND NARROWER THAN THE NAME SUGGESTS. The only permanence their author was willing to
+			// establish is a POLICY REFUSAL -- PermitsURL's six refusals now wrap a sentinel, so a
+			// request that was never sent is distinguishable from a vendor having a bad minute. No
+			// status-code permanence rule was invented: a 500 stays transient, with a control arm
+			// proving it. So this fires for "the allowlist forbids this endpoint", not for every
+			// failed create, which is the right conservatism and worth knowing before anyone reads
+			// the absence of this reason as evidence a create succeeded.
+			//
+			// MAPPED BEFORE THE REASONS SHIP, deliberately, and that is the correction to a mistake
+			// in this very file. The ObserveFailed deferral used to be justified with "core-provider
+			// pins v1.7.5 ... so no cluster can produce a reason this rollup does not understand" —
+			// false the day it was written, because the rollup reads CHILDREN and a child's reason
+			// comes from the child's own controller, on the child's own release schedule
+			// (core-provider#320). Waiting for the reason to appear is waiting for the defect.
+			//
+			// An unmapped reason falls to the converging default, which is the inversion this whole
+			// issue is about: the reason invented to say "this will not progress" would report as
+			// "still working on it". Adding the case early costs nothing if the reason never
+			// arrives.
+			//
+			// WHY THE VERB IS IN THE REASON AT ALL, since it was previously in the message: the
+			// runtime sets Creating on BOTH create outcomes and the distinction lived in prose
+			// ("message=create failed: 422"). The portal cannot branch on free text that is ours to
+			// reword, which was the frontend session's objection and the reason oasgen-provider
+			// moved the verb into the reason instead (their #42/#433 resolution).
+			//
+			// NO DeleteFailed, and its absence is a decision rather than an omission. A refused
+			// delete must HOLD the finalizer (#261): giving it a terminal-looking Ready reason
+			// invites exactly the finalizer removal that orphans a paid resource. If a
+			// `DeleteFailed` ever appears, it does not belong in this arm.
+			return childFailed
 		case stringField(cm, "reason") == "AuthorizationDenied":
 			// rest-dynamic-controller's reason for a refusal that WILL NOT BE RETRIED — a 403 with
 			// no rate-limit signal is a decision, and nothing the controller does next can change
@@ -682,10 +726,79 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// Keyed on the reason, not on Status=False, deliberately: a converging child also
 			// reports False and must keep holding the parent back rather than failing it.
 			return childFailed
+		case stringField(cm, "reason") == "DriftNotConverging":
+			// THE ONLY ONE OF THESE THAT WAS WRONG ABOUT A LIVE CLUSTER. Unlike CreateFailed and
+			// UpdateFailed above, which are mapped ahead of their arrival, DriftNotConverging has
+			// shipped since oasgen-provider 0.33.0 (now 0.50.0) and every composition carrying a
+			// child in that state has been reported as CONVERGING by this rollup the whole time.
+			//
+			// Verified first-hand rather than taken on report, at
+			// krateo-platformops/oasgen-provider, go/rest-dynamic-controller/internal/controllers/
+			// condition/condition.go:109-128 -- Type=TypeReady, Status=False,
+			// Reason=ReasonDriftNotConverging. Introduced by 156bc83 (2026-10-26, their #216),
+			// which `compare` puts BEHIND tag 0.33.0 by 5 commits and AHEAD of 0.32.0 by 5, so
+			// 0.33.0 is the first tag that carries it.
+			//
+			// Terminal by construction, in the constructor's own words: "a difference has been
+			// reported repeatedly and the update issued for it has not resolved it, so the
+			// controller has stopped issuing that update ... nothing is retryable either, because
+			// the one action available has been tried and changed nothing. The remedy is a
+			// declaration change ... which is a human's decision, so the condition's job is to say
+			// which field and stop."
+			//
+			// Same shape as AuthorizationDenied, and found the same way: the more precisely RDC
+			// named the state, the less this rollup understood it. A generic Unavailable would have
+			// bucketed correctly all along.
+			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
-			stringField(cm, "reason") == "NotObserved":
-			// NotObserved is provider-runtime v1.8.0's reason for "the external resource could not
-			// be observed" — an Observe or Connect failure, with the raw error left on Synced. It
+			stringField(cm, "reason") == "NotObserved",
+			stringField(cm, "reason") == "ObserveFailed":
+			// NotObserved is PROVIDER-RUNTIME's reason, and only provider-runtime's. Confirmed at
+			// krateo-platformops/provider-runtime 499ea69: markNotObserved (pkg/reconciler/
+			// ready.go:60) writes prv1.NotObserved() from reconciler.go:869 (Connect failed) and
+			// :909 (Observe failed), unless the provider already assessed Ready itself.
+			// rest-dynamic-controller has a NotObserved() constructor too and it is NOT this: it
+			// is Type=Observed, Status=False, Reason=NoResponseBody -- a different condition type
+			// that this Ready-based rollup never reads. Two repos, one constructor name, different
+			// objects; the collision is why this says which repo.
+			//
+			// A LITERAL, NOT condition.ReasonObserveFailed, and the reason is the point of #320.
+			// The const does not exist in the unstructured-runtime version the cdc pins (it was
+			// added later), and even once it does, importing it would be WRONG here: these three
+			// reasons arrive on CHILDREN, written by the children's own controllers on their own
+			// release schedules, so a const resolves to OUR pin's value while the string on the
+			// object is THEIRS. Tying a child's reason to our pin is exactly the inference this
+			// file's ObserveFailed deferral got wrong. Contrast ReasonZeroEvidence above, which the
+			// cdc EMITS about itself — there the const is right, and reasoncontract_test.go pins
+			// its value because a third repo matches on it.
+			//
+			// ObserveFailed JOINS IT HERE, and that is a decision Diego took rather than a
+			// tidy-up. The two reasons are THE SAME CLAIM from two runtimes: provider-runtime
+			// writes NotObserved when a provider's Connect or Observe returns an error;
+			// unstructured-runtime writes ObserveFailed when a handler's Observe returns one.
+			// Bucketing them differently meant one situation got two verdicts, decided by which
+			// runtime the provider happened to be built on — which no consumer of this rollup can
+			// see. Confirmed by the provider-runtime session against their own call sites, who
+			// also corrected my belief that NotObserved meant "the runtime never got an answer":
+			// it does not, it is the provider's error path.
+			//
+			// UNEVALUATED AND NOT CONVERGING, of the two uniform answers, because converging is
+			// the one that states something false. Converging asserts progress; nothing is
+			// progressing. Unknown asserts nothing, which is exactly what is known. The earlier
+			// reasoning for leaving ObserveFailed on the converging default — that it does not
+			// say transient or persistent — argues for this bucket rather than against it.
+			//
+			// THE COST, NAMED: a persistently unobservable child now passes installer's dependency
+			// gate, because an all-unevaluated parent reports ZeroEvidence and the gate accepts
+			// exactly that. The honest fix is NOT to mis-state the child's health to force the
+			// gate's hand — it is that the parent cannot currently say WHY it has no evidence, so
+			// "no children recorded" and "children nobody could read" are indistinguishable to the
+			// gate. That capability is #318 (unreadableChildrenCount plus a distinct reason), and
+			// the unobservable case belongs to the same family as the forbidden one. Until it
+			// lands, the two runtimes at least agree.
+			//
+			// Both mean "the external resource could not be observed" — an Observe or Connect
+			// failure, with the raw error left on Synced. They
 			// belongs HERE and not in the converging branch below for the same reason ZeroEvidence
 			// does, and the distinction is the whole point: the child is not reporting that it is
 			// unhealthy or that it is still coming up. It is reporting that NOTHING ASSESSED IT.
