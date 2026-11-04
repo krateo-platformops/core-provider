@@ -336,25 +336,16 @@ func zeroEvidenceMessage(total int) string {
 		"health-evaluated (no readiness semantics this controller knows how to read)", total)
 }
 
-// childrenForbiddenMessage says that nothing was assessed AND that RBAC is why, naming the children
-// so an operator can reach them.
-//
-// NAMES, not just a count, for the #289 reason: a count tells an operator something is wrong and
-// gives them no way to find it. status.managed lists Kubernetes objects with no readiness field to
-// sort by, so "3 children are unreadable" means sweeping every kind in the composition by hand.
-// The count that a CONSUMER reads is status.unreadableChildrenCount, because this format string is
-// mine to change and a jq path over prose gets no warning when I do.
-//
-// Capped at 3 like the other lists: a composition with 118 unreadable children must not put 118
-// names in a condition message that etcd stores on every reconcile.
+// childrenForbiddenMessage says that NOTHING was assessed. It deliberately does not name the
+// refused children or say that RBAC is why: withUnreadable appends both, on every arm, so there is
+// one format and one place that can be wrong. Saying it here too would print it twice on this arm
+// and nowhere on the others, which is the state this replaced.
 func childrenForbiddenMessage(unreadable []string, unevaluated, total int) string {
 	msg := fmt.Sprintf("Composition health is unknown: none of its %d managed children could be "+
-		"health-evaluated, and %d of them could not be READ — this controller's ServiceAccount was "+
-		"refused access, which is a gap in the generated RBAC rather than a problem with the "+
-		"children: %s", total, len(unreadable), joinCap(unreadable, 3))
+		"health-evaluated", total)
 	if unevaluated > 0 {
-		msg += fmt.Sprintf(" (the remaining %d publish no readiness semantics this controller "+
-			"knows how to read)", unevaluated)
+		msg += fmt.Sprintf(" (%d of them publish no readiness semantics this controller knows how "+
+			"to read)", unevaluated)
 	}
 	return msg
 }
@@ -463,7 +454,44 @@ func (p projectedHealth) notReadyReason() string {
 //
 // The rollup is itself fail-safe (unreadable / unmodeled children count healthy), so this can only
 // surface failures it can positively observe — it never flips a working composition to NotReady.
+// resolveReady is the verdict below plus ONE exit that appends the unreadable-children caveat.
+//
+// WHY A WRAPPER AND NOT A LINE IN EACH ARM. The provider-runtime session's condition on #318's
+// narrow threshold: below the all-or-nothing case the verdict must not move, but the unreadable
+// children must still be NAMED, or "one of 121 unreadable" goes back to silence, which is the
+// defect #318 exists to remove. They were right, and my first implementation did not do it — the
+// names reached the message only on the ChildrenForbidden arm, and the Available, Unavailable and
+// Creating arms dropped them while a comment four lines away claimed they were "named in the
+// message". A comment claiming more than its code.
+//
+// resolveReady has seven returns. Appending in each is how an arm gets missed, and the arm that
+// gets missed is the silent one — there is no symptom to notice. One exit cannot be forgotten.
 func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
+	out := resolveReadyVerdict(p, defaultMsg, v)
+	out.message = withUnreadable(out.message, v.unreadable, v.total)
+	return out
+}
+
+// withUnreadable appends the refused children to whatever message is being stamped, like
+// withUnevaluated and withShrunkSet and for the same reason: it is a caveat about OUR OWN access,
+// not a competing claim about health, so it appends and changes no verdict.
+//
+// THE ONLY PLACE THAT NAMES THEM, deliberately. childrenForbiddenMessage states the CAUSE and
+// leaves the naming here, so there is exactly one format and no arm can both name them and not.
+//
+// Capped at 3 like every other list: a composition with 118 refused children must not put 118
+// names into a condition etcd rewrites on every reconcile. The count that a CONSUMER reads is
+// status.unreadableChildrenCount — this string is mine to reword and prose is not an interface.
+func withUnreadable(base string, unreadable []string, total int) string {
+	if len(unreadable) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s (%d of %d managed children could NOT BE READ — this controller's "+
+		"ServiceAccount was refused access, which is a gap in the generated RBAC rather than a "+
+		"problem with the children: %s)", base, len(unreadable), total, joinCap(unreadable, 3))
+}
+
+func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
 	if p.present && !p.ready {
 		msg := p.message
 		if msg == "" {

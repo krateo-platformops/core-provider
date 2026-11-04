@@ -106,16 +106,63 @@ func TestRollup_EveryChildForbiddenIsUnknownChildrenForbidden(t *testing.T) {
 	if len(v.unreadable) != 2 {
 		t.Errorf("unreadable = %v, want both children", v.unreadable)
 	}
-	// NAMES in the message, for the #289 reason the converging list already records: a count tells
-	// an operator something is wrong and gives them no way to reach it.
+	// NAMES, asserted through resolveReady rather than on the rollup's own message, because
+	// resolveReady's is the one that reaches the condition: the rollup's message is DISCARDED for
+	// several arms, which is how #121's coverage caveat shipped unreachable — computed every
+	// reconcile and thrown away every time. Asserting v.message here would have passed while the
+	// condition said nothing.
+	out := resolveReady(projectedHealth{}, readyMessageAvailable, v)
 	for _, n := range []string{"a", "b"} {
-		if !strings.Contains(v.message, n) {
-			t.Errorf("message does not name child %q: %s", n, v.message)
+		if !strings.Contains(out.message, n) {
+			t.Errorf("the condition message does not name child %q: %s", n, out.message)
 		}
 	}
-	if !strings.Contains(v.message, "refused") {
-		t.Errorf("message does not say the read was refused, so it reads as the children's "+
-			"problem rather than as a missing grant: %s", v.message)
+	if !strings.Contains(out.message, "refused") {
+		t.Errorf("the condition message does not say the read was refused, so it reads as the "+
+			"children's problem rather than as a missing grant: %s", out.message)
+	}
+}
+
+// THE PROVIDER-RUNTIME SESSION'S CONDITION on the narrow threshold, and the arm my first
+// implementation got wrong: below the all-or-nothing case the verdict does not move, but the
+// refused children must still be NAMED. Otherwise "one of 121 unreadable" goes back to silence,
+// which is the defect #318 exists to remove.
+//
+// The names reached the message only on the ChildrenForbidden arm; Available, Unavailable and
+// Creating dropped them, while a comment four lines away claimed they were "named in the message".
+// Asserted on all three arms here, because the one that was silent is the one with no symptom.
+func TestResolveReady_NamesTheRefusedChildrenOnEveryArm(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v    healthVerdict
+	}{
+		{"available", healthVerdict{ready: true, reason: "Available", message: readyMessageAvailable,
+			unreadable: []string{"refused-one"}, total: 4}},
+		{"unavailable", healthVerdict{reason: "Unavailable", message: "managed children not healthy: bad",
+			failing: []string{"bad"}, unreadable: []string{"refused-one"}, total: 4}},
+		{"creating", healthVerdict{reason: "Creating", message: "1 of 4 managed children are not ready: slow",
+			converging: []string{"slow"}, unreadable: []string{"refused-one"}, total: 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := resolveReady(projectedHealth{}, readyMessageAvailable, tc.v)
+			if !strings.Contains(out.message, "refused-one") {
+				t.Errorf("the %s arm drops the refused child's name: %q. A count an operator "+
+					"cannot reach is the #289 defect, and an arm that silently drops it is worse "+
+					"than one that never had it, because the scalars say there is one",
+					tc.name, out.message)
+			}
+			if !strings.Contains(out.message, "1 of 4") {
+				t.Errorf("the %s arm drops the count: %q", tc.name, out.message)
+			}
+		})
+	}
+
+	// CONTROL: no refused children, no caveat. Without this the assertions above are satisfied by a
+	// message that always carries the clause, which would churn every condition's
+	// LastTransitionTime for every composition (#298) and mean nothing when it did appear.
+	clean := healthVerdict{ready: true, reason: "Available", message: readyMessageAvailable, total: 4}
+	if out := resolveReady(projectedHealth{}, readyMessageAvailable, clean); strings.Contains(out.message, "refused") {
+		t.Errorf("a composition with NO refused children carries the caveat anyway: %q", out.message)
 	}
 }
 
