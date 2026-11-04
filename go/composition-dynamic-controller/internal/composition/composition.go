@@ -921,6 +921,31 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+
+	// RESOLVED, NOT READ OFF THE LABEL (#335). This read the label, and on #303's adoption path the
+	// label does not exist: its absence is what triggers adoption. So Update got "" and every helm
+	// call it makes failed on an empty release name --
+	//
+	//	update failed: upgrading helm chart: reconcile: getting stored release:
+	//	  get release failed: releaseContent: Release name is invalid:
+	//
+	// -- with nothing after the colon, forever. Measured on 2.13.61 by the
+	// openstack-ironic-operator-kog session against their constructed probe: the adoption decision,
+	// the helm upgrade and convergence to desired state ALL worked (rev 1 -> 2, content
+	// cycle-1 -> cycle-2), and the composition then reported Synced=False/ReconcileError
+	// indefinitely. Three of four pass conditions is not three quarters of a fix.
+	//
+	// I FOUND THIS GAP AND DID NOT CLOSE IT. #322 wired resolveReleaseName at Observe, Create and
+	// Exists; I noted at the time that Update and Delete still read the label, then fixed the
+	// chart-inspector half (#330) instead. Their original diagnosis named both halves -- "persist
+	// AND propagate the adopted name" -- and #330 took only the propagate half, so every OTHER
+	// consumer of the label still read "". The chart-inspector call was simply the one that failed
+	// first and loudest.
+	resolved, rerr := h.resolveReleaseName(ctx, mg)
+	if rerr != nil {
+		return fmt.Errorf("resolving release name: %w", rerr)
+	}
+	compositionMeta.SetReleaseName(mg, resolved)
 	releaseName := compositionMeta.GetReleaseName(mg)
 
 	log := xcontext.Logger(ctx)
@@ -1159,7 +1184,24 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
 
+	// RESOLVED HERE TOO (#335), for the same reason as Update -- and with a guard, because this is
+	// a teardown path. A composition deleted before any phase persisted the label would otherwise
+	// hand helm an empty release name, and on a teardown "could not determine the name" must never
+	// read as "nothing to uninstall": that direction orphans a release nobody will ever record.
+	resolvedForDelete, derr := h.resolveReleaseName(ctx, mg)
+	if derr != nil {
+		return fmt.Errorf("resolving release name for teardown: %w", derr)
+	}
+	compositionMeta.SetReleaseName(mg, resolvedForDelete)
 	releaseName := compositionMeta.GetReleaseName(mg)
+	if releaseName == "" {
+		// Cannot happen while CalculateReleaseName returns a non-empty name for a named object, and
+		// asserted anyway because the consequence is an orphan rather than an error: every path out
+		// of here either uninstalls this name or reports nothing to do.
+		return fmt.Errorf("refusing to tear down %s/%s with an empty helm release name: the name "+
+			"could not be resolved, and proceeding would read as \"nothing to uninstall\"",
+			mg.GetNamespace(), mg.GetName())
+	}
 
 	log := xcontext.Logger(ctx)
 
