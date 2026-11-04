@@ -1,7 +1,10 @@
 package composition
 
 import (
+	"context"
+
 	"fmt"
+	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,6 +59,32 @@ func chartRenderableFailure(err error) (reason, message string) {
 	return reasonInspectorUnavailable, fmt.Sprintf("could not reach chart-inspector: %v", err)
 }
 
+// markChartRenderable records a SUCCESSFUL render, and exists because that arm did not.
+//
+// #331. Both call sites set this condition False and nothing set it True, so
+// reasonChartRenderable -- declared, and documented as "the render succeeded" -- was emitted ZERO
+// times. A consumer saw `absent` or `False` and never True, and a composition that recovered
+// carried the False forever: measured on a live cluster by the openstack-ironic-operator-kog
+// session, with Ready and Synced both back to True beside it.
+//
+// The control that makes that a defect rather than a design: ConditionTypeApiResolved, which this
+// condition's own doc comment names as its precedent (#251), DOES reach True at support.go:319.
+// Two conditions built to one design, one of which closed the loop.
+//
+// A FUNCTION RATHER THAN THE LITERAL TWICE. There are two RBAC-generation paths -- Create does it
+// inline and Observe/Delete go through applyDerivedRBAC -- and a reason plus a message copied into
+// both is two places for them to drift. The duplication of the paths themselves is older than this
+// fix and not something to restructure inside it.
+//
+// BEST-EFFORT, exactly like the failure arm: the condition is a report, and failing to write a
+// report must not turn a successful render into an error.
+func markChartRenderable(ctx context.Context, mg *unstructured.Unstructured) {
+	if err := setChartRenderableCondition(mg, metav1.ConditionTrue, reasonChartRenderable,
+		"chart-inspector rendered the chart against this cluster"); err != nil {
+		xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", err.Error())
+	}
+}
+
 // setChartRenderableCondition stamps the condition.
 //
 // RECOMPUTED EVERY RECONCILE AND NEVER LATCHED. A 422 means "not renderable as things stand", and
@@ -63,6 +92,18 @@ func chartRenderableFailure(err error) (reason, message string) {
 // composition that hit that window must recover on the next reconcile rather than carry
 // UnservedKind until someone intervenes. Latching here would reproduce #261 exactly: a condition
 // derived once from state nobody refreshes.
+//
+// THAT PARAGRAPH WAS FALSE FOR AS LONG AS IT EXISTED (#331), and it named the defect it was
+// reproducing. This function is indeed free of latching — and both its callers only ever passed
+// ConditionFalse, so there was nothing to recompute TO. The condition was recomputed on every
+// failing reconcile and never on a successful one, which latches in effect while the code that
+// stamps it looks innocent. markChartRenderable above is the missing arm.
+//
+// The lesson is not "comments go stale". The claim was about a property of the SYSTEM ("never
+// latched") argued from a property of this FUNCTION ("it always overwrites"), and that inference
+// does not hold unless every caller can supply every value. Measured: ConditionTrue appeared 0
+// times across both call sites, and reasonChartRenderable 0 times outside its own declaration,
+// against a control reason with 2 uses.
 func setChartRenderableCondition(mg *unstructured.Unstructured, status metav1.ConditionStatus, reason, message string) error {
 	return unstructuredtools.SetConditions(mg, metav1.Condition{
 		Type:               ConditionTypeChartRenderable,

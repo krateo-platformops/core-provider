@@ -771,43 +771,22 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if mg, err = tools.Update(ctx, mg, updateOpts); err != nil {
 		return fmt.Errorf("stamping composition-definition labels: %w", err)
 	}
-	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
-	if err != nil {
-		return fmt.Errorf("converting GVK to GVR: %w", err)
-	}
-
-	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
-	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
-	// Get Resources and generate RBAC
-	generated, err := rbgen.
-		WithBaseName(releaseName).
-		Generate(ctx, rbacgen.Parameters{
-			CompositionName:                mg.GetName(),
-			CompositionNamespace:           mg.GetNamespace(),
-			CompositionGVR:                 compositionGVR,
-			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
-			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
-			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
-		})
-	if err != nil {
-		// #265. Name whose fault this is. A blueprint referencing a kind the cluster does not serve
-		// is a 422 and resolves itself once the CRD exists; chart-inspector failing is a 5xx and is
-		// not the blueprint's problem. Both used to arrive folded into Synced's message as an
-		// indistinguishable 500. Best-effort: the condition is a report, so failing to write it
-		// must not replace the real error with a reporting error.
-		reason, message := chartRenderableFailure(err)
-		if cerr := setChartRenderableCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
-			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
-		}
-		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
-	}
-	rbInstaller := rbac.NewRBACInstaller(dyn)
-	helmMetrics := metrics.NewHelmMetrics(ctx)
-	err = helmMetrics.TimedRBAC(func() error {
-		return rbInstaller.ApplyRBAC(generated)
-	})
-	if err != nil {
-		return fmt.Errorf("installing rbac: %w", err)
+	// ONE RBAC PATH, not two. This block used to be an inline copy of applyDerivedRBAC --
+	// identical GVR conversion, identical chart-inspector client, identical rbgen call, identical
+	// #265 failure classification, identical ApplyRBAC -- differing only in the wording of one
+	// error wrap.
+	//
+	// Consolidated as part of #331 because the duplication is what made the defect land twice and
+	// be testable in neither place: the ChartRenderable success arm had to be added at two sites,
+	// and a mutant that removed EITHER one survived the whole suite, since neither site can be
+	// reached without a chart-inspector and a real chart. One path is one place to wire, and
+	// applyDerivedRBAC takes everything it needs as arguments, so a test can call it directly.
+	//
+	// Behaviour preserved deliberately: the error text differs ("applying rbac" rather than
+	// "installing rbac") and nothing matches on it -- checked, no test or consumer greps either
+	// string.
+	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+		return err
 	}
 
 	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
@@ -859,7 +838,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("finding helm release: %w", err)
 	}
-	helmMetrics = metrics.NewHelmMetrics(ctx)
+	helmMetrics := metrics.NewHelmMetrics(ctx)
 	if rel != nil {
 		log.Debug("Release already exists, upgrading instead of installing.")
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
@@ -1424,6 +1403,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		}
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
+	markChartRenderable(ctx, mg)
 
 	rbInstaller := rbac.NewRBACInstaller(dyn)
 	if err := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
