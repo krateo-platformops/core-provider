@@ -197,6 +197,19 @@ func TestIdentityFromLabels_RequiresEveryField(t *testing.T) {
 // precision and each defeats the entire purpose. composition-id is the UID, which a recreated CR
 // does not have; composition-installed-version changes on every bump, and a bump is the event
 // adoption exists for. A match including either would never fire in the case it was built for.
+//
+// AND THE CONSEQUENCE IS STRONGER THAN "ADOPTION WOULD NOT FIRE", measured on a0-openstack-d4
+// pre-#322: a chart's workload selector is DERIVED FROM THE RELEASE NAME, and a selector is
+// immutable. So an identity that changes across a bump renames the release, and the renamed
+// release renders a selector Kubernetes REFUSES:
+//
+//	DaemonSet.apps "openvswitch" is invalid: spec.selector: Invalid value:
+//	  {"matchLabels":{"app.kubernetes.io/instance":"openvswitch-54xd86b6", ...}}: field is immutable
+//
+// against live objects carrying instance=openvswitch-d2z2v8c9 from the surviving release. The
+// second release therefore cannot work at all -- it is not a tidy duplicate, it is a permanent
+// upgrade failure. This test is what keeps the identity stable enough for the rendered selector to
+// match what is already in the cluster.
 func TestCompositionIdentity_ExcludesTheUIDAndTheVersion(t *testing.T) {
 	labels := map[string]string{
 		labelCompositionGroup:     "composition.krateo.io",
