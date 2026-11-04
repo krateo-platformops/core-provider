@@ -372,9 +372,48 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 	// and no unit test would see it, because the testable seam is below this line. Now there is
 	// nothing to drift.
 	v := healthVerdict{ready: true, reason: "Available", message: readyMessageAvailable}
+	// TRACKED, because the two ways of not running the rollup both leave `v` looking like a
+	// rollup over zero children — and writing `managedChildrenCount: 0` for a composition whose
+	// inventory was never consulted would be a measurement reported as a property. That is the
+	// defect this whole file keeps finding (#248, #261, #269, #273): a number that describes the
+	// instrument presented as a number about the world. No kubeconfig and a failed client are both
+	// "no reading", and no reading must write no fields.
+	rollupRan := false
 	if h.kubeconfig != nil {
 		if dyn, err := dynamicclient.NewForConfig(h.kubeconfig); err == nil {
 			v = h.rollupManagedChildren(ctx, dyn, mg)
+			rollupRan = true
+		}
+	}
+
+	// #318. The coverage scalars, so a consumer gets a DENOMINATOR instead of an inference.
+	//
+	// Set once here rather than on each of the rollup's return paths, for the reason #230 already
+	// established below for previousManagedCount: the paths differ in which children they NAME,
+	// not in how many there were, and a field that has to be remembered at five sites is a field
+	// that will be missed at one.
+	//
+	// ALWAYS WRITTEN WHEN THE ROLLUP RAN, including when nothing is unreadable and nothing is
+	// unevaluated. An absent field and a zero are indistinguishable in jq after `// 0`, so full
+	// coverage has to be readable as healthEvaluatedChildren == managedChildrenCount rather than
+	// as a missing key — otherwise every consumer re-derives the same wrong inference I shipped in
+	// #248, that an absent number means nothing to count.
+	//
+	// THE COUNT IS THE INTERFACE AND THE NAMES ARE NOT. The unreadable children's names are in the
+	// Ready message, because a count an operator cannot act on is the #289 defect; but the message
+	// is a format string I rewrite whenever the wording improves, and a jq path over prose gets no
+	// warning when I do. Prose is not an interface.
+	//
+	// These three MUST also be declared in core-provider's statics/status.schema.json, and are
+	// (TestBaselineStatusWritesAreAllReserved asserts the agreement in all three directions). A
+	// status field the generated CRD does not declare is pruned by the apiserver with no error at
+	// any layer a consumer can see — which is the trap that makes this a two-repo change rather
+	// than a one-file one.
+	if rollupRan {
+		for field, n := range coverageScalars(v) {
+			if err := maps.SetNestedField(mg.Object, int64(n), "status", field); err != nil {
+				return fmt.Errorf("setting status.%s: %w", field, err)
+			}
 		}
 	}
 

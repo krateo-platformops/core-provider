@@ -59,6 +59,43 @@ func TestAvailablePartialCoverageReasonStringIsStable(t *testing.T) {
 	}
 }
 
+// ChildrenForbidden is matched as an EXACT STRING by three consumers in installer, and unlike
+// ZeroEvidence it was allowlisted there BEFORE anything emitted it — the safe ordering, since a
+// reason nothing emits is never matched.
+//
+// WHO BREAKS, from the installer session's own merge (their #646, 8bbeb81):
+//
+//	krateo-platformops/installer  chart/templates/_helpers.tpl   inst.readyFromConditions
+//	krateo-platformops/installer  hack/ready-classify.sh         the Unknown arm
+//	krateo-platformops/installer  .github/scripts/check-ready-gate.py  the assertion
+//
+// Their test asserts THREE must-block contrasts beside the accept, and the one that matters here is
+// `Unknown/Forbidden` — a near-miss spelling BLOCKS rather than silently claiming readiness. So a
+// rename on this side does not fail loudly over there; it fails as a dependency chain that never
+// gets created, which is the same silent shape as a ZeroEvidence rename and the reason this file
+// pins values rather than identifiers.
+//
+// If this test fails, the fix is NOT to update the expected string.
+func TestChildrenForbiddenReasonStringIsStable(t *testing.T) {
+	const expected = "ChildrenForbidden"
+	if ReasonChildrenForbidden != expected {
+		t.Fatalf("ReasonChildrenForbidden = %q, want %q.\n\n"+
+			"This is a CROSS-REPO BREAKING CHANGE. installer allowlists this exact string in three "+
+			"places and their own test asserts that the near-miss \"Forbidden\" must BLOCK, so a "+
+			"rename here does not surface as an error over there -- it surfaces as every "+
+			"dependent of an RBAC-gapped composition never being created. Change all three "+
+			"consumers in the same change, and tell the installer session before shipping.",
+			ReasonChildrenForbidden, expected)
+	}
+	// And it must not collide with the reason it sits beside: two reasons that mean different
+	// things to an operator (the children published nothing / we were refused a read) must not be
+	// the same string, or the distinction #318 exists to create is unobservable.
+	if ReasonChildrenForbidden == condition.ReasonZeroEvidence {
+		t.Error("ChildrenForbidden and ZeroEvidence are the same string, so the cause of a " +
+			"composition's missing evidence is no longer readable")
+	}
+}
+
 // The reasons krateoReady treats as UNEVALUATED are the ones that mean "nobody assessed this child",
 // as opposed to "this child is unhealthy" or "this child is still coming up". Pinned as a SET so
 // that adding one is a deliberate edit here rather than a quiet widening of the branch.

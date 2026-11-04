@@ -46,6 +46,27 @@ const (
 	// not dispatch an Update on every resync, which is why this is a state and not a predicate
 	// over the existing list.
 	childAbsent
+
+	// childUnreadable: the controller's ServiceAccount was REFUSED a read of this child
+	// (apierrors.IsForbidden). Scoped to Forbidden ONLY — a missing REST mapping or a transient GET
+	// failure keeps the old silent childHealthy treatment, because neither is actionable and
+	// neither is ours.
+	//
+	// SEPARATE FROM childUnevaluated, and the distinction is the whole of #318. A widget publishing
+	// `status: {}` is unevaluated: honest, and the child's own property. A child behind a missing
+	// grant is unreadable, which is a DEFECT IN GENERATED RBAC — ours, and actionable. Folding
+	// them together would lose exactly the distinction the issue exists to create.
+	//
+	// Before this state existed, a Forbidden read returned childHealthy and was counted NOWHERE:
+	// only childUnevaluated incremented a counter, so one unreadable child and 121 unreadable
+	// children produced byte-identical output, `Ready=True / Available` with the same message. The
+	// mirror image of the stale green this file spent #248/#261/#269/#273 removing — a parent
+	// reading healthy for a child nobody could read. Named by the provider-runtime session.
+	//
+	// Nobody has ever measured this population, because nothing counted it. It may be zero. The
+	// unevaluated numbers in rollupManagedChildren's comment (396 of 725 children on krateo-057,
+	// 631 of 790 on day2, 118 of 121 on one composition) are the reason not to assume so.
+	childUnreadable
 )
 
 // nativeGroups are the API groups whose readiness semantics Kubernetes itself defines, so this
@@ -86,6 +107,13 @@ type healthVerdict struct {
 	converging []string
 	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
 	unevaluated int
+	// unreadable names children the ServiceAccount was REFUSED a read of (#318). NAMED, not just
+	// counted, for the #289 reason the converging list already records: a count could never have
+	// been produced without knowing which child it was, and not saying so was the whole defect.
+	// The count reaches consumers as status.unreadableChildrenCount, because prose is not an
+	// interface; the names reach an operator through the message, because names do not belong in
+	// a scalar.
+	unreadable []string
 	// absent names children recorded in status.managed that do not exist. A SUBSET of converging —
 	// readiness treats them identically — surfaced separately so Observe can report drift and let
 	// Update rewrite the recorded set (#261). Not part of the condition message.
@@ -169,7 +197,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 
 	var failing, converging []string
 	unevaluated := 0
-	var absent []string
+	var absent, unreadable []string
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
@@ -199,18 +227,24 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			absent = append(absent, childID(ref))
 		case childUnevaluated:
 			unevaluated++ // counted only; never changes the verdict
+		case childUnreadable:
+			// Counted AND named, and like childUnevaluated it does not enter `failing` or
+			// `converging`, so it cannot by itself fail or hold back a parent. The only verdict it
+			// participates in is the nothing-was-assessed case below.
+			unreadable = append(unreadable, childID(ref))
 		}
 	}
 
 	switch {
 	case len(failing) > 0:
 		return healthVerdict{
-			absent:  absent,
-			ready:   false,
-			reason:  "Unavailable",
-			message: fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
-			failing: failing,
-			total:   len(managed),
+			absent:     absent,
+			ready:      false,
+			reason:     "Unavailable",
+			message:    fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
+			failing:    failing,
+			unreadable: unreadable,
+			total:      len(managed),
 		}
 	case len(converging) > 0:
 		return healthVerdict{
@@ -220,9 +254,10 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 				len(converging), len(managed), joinCap(converging, 3)),
 			converging: converging,
 			absent:     absent,
+			unreadable: unreadable,
 			total:      len(managed),
 		}
-	case unevaluated == len(managed):
+	case unevaluated+len(unreadable) == len(managed):
 		// ZERO EVIDENCE (#165). Nothing was evaluated, so "Available" is a claim about an empty
 		// set. The caveat already said so in the message and the condition said Available anyway,
 		// which is the combination nobody reads as a warning.
@@ -238,10 +273,41 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		// krateo-057 are partial, the largest at 142 of 145, and those keep reporting Available:
 		// evidence from three children is thin but it is not nothing, and there is no principled
 		// threshold between 142/145 and 5/5 that is not just a number someone picked.
+		//
+		// #318 WIDENED THE ARM AND SPLIT THE REASON. It used to read `unevaluated == len(managed)`,
+		// because an unreadable child was counted healthy and so could never reach here. Now that
+		// Forbidden reads have their own state, "nothing was assessed" has two causes and they are
+		// not equally actionable:
+		//
+		//	ZeroEvidence       the children published nothing this controller can read.
+		//	                   The children's own property. Not ours to fix.
+		//	ChildrenForbidden  the ServiceAccount was refused a read. A defect in the RBAC we
+		//	                   GENERATE, and the one an operator can act on.
+		//
+		// Diego's rule, in the form that does not leave a hole: Unknown when NOT ONE child was
+		// assessed. Keying it on `len(unreadable) == len(managed)` alone would have left a
+		// composition with 3 unreadable and 2 unevaluated children reporting Available with zero
+		// evidence behind it, which is the defect wearing a different mix.
+		//
+		// WHY THE REASON MATTERS MORE THAN USUAL HERE: installer's gate accepts Ready=Unknown ONLY
+		// with reason exactly ZeroEvidence, with no else-arm (chart/templates/_helpers.tpl,
+		// inst.readyFromConditions, verified independently by two sessions against the live repo).
+		// So this reason string decides whether dependents are held back, and installer has
+		// allowlisted ChildrenForbidden ahead of this landing (their #646, 8bbeb81) — the safe
+		// ordering, since a reason nothing emits is never matched. A near-miss spelling BLOCKS
+		// rather than silently claiming readiness, which is why their test asserts
+		// `Unknown/Forbidden` must block.
+		reason := condition.ReasonZeroEvidence
+		message := zeroEvidenceMessage(len(managed))
+		if len(unreadable) > 0 {
+			reason = ReasonChildrenForbidden
+			message = childrenForbiddenMessage(unreadable, unevaluated, len(managed))
+		}
 		return healthVerdict{
-			ready: false, reason: condition.ReasonZeroEvidence,
-			message:     zeroEvidenceMessage(len(managed)),
+			ready: false, reason: reason,
+			message:     message,
 			unevaluated: unevaluated,
+			unreadable:  unreadable,
 			total:       len(managed),
 		}
 	default:
@@ -252,7 +318,13 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			ready: true, reason: "Available",
 			message:     availableMessage(unevaluated, len(managed)),
 			unevaluated: unevaluated,
-			total:       len(managed),
+			// CARRIED EVEN THOUGH THE VERDICT IS GREEN, which is the whole point of #318 short of
+			// the all-or-nothing case: a composition with 6 of 10 children unreadable still reports
+			// Available — Diego's decision, and the narrowest one — but it now says so, in
+			// status.unreadableChildrenCount and by name in the message. One unreadable child and
+			// 121 no longer produce identical output.
+			unreadable: unreadable,
+			total:      len(managed),
 		}
 	}
 }
@@ -262,6 +334,20 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 func zeroEvidenceMessage(total int) string {
 	return fmt.Sprintf("Composition health is unknown: none of its %d managed children could be "+
 		"health-evaluated (no readiness semantics this controller knows how to read)", total)
+}
+
+// childrenForbiddenMessage says that NOTHING was assessed. It deliberately does not name the
+// refused children or say that RBAC is why: withUnreadable appends both, on every arm, so there is
+// one format and one place that can be wrong. Saying it here too would print it twice on this arm
+// and nowhere on the others, which is the state this replaced.
+func childrenForbiddenMessage(unreadable []string, unevaluated, total int) string {
+	msg := fmt.Sprintf("Composition health is unknown: none of its %d managed children could be "+
+		"health-evaluated", total)
+	if unevaluated > 0 {
+		msg += fmt.Sprintf(" (%d of them publish no readiness semantics this controller knows how "+
+			"to read)", unevaluated)
+	}
+	return msg
 }
 
 // availableMessage qualifies the healthy message when some children could not be assessed, so the
@@ -368,7 +454,44 @@ func (p projectedHealth) notReadyReason() string {
 //
 // The rollup is itself fail-safe (unreadable / unmodeled children count healthy), so this can only
 // surface failures it can positively observe — it never flips a working composition to NotReady.
+// resolveReady is the verdict below plus ONE exit that appends the unreadable-children caveat.
+//
+// WHY A WRAPPER AND NOT A LINE IN EACH ARM. The provider-runtime session's condition on #318's
+// narrow threshold: below the all-or-nothing case the verdict must not move, but the unreadable
+// children must still be NAMED, or "one of 121 unreadable" goes back to silence, which is the
+// defect #318 exists to remove. They were right, and my first implementation did not do it — the
+// names reached the message only on the ChildrenForbidden arm, and the Available, Unavailable and
+// Creating arms dropped them while a comment four lines away claimed they were "named in the
+// message". A comment claiming more than its code.
+//
+// resolveReady has seven returns. Appending in each is how an arm gets missed, and the arm that
+// gets missed is the silent one — there is no symptom to notice. One exit cannot be forgotten.
 func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
+	out := resolveReadyVerdict(p, defaultMsg, v)
+	out.message = withUnreadable(out.message, v.unreadable, v.total)
+	return out
+}
+
+// withUnreadable appends the refused children to whatever message is being stamped, like
+// withUnevaluated and withShrunkSet and for the same reason: it is a caveat about OUR OWN access,
+// not a competing claim about health, so it appends and changes no verdict.
+//
+// THE ONLY PLACE THAT NAMES THEM, deliberately. childrenForbiddenMessage states the CAUSE and
+// leaves the naming here, so there is exactly one format and no arm can both name them and not.
+//
+// Capped at 3 like every other list: a composition with 118 refused children must not put 118
+// names into a condition etcd rewrites on every reconcile. The count that a CONSUMER reads is
+// status.unreadableChildrenCount — this string is mine to reword and prose is not an interface.
+func withUnreadable(base string, unreadable []string, total int) string {
+	if len(unreadable) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s (%d of %d managed children could NOT BE READ — this controller's "+
+		"ServiceAccount was refused access, which is a gap in the generated RBAC rather than a "+
+		"problem with the children: %s)", base, len(unreadable), total, joinCap(unreadable, 3))
+}
+
+func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
 	if p.present && !p.ready {
 		msg := p.message
 		if msg == "" {
@@ -454,6 +577,21 @@ const readyMessageAvailable = "Composition is up-to-date"
 // less than half of what it is about, which is a different statement from Available.
 const ReasonAvailablePartialCoverage = "AvailablePartialCoverage"
 
+// ReasonChildrenForbidden is Ready=Unknown where NOT ONE child could be assessed and at least one
+// of them was REFUSED a read by RBAC (#318).
+//
+// A CROSS-REPO CONTRACT, matched as an exact string by installer's dependency gate
+// (chart/templates/_helpers.tpl, inst.readyFromConditions) and by hack/ready-classify.sh and
+// .github/scripts/check-ready-gate.py. The gate has no else-arm: Ready=True, or Unknown with a
+// reason it allowlists, and everything else blocks. installer allowlisted this string BEFORE
+// anything emitted it, which is the safe ordering — a reason nothing emits is never matched — and
+// their test asserts that the near-miss `Unknown/Forbidden` still BLOCKS, so a misspelling fails
+// visibly instead of silently claiming readiness.
+//
+// Do not rename it here alone, and do not "normalise" it to Forbidden. See
+// reasoncontract_test.go, which pins the value for exactly this reason.
+const ReasonChildrenForbidden = "ChildrenForbidden"
+
 // availableReason distinguishes "I assessed most of this composition" from "I assessed a minority of
 // it", because Ready=True means materially different things in the two cases and nothing a machine
 // reads could previously tell them apart.
@@ -519,8 +657,20 @@ func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref ma
 			// what a stale status.managed looks like — see childAbsent (#261).
 			return childAbsent
 		}
-		// Forbidden (SA lacks read), no REST mapping, transient: degrade to healthy so a missing
-		// grant can never regress a working composition.
+		if apierrors.IsForbidden(err) {
+			// #318. Still rolls up without failing the parent — a missing grant must never regress
+			// a working composition — but it is now COUNTED and NAMED instead of vanishing into a
+			// Debug line. Scoped to Forbidden alone: that is the one case that is a defect in RBAC
+			// we generate, and therefore the one case an operator can act on.
+			xcontext.Logger(ctx).Debug("child health: READ REFUSED by RBAC; counted unreadable, not healthy",
+				"child", childID(ref), "error", err.Error())
+			return childUnreadable
+		}
+		// No REST mapping, or a transient failure: degrade to healthy, unchanged, so a missing CRD
+		// or an apiserver blip can never regress a working composition. Deliberately NOT folded
+		// into childUnreadable — neither is actionable, and reporting them would make the new
+		// count mean "something went wrong reading this" rather than "RBAC refused us", which is
+		// the only reading that tells an operator what to fix.
 		xcontext.Logger(ctx).Debug("child health: unreadable, counting healthy", "child", childID(ref), "error", err.Error())
 		return childHealthy
 	}
@@ -972,4 +1122,33 @@ func joinCap(items []string, cap int) string {
 		return strings.Join(items, ", ")
 	}
 	return fmt.Sprintf("%s (+%d more)", strings.Join(items[:cap], ", "), len(items)-cap)
+}
+
+// coverageScalars is the #318 numbers a verdict publishes, as field name to value.
+//
+// SEPARATED FROM THE WRITE, and the separation was forced by a surviving mutant rather than
+// chosen: dropping `- len(v.unreadable)` from the arithmetic compiled and broke nothing, because
+// the test that covered it RECOMPUTED the arithmetic instead of reading what was written. A test
+// that reconstructs the thing under test can only ever agree with itself. The write needs a
+// kubeconfig and a dynamic client; the arithmetic does not, so the arithmetic lives here where a
+// test can address it directly.
+//
+// Returned as a map keyed by field name so the names are in one place: three numbers written at one
+// site, declared reserved in core-provider's statusfields.go, and declared in its
+// statics/status.schema.json. A field missing from the schema is pruned by the apiserver with no
+// error at any layer a consumer can see.
+func coverageScalars(v healthVerdict) map[string]int {
+	evaluated := v.total - v.unevaluated - len(v.unreadable)
+	if evaluated < 0 {
+		// Cannot happen: every child lands in exactly one bucket and only these two are
+		// non-evaluating. Clamped rather than trusted because a negative count published to a
+		// dashboard is worse than a wrong one — it is unreadable, and it would be the first
+		// evidence that a new childState was added without being accounted for here.
+		evaluated = 0
+	}
+	return map[string]int{
+		"managedChildrenCount":    v.total,
+		"healthEvaluatedChildren": evaluated,
+		"unreadableChildrenCount": len(v.unreadable),
+	}
 }

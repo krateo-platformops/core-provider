@@ -45,9 +45,20 @@ var reservedStatusFields = map[string]struct{}{
 	"managed":              {},
 	"managedDigest":        {},
 	"previousManagedCount": {},
-	"lastReconcileTime":    {},
-	"conditions":           {},
-	"observedGeneration":   {},
+	// #318. Three scalars so a consumer gets a DENOMINATOR instead of an inference. They are
+	// always written when the rollup runs, including when nothing is unreadable, because an absent
+	// field and a zero are indistinguishable in jq after `// 0` — so full coverage must be
+	// readable as healthEvaluatedChildren == managedChildrenCount rather than as a missing key.
+	//
+	// Count-suffixed deliberately: status.managed already exists as an ARRAY, so a bare
+	// `managedChildren` reads as iterable, and a jq path that expects an array and gets a number
+	// does not error. The frontend session's correction, and it matches previousManagedCount above.
+	"healthEvaluatedChildren": {},
+	"managedChildrenCount":    {},
+	"unreadableChildrenCount": {},
+	"lastReconcileTime":       {},
+	"conditions":              {},
+	"observedGeneration":      {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision

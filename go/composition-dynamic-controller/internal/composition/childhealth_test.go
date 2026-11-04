@@ -275,15 +275,36 @@ func TestRollup_AbsentChildIsNamedAsConvergingAndRecordedSeparately(t *testing.T
 	}
 }
 
-func TestChildHealth_ForbiddenIsHealthy(t *testing.T) {
+// This asserted `childHealthy` until #318, and the PROPERTY it was protecting is still true: a
+// missing grant must never regress a working composition. What changed is where that property is
+// enforced. It used to be enforced by the classifier, by calling the child healthy — which bought
+// the fail-safe by making a claim about a child nobody had read, and made the gap uncountable,
+// because only childUnevaluated incremented anything.
+//
+// It is now enforced by the VERDICT: childUnreadable enters neither `failing` nor `converging`, so
+// it cannot fail or hold back a parent, and the only verdict it participates in is the case where
+// NOTHING was assessed. See childrenforbidden_test.go for that arm.
+//
+// Rewritten rather than deleted, because the fail-safe is the thing most likely to be lost by a
+// later change and this is the test that notices.
+func TestChildHealth_ForbiddenDoesNotRegressAWorkingComposition(t *testing.T) {
 	h := &handler{}
 	dyn := fakeDynWith()
 	dyn.PrependReactor("get", "deployments", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "x", fmt.Errorf("no access"))
 	})
 	ref := map[string]any{"apiVersion": "apps/v1", "resource": "deployments", "name": "x", "namespace": "ns"}
-	if got := h.childHealth(context.Background(), dyn, ref); got != childHealthy {
-		t.Errorf("Forbidden must degrade to healthy: got %d", got)
+
+	got := h.childHealth(context.Background(), dyn, ref)
+	if got == childFailed || got == childConverging || got == childAbsent {
+		t.Fatalf("Forbidden maps to %d, which is a state that fails or holds back its parent. A "+
+			"controller SA missing ONE grant would then turn every composition using that kind "+
+			"not-ready at once, converting an RBAC gap into a fleet-wide outage", got)
+	}
+	if got != childUnreadable {
+		t.Errorf("Forbidden maps to %d, want childUnreadable (%d). childHealthy was the old "+
+			"answer and it is the one #318 removed: it is not an assertion about the child, it is "+
+			"the absence of one, and it was counted nowhere", got, childUnreadable)
 	}
 }
 
