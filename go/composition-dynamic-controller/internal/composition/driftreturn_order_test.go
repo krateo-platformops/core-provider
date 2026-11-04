@@ -158,3 +158,96 @@ func TestObserveWritesStatusBeforeEveryDriftReturn(t *testing.T) {
 		}
 	}
 }
+
+// AND THE SELF-HEAL RETURN MUST STILL PRECEDE THE LATER DRIFT CHECKS.
+//
+// #337 moved that return from before the status write to after it. The commit claimed the move
+// went "no further" — that a Changed reconcile still returns before the stale-inventory and
+// absent-children checks, so the drift REASON an operator sees is unchanged. That claim was in a
+// comment with no test, which is the shape this repository has spent the day removing: a comment
+// that disagrees with the code is just read, while a test that disagrees with it fails.
+//
+// If the self-heal return were moved past `inventoryStaleReason`, a self-healed reconcile would
+// start reporting the stale-inventory reason instead — a silent change of diagnosis, on a path
+// that already reports drift either way, so nothing would fail and nothing would look different
+// except the words an operator reads.
+func TestSelfHealDriftReturnStillPrecedesTheLaterDriftChecks(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "composition.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing composition.go: %v", err)
+	}
+
+	var observe *ast.FuncDecl
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Recv != nil && fn.Name.Name == "Observe" && fn.Body != nil {
+			observe = fn
+			break
+		}
+	}
+	if observe == nil {
+		t.Fatal("Observe not found: this test inspected nothing and would otherwise pass")
+	}
+
+	// `if selfHealed { ... }` — the moved return — and the two later checks it must precede.
+	selfHealReturnAt, staleAt, absentAt := 0, 0, 0
+	ast.Inspect(observe.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			if id, ok := node.Cond.(*ast.Ident); ok && id.Name == "selfHealed" {
+				if pos := fset.Position(node.Pos()).Line; selfHealReturnAt == 0 || pos < selfHealReturnAt {
+					selfHealReturnAt = pos
+				}
+			}
+		case *ast.CallExpr:
+			if id, ok := node.Fun.(*ast.Ident); ok && id.Name == "inventoryStaleReason" {
+				if pos := fset.Position(node.Pos()).Line; staleAt == 0 || pos < staleAt {
+					staleAt = pos
+				}
+			}
+		}
+		return true
+	})
+	// absentChildren is read through len(), so it is matched as a call on the identifier rather
+	// than by name of a helper.
+	ast.Inspect(observe.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "len" || len(call.Args) != 1 {
+			return true
+		}
+		if arg, ok := call.Args[0].(*ast.Ident); ok && arg.Name == "absentChildren" {
+			if pos := fset.Position(call.Pos()).Line; absentAt == 0 || pos < absentAt {
+				absentAt = pos
+			}
+		}
+		return true
+	})
+
+	// THE DENOMINATOR: all three landmarks, or the comparisons below are vacuous.
+	for name, line := range map[string]int{
+		"if selfHealed":        selfHealReturnAt,
+		"inventoryStaleReason": staleAt,
+		"len(absentChildren)":  absentAt,
+	} {
+		if line == 0 {
+			t.Fatalf("landmark %q not found in Observe, so this test proves nothing about the "+
+				"ordering it claims to check. Fix the lookup, not the assertion", name)
+		}
+	}
+
+	if selfHealReturnAt > staleAt {
+		t.Errorf("the self-heal return is at line %d, AFTER inventoryStaleReason at line %d. A "+
+			"self-healed reconcile now reports the stale-inventory drift reason instead of its "+
+			"own — a silent change of diagnosis on a path that reports drift either way (#337)",
+			selfHealReturnAt, staleAt)
+	}
+	if selfHealReturnAt > absentAt {
+		t.Errorf("the self-heal return is at line %d, AFTER the absentChildren check at line %d",
+			selfHealReturnAt, absentAt)
+	}
+}
