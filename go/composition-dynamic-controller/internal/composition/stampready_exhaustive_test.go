@@ -9,8 +9,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// importedStringConsts maps a qualified identifier AS WRITTEN IN THE SOURCE to the constant's REAL
+// value, taken from the compiled constant rather than re-parsed from the dependency's source.
+//
+// It exists because the reason strings were consolidated onto unstructured-runtime's constants —
+// removing 6 bare literals that could drift from the shared definition — and that turned each
+// `reason:` expression from a BasicLit into a SelectorExpr the walk could not read. The guard
+// FAILED rather than skipping, which is why this is a fix and not a discovery.
+//
+// WHY NOT PARSE THE IMPORTED PACKAGE. This guard compares what the package PRODUCES against what it
+// HANDLES, and both sides compile against the same constant — so the compiled value is the
+// authority. Re-deriving it from the dependency's source text would introduce a second
+// representation that can disagree with the one the code actually uses, which is the class of defect
+// this file exists to catch.
+//
+// It is also compiler-checked: if the dependency renames the constant, THIS FILE stops compiling
+// rather than an entry silently vanishing from the map and the reason going unresolved.
+var importedStringConsts = map[string]string{
+	"condition.ReasonZeroEvidence": condition.ReasonZeroEvidence,
+}
+
+// resolveSelector reads a qualified identifier (pkg.CONST) into its string value.
+func resolveSelector(se *ast.SelectorExpr) (string, string, bool) {
+	id, ok := se.X.(*ast.Ident)
+	if !ok {
+		return "", "<non-identifier qualifier>", false
+	}
+	q := id.Name + "." + se.Sel.Name
+	v, ok := importedStringConsts[q]
+	return v, q, ok
+}
 
 // stampReady's default arm used to be setAvaibleStatus. A reason added to resolveReady without a
 // matching case there did not fail loudly and did not stamp nothing — it reported the composition
@@ -126,6 +158,15 @@ func TestEveryReasonResolveReadyProducesIsHandledByStampReady(t *testing.T) {
 				} else {
 					unresolved = append(unresolved, "producer: identifier "+v.Name)
 				}
+			case *ast.SelectorExpr:
+				// A reason written as a constant from another package — which is now the normal
+				// spelling for ZeroEvidence, since it is a cross-repo contract and must have one
+				// definition. Resolved from the compiled value; see importedStringConsts.
+				if str, q, ok := resolveSelector(v); ok {
+					produced[str] = true
+				} else {
+					unresolved = append(unresolved, "producer: unmapped qualified identifier "+q)
+				}
 			case *ast.CallExpr:
 				// A reason computed by a package-local function or method: resolve it by reading THAT
 				// function's return statements, rather than demanding the author maintain a list
@@ -177,6 +218,12 @@ func TestEveryReasonResolveReadyProducesIsHandledByStampReady(t *testing.T) {
 						handled[s] = true
 					} else {
 						unresolved = append(unresolved, "stampReady case: identifier "+v.Name)
+					}
+				case *ast.SelectorExpr:
+					if str, q, ok := resolveSelector(v); ok {
+						handled[str] = true
+					} else {
+						unresolved = append(unresolved, "stampReady case: unmapped qualified identifier "+q)
 					}
 				default:
 					unresolved = append(unresolved, "stampReady case: "+exprKind(e))

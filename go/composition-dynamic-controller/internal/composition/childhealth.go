@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -160,7 +161,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		// is nothing to record", and the only one of the two that is a defect.
 		return healthVerdict{
 			ready:  false,
-			reason: "ZeroEvidence",
+			reason: condition.ReasonZeroEvidence,
 			message: "Composition health is unknown: no managed children are recorded, so none " +
 				"could be health-evaluated",
 		}
@@ -238,7 +239,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		// evidence from three children is thin but it is not nothing, and there is no principled
 		// threshold between 142/145 and 5/5 that is not just a number someone picked.
 		return healthVerdict{
-			ready: false, reason: "ZeroEvidence",
+			ready: false, reason: condition.ReasonZeroEvidence,
 			message:     zeroEvidenceMessage(len(managed)),
 			unevaluated: unevaluated,
 			total:       len(managed),
@@ -394,7 +395,7 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 		return readyOutcome{reason: "Unavailable", message: v.message}
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
-	case "ZeroEvidence":
+	case condition.ReasonZeroEvidence:
 		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
 		// the author's health RESTAction IS evidence, and it is better evidence than the generic
 		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
@@ -407,7 +408,7 @@ func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOu
 			}
 			return readyOutcome{reason: "Available", message: msg}
 		}
-		return readyOutcome{reason: "ZeroEvidence", message: v.message}
+		return readyOutcome{reason: condition.ReasonZeroEvidence, message: v.message}
 	}
 	// Available. The base is the caller's message, or the author's projected message when they
 	// wrote one.
@@ -661,7 +662,7 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
-		case stringField(cm, "reason") == "ZeroEvidence",
+		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved":
 			// NotObserved is provider-runtime v1.8.0's reason for "the external resource could not
 			// be observed" — an Observe or Connect failure, with the raw error left on Synced. It

@@ -415,7 +415,7 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setUnavailableStatus(mg, out.message, force)
 	case "Creating":
 		return setCreatingStatus(mg, out.message, force)
-	case "ZeroEvidence":
+	case condition.ReasonZeroEvidence:
 		return setZeroEvidenceStatus(mg, out.message, force)
 	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
