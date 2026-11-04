@@ -2,6 +2,7 @@ package meta
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/krateo-platformops/plumbing/labels"
@@ -137,6 +138,16 @@ func SetOriginVersion(o metav1.Object, version string) bool {
 	return true
 }
 
+// releaseNameSuffixLen is how many characters of the UID the release-name suffix is built from, and
+// therefore how long that suffix is.
+//
+// SHARED BY THE GENERATOR AND THE MATCHER DELIBERATELY. ReleaseNameCouldBelongTo has to recognise a
+// name CalculateReleaseName produced, and the only two ways to do that are to share this constant
+// or to restate the format — and a restated format drifts silently the first time the generator
+// changes (core-provider#303). rand.SafeEncodeString is length-preserving (it allocates
+// len(input) bytes and writes one per rune), so the suffix is exactly this many characters.
+const releaseNameSuffixLen = 8
+
 // CalculateReleaseName generates a release name for the Helm chart based on the name and UID of the resource.
 // If safeReleaseName is false, it will not append a random suffix to the release name, which can lead to collisions but is necessary for certain complex charts that have issues with long release names.
 func CalculateReleaseName(o runtime.Object, safeReleaseName bool) string {
@@ -145,12 +156,50 @@ func CalculateReleaseName(o runtime.Object, safeReleaseName bool) string {
 		uid := obj.GetUID()
 		if uid == "" {
 			// Generate random string if UID is not set
-			return fmt.Sprintf("%s-%s", obj.GetName(), rand.SafeEncodeString(rand.String(8)))
+			return fmt.Sprintf("%s-%s", obj.GetName(), rand.SafeEncodeString(rand.String(releaseNameSuffixLen)))
 		}
-		hashstr := rand.SafeEncodeString(string(obj.GetUID())[:8])
+		hashstr := rand.SafeEncodeString(string(obj.GetUID())[:releaseNameSuffixLen])
 		return fmt.Sprintf("%s-%s", obj.GetName(), hashstr)
 	}
 	return obj.GetName()
+}
+
+// ReleaseNameCouldBelongTo reports whether releaseName is one CalculateReleaseName could have
+// produced for an object named objName.
+//
+// It exists because a composition CR that is RECREATED gets a new UID, so CalculateReleaseName
+// mints a name no release holds — core-provider then reports ResourceExists=false and INSTALLS A
+// SECOND RELEASE instead of upgrading the first (#303). Nothing uninstalls the first, so the
+// component ends up with its objects split across two releases: the workload rejoins the new one
+// while the Services, which are mutable but owned by the failed old one, keep selecting a release
+// nothing carries. Measured end state: three Services with zero endpoints beside a 1/1 Ready pod,
+// and 40 hours of total token-issuance failure with every object reporting Ready.
+//
+// MATCHED ON LENGTH, NOT ON THE SUFFIX ALPHABET. rand.SafeEncodeString's alphabet is a literal in
+// apimachinery; copying it here would be a second copy to keep in step, and getting it wrong in the
+// permissive direction would let this adopt a release belonging to something else. The length is
+// derivable from the generator above and shared with it.
+//
+// A name is still only a CANDIDATE: the caller must refuse when more than one matches, because
+// adopting the wrong release hands a composition another component's workloads, which is strictly
+// worse than the split this exists to prevent.
+func ReleaseNameCouldBelongTo(releaseName, objName string, safeReleaseName bool) bool {
+	if objName == "" || releaseName == "" {
+		return false
+	}
+	if !safeReleaseName {
+		// The release name IS the object name, so a recreated CR resolves to the same release and
+		// this whole problem cannot arise.
+		return releaseName == objName
+	}
+	prefix := objName + "-"
+	if !strings.HasPrefix(releaseName, prefix) {
+		return false
+	}
+	// Exactly the suffix the generator appends — no more, no less. Without the length check,
+	// "mariadb-extra-9c847c79" would match objName "mariadb", and adopting across those two is the
+	// destructive direction.
+	return len(releaseName) == len(prefix)+releaseNameSuffixLen
 }
 
 func GetReleaseName(o metav1.Object) string {
