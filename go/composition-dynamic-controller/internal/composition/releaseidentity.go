@@ -53,6 +53,45 @@ const (
 // composition-id and composition-installed-version are the two that would look most like
 // precision and would each defeat the whole purpose: a bump is precisely a version change, and a
 // recreation is precisely a new UID.
+//
+// # Why excluding the version is load-bearing, and not merely convenient
+//
+// MEASURED ON a0-openstack-d4, pre-#322 (2.13.57), during an ordinary 0.3.32 -> 0.3.33 bump. The
+// two halves of #303 are CAUSALLY COUPLED, and the coupling runs through the rendered selector:
+//
+//  1. the parent re-renders: the old CR is deleted, a new one created
+//
+//  2. the old CR's Delete detects a version-migration handover and SKIPS the uninstall, so the
+//     old release's objects stay in the cluster (correct -- uninstalling mid-bump destroys
+//     stateful children, #168)
+//
+//  3. the new CR mints a release name from its own new UID, and a chart's workload selector is
+//     DERIVED FROM THE RELEASE NAME:
+//
+//     DaemonSet.apps "openvswitch" is invalid: spec.selector: Invalid value:
+//     {"matchLabels":{"app.kubernetes.io/instance":"openvswitch-54xd86b6", ...}}:
+//     field is immutable
+//
+//     The live object carries instance=openvswitch-d2z2v8c9 from the surviving release. The
+//     selector is immutable, so the install is REFUSED.
+//
+//  4. so the second release does not merely sit beside the first -- it CANNOT WORK, and the
+//     composition retries the upgrade forever (six revisions, none deployed)
+//
+// So adoption is not only about release COUNT. Adopting the survivor means the rendered selector
+// is the one the live objects already carry, which is why there is no immutability error and no
+// second release at all. **A changed release name is an unpatchable object**, and the version being
+// absent from this identity is what lets the name stay the same across a bump.
+//
+// TestCompositionIdentity_ExcludesTheUIDAndTheVersion is therefore load-bearing for a reason its
+// own comment did not state: not "the identity should be stable" as a principle, but "an unstable
+// identity renames the release, and renaming the release renders a selector Kubernetes will not
+// accept". Found by the installer session reading the full create error, which I had only seen
+// truncated.
+//
+// The same error appears on a0-openstack-d3's mariadb, months older -- `spec.selector: field is
+// immutable` on a self-heal apply, with Services bound to the failed release. Two clusters, one
+// defect at different ages.
 type compositionIdentity struct {
 	Group     string
 	Resource  string
