@@ -1856,9 +1856,6 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	return gvr, nil
 }
 
-// statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
-// at deploy time (apiVersion + resource). For a remote target this is the source of truth, since the
-// generated CRD is not visible to the management-cluster pluralizer. ok is false until status records it.
 // deleteGVK resolves the GVK Delete tears down, from the chart when it is readable and from status
 // when it is not (#314). Extracted so the decision is testable on its own, without the clients the
 // rest of Delete needs.
@@ -1883,6 +1880,9 @@ func deleteGVK(chartGVK schema.GroupVersionKind, chartErr error, recorded schema
 	return recorded, nil
 }
 
+// statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
+// at deploy time (apiVersion + resource). For a remote target this is the source of truth, since the
+// generated CRD is not visible to the management-cluster pluralizer. ok is false until status records it.
 func statusGVR(cr *compositiondefinitionsv1alpha1.CompositionDefinition) (schema.GroupVersionResource, bool) {
 	if cr.Status.ApiVersion == "" || cr.Status.Resource == "" {
 		return schema.GroupVersionResource{}, false
