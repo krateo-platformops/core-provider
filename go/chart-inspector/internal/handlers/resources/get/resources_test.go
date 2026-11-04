@@ -248,9 +248,26 @@ func TestResourcesHandlerErrorCases(t *testing.T) {
 					expectedStatus: http.StatusBadRequest,
 				},
 				{
+					// Reaches the composition GET and fails there, which is what this case is
+					// about — so it must carry releaseName, or the 400 added in #329 short-circuits
+					// it and the case stops testing the lookup.
 					name:           "non-existent composition",
-					url:            "/resources?compositionDefinitionName=test&compositionDefinitionNamespace=demo-system&compositionVersion=v1alpha1&compositionResource=compositions&compositionName=nonexistent&compositionNamespace=demo-system",
+					url:            "/resources?compositionDefinitionName=test&compositionDefinitionNamespace=demo-system&compositionVersion=v1alpha1&compositionResource=compositions&compositionName=nonexistent&compositionNamespace=demo-system&releaseName=nonexistent-abcdefgh",
 					expectedStatus: http.StatusInternalServerError,
+				},
+				{
+					// #329. The parameter that used to be re-derived from the composition's
+					// krateo.io/release-name label, which is not the caller's resolved name on an
+					// adoption path. Every other field is present, so a 400 here can only be
+					// about this one.
+					//
+					// 400 and not 500: an absent caller parameter is the CALLER's error, and the
+					// 500 it used to answer is what sent core-provider into a permanent retry loop
+					// — a 500 is the one class a caller is entitled to read as "not my fault,
+					// retry later", and no amount of retrying could supply a missing parameter.
+					name:           "missing releaseName",
+					url:            "/resources?compositionDefinitionName=test&compositionDefinitionNamespace=demo-system&compositionVersion=v1alpha1&compositionResource=compositions&compositionName=anything&compositionNamespace=demo-system",
+					expectedStatus: http.StatusBadRequest,
 				},
 			}
 

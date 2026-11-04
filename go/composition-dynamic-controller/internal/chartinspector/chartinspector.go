@@ -35,6 +35,25 @@ type Parameters struct {
 	CompositionDefinitionGroup     string `json:"compositionDefinitionGroup"`     // The group of the composition definition. Optional, defaults to "core.krateo.io"
 	CompositionDefinitionVersion   string `json:"compositionDefinitionVersion"`   // The version of the composition definition. Optional, defaults to "v1alpha1"
 	CompositionDefinitionResource  string `json:"compositionDefinitionResource"`  // The resource name of the composition definition. Optional, defaults to "compositiondefinitions"
+
+	// ReleaseName is the helm release name the CALLER has resolved for this composition. REQUIRED.
+	//
+	// It is sent because chart-inspector used to re-derive it from the composition's
+	// krateo.io/release-name LABEL, read off the live object it fetches itself — and the caller's
+	// value is not always on the live object yet. #303's adoption path is exactly that case: a
+	// recreated CR has no label (its absence is what triggers adoption), the cdc resolves the
+	// adopted name in memory, and Observe is a pure read that must not persist it (#110, #130). So
+	// chart-inspector dry-ran an install with release name "" and helm answered "no name provided",
+	// which failed Observe, which meant the runtime never reached Update — the only phase that
+	// would have written the label. A deadlock, retried forever (#329).
+	//
+	// Found by the openstack-ironic-operator-kog session, who constructed the precondition on a
+	// throwaway chart and then confirmed the cause by setting the label by hand and changing
+	// nothing else: the composition went from a permanent retry loop to Synced=True at revision 3.
+	//
+	// THE CALLER KNOWS THE NAME. A callee that re-derives what the caller already computed is
+	// coupled to the caller's persistence schedule, which is not a thing a callee can see.
+	ReleaseName string `json:"releaseName"`
 }
 
 type ChartInspectorInterface interface {
@@ -121,6 +140,7 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 	setQueryIfNotEmpty(&query, "compositionGroup", params.CompositionGroup)
 	setQueryIfNotEmpty(&query, "compositionVersion", params.CompositionVersion)
 	setQueryIfNotEmpty(&query, "compositionResource", params.CompositionResource)
+	setQueryIfNotEmpty(&query, "releaseName", params.ReleaseName)
 
 	req.URL.RawQuery = query.Encode()
 

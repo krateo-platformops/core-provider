@@ -92,6 +92,10 @@ func (r *RBACGen) Generate(ctx context.Context, params Parameters) (*rbac.RBAC, 
 		CompositionDefinitionGroup:     params.CompositionDefintionGVR.Group,
 		CompositionDefinitionVersion:   params.CompositionDefintionGVR.Version,
 		CompositionDefinitionResource:  params.CompositionDefintionGVR.Resource,
+		// r.baseName is the resolved release name, set by WithBaseName at the call site. Sent
+		// explicitly because chart-inspector cannot read it off the live object on the adoption
+		// path, where the label does not exist yet (#329).
+		ReleaseName: r.baseName,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("getting resources from chart-inspector: %w", err)
