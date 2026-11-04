@@ -6,7 +6,6 @@ toolchain go1.26.10
 
 require (
 	github.com/gobuffalo/flect v1.0.3
-	github.com/krateo-platformops/composition-dynamic-controller v1.4.0
 	github.com/krateo-platformops/core-provider v0.0.0-20260803144138-97785b777edd
 	github.com/krateo-platformops/plumbing v1.23.0
 	github.com/krateo-platformops/provider-runtime v1.7.2
@@ -131,6 +130,7 @@ require (
 	github.com/spf13/cast v1.7.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/sv-tools/openapi v0.2.1 // indirect
 	github.com/swaggo/files v0.0.0-20220610200504-28940afbdbfe // indirect
 	github.com/swaggo/swag v1.16.4 // indirect
