@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -189,6 +190,63 @@ func TestReleaseNameCouldBelongTo_RoundTripsWithTheGenerator(t *testing.T) {
 	} {
 		if compositionMeta.ReleaseNameCouldBelongTo(tc.release, tc.crName, true) {
 			t.Errorf("%q must not be treated as a release of %q", tc.release, tc.crName)
+		}
+	}
+}
+
+// THE STATE MASK IS A TRIP-WIRE, not a comment.
+//
+// adoptableStates carries a comment saying ListDeployed alone would miss the case adoption exists
+// for — the release that caused #303's outage was `failed` at revision 6. But the mask lives in the
+// I/O half of this file, so nothing exercised it: a future simplification to `ListDeployed` on the
+// reasonable-sounding grounds that "a deployed release is the only one worth adopting" would break
+// no test and silently restore the defect.
+//
+// Raised by the openstack-as-a-service session, who predicted exactly that simplification. It is
+// the shape three sessions spent today hunting — a comment asserting a safety property no test
+// covers — and this file had one within an hour of the comment being written.
+//
+// Asserted per state with its own reason, so a failure says which state was dropped and why it
+// mattered, rather than "the mask changed".
+func TestAdoptableStates_IncludeTheStatesAReleaseCanBeStuckIn(t *testing.T) {
+	for _, tc := range []struct {
+		state helmconfig.ListStates
+		name  string
+		why   string
+	}{
+		{helmconfig.ListFailed, "ListFailed",
+			"the release that caused #303's outage was `failed` at revision 6 — dropping this is " +
+				"the single change that makes adoption blind to the case it exists for"},
+		{helmconfig.ListDeployed, "ListDeployed",
+			"the ordinary case: a healthy release being upgraded"},
+		{helmconfig.ListPendingInstall, "ListPendingInstall",
+			"an install interrupted mid-flight still has objects, and recovery runs on exactly this"},
+		{helmconfig.ListPendingUpgrade, "ListPendingUpgrade",
+			"an upgrade interrupted mid-flight likewise"},
+		{helmconfig.ListPendingRollback, "ListPendingRollback",
+			"a rollback interrupted mid-flight likewise"},
+		{helmconfig.ListSuperseded, "ListSuperseded",
+			"a superseded revision means the release exists and has history; adopting is still right"},
+	} {
+		if adoptableStates&tc.state == 0 {
+			t.Errorf("adoptableStates omits %s: %s", tc.name, tc.why)
+		}
+	}
+
+	// THE OTHER DIRECTION, and it is not symmetry. Adopting an uninstalled release's name would
+	// turn the install into a failure rather than an upgrade: its objects are gone and helm cannot
+	// upgrade a release with no deployed revision. So these two must stay OUT.
+	for _, tc := range []struct {
+		state helmconfig.ListStates
+		name  string
+	}{
+		{helmconfig.ListUninstalled, "ListUninstalled"},
+		{helmconfig.ListUninstalling, "ListUninstalling"},
+	} {
+		if adoptableStates&tc.state != 0 {
+			t.Errorf("adoptableStates includes %s: its objects are gone, and helm cannot upgrade a "+
+				"release with no deployed revision, so adopting that name turns the install into a "+
+				"failure instead of an upgrade", tc.name)
 		}
 	}
 }
