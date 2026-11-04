@@ -661,7 +661,25 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
-		case stringField(cm, "reason") == "ZeroEvidence":
+		case stringField(cm, "reason") == "ZeroEvidence",
+			stringField(cm, "reason") == "NotObserved":
+			// NotObserved is provider-runtime v1.8.0's reason for "the external resource could not
+			// be observed" — an Observe or Connect failure, with the raw error left on Synced. It
+			// belongs HERE and not in the converging branch below for the same reason ZeroEvidence
+			// does, and the distinction is the whole point: the child is not reporting that it is
+			// unhealthy or that it is still coming up. It is reporting that NOTHING ASSESSED IT.
+			//
+			// Without this arm it falls to the default and the parent reports Ready=False/Creating,
+			// so an Observe outage on one child (a CompositionDefinition, Alert, RestDefinition,
+			// Repo or LocalResource) makes the parent look like it is converging when nothing is.
+			// installer's depsReady would then hold back first creation of every dependent, and
+			// verify-roll would withhold its verdict — an apiserver blip on one child stalling an
+			// install is exactly the #165 shape that ZeroEvidence exists to prevent.
+			//
+			// Keyed on the REASON, never on bare Unknown, for the same reason as ZeroEvidence: a
+			// genuinely converging child also reports a non-True Ready and must keep holding the
+			// parent back.
+			//
 			// The child says its own health is UNKNOWN, not bad (#165). Propagate ignorance as
 			// ignorance: counting it converging would hold this parent Ready=False for as long as
 			// the child stays unevaluable, which is indefinitely.
