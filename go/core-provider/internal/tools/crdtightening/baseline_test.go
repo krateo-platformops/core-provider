@@ -93,3 +93,62 @@ func TestArtifactStringNamesTheBytes(t *testing.T) {
 		}
 	}
 }
+
+// The umbrella's declared dependency is the PREFERRED baseline, so its parsing is the part whose
+// silent failure costs most: it does not error the run, it falls back to latest-published — a
+// baseline that moves when this repo publishes, under which a tightening introduced and published
+// in one release compares against itself.
+func TestDependencyVersion(t *testing.T) {
+	// The real shape, as installer's chart/Chart.yaml carries it.
+	const real = `apiVersion: v2
+name: installer
+version: CHART_VERSION
+dependencies:
+  - name: core-provider
+    version: 2.13.57
+    repository: oci://ghcr.io/krateo-platformops/charts
+  - name: core-provider-crds
+    version: 2.13.57
+    repository: oci://ghcr.io/krateo-platformops/charts
+`
+	v, err := dependencyVersion([]byte(real), "core-provider-crds")
+	if err != nil {
+		t.Fatalf("real umbrella Chart.yaml must parse: %v", err)
+	}
+	if v != "2.13.57" {
+		t.Errorf("version = %q, want 2.13.57", v)
+	}
+	// The two subcharts are pinned independently even where they currently agree, so the lookup
+	// must be by NAME and not by position.
+	if v, err := dependencyVersion([]byte(real), "core-provider"); err != nil || v != "2.13.57" {
+		t.Errorf("core-provider: got %q, %v", v, err)
+	}
+
+	for _, c := range []struct{ name, yaml, chart string }{
+		{"a chart the umbrella does not declare", real, "chart-inspector"},
+		{"no dependencies at all", "name: installer\nversion: 1.0.0\n", "core-provider-crds"},
+		{"a dependency with no version",
+			"dependencies:\n  - name: core-provider-crds\n", "core-provider-crds"},
+		// Each of these would otherwise be handed to `helm pull` and fail at the registry, where
+		// the error names the registry instead of the placeholder.
+		{"the CHART_VERSION placeholder",
+			"dependencies:\n  - name: core-provider-crds\n    version: CHART_VERSION\n", "core-provider-crds"},
+		{"a helm template expression",
+			"dependencies:\n  - name: core-provider-crds\n    version: \"{{ .Chart.AppVersion }}\"\n", "core-provider-crds"},
+		{"a shell-style variable",
+			"dependencies:\n  - name: core-provider-crds\n    version: $VERSION\n", "core-provider-crds"},
+		{"not YAML at all", "\tthis: : is: not\n  - yaml", "core-provider-crds"},
+	} {
+		if v, err := dependencyVersion([]byte(c.yaml), c.chart); err == nil {
+			t.Errorf("%s: expected an error, got version %q", c.name, v)
+		}
+	}
+
+	// And the shapes that MUST be accepted, so the guard does not reject a real release.
+	for _, good := range []string{"2.13.57", "v2.13.57", "0.0.1", "2.13.57-rc.1", "2.13.57+build.4"} {
+		y := "dependencies:\n  - name: c\n    version: " + good + "\n"
+		if v, err := dependencyVersion([]byte(y), "c"); err != nil || v != good {
+			t.Errorf("version %q must be accepted, got %q, %v", good, v, err)
+		}
+	}
+}
