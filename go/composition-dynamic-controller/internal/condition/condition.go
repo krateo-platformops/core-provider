@@ -32,11 +32,28 @@ func ReconcileGracefullyPaused() metav1.Condition {
 // by definition. A consumer that needs that distinction now has a TYPED condition to read rather
 // than a reason string on Ready.
 //
-// The shape is deliberately the runtime's own: its annotation pause sets
-// Synced=False/ReconcilePaused plus Ready=True/ReconcilePausedReady. The graceful pause set only
-// the Ready half, so two pause mechanisms reported differently for no reason anyone chose. This
-// makes them consistent rather than inventing a third vocabulary — no new condition TYPE, and
-// nothing for a consumer to learn beyond what the annotation pause already does.
+// The shape is deliberately the runtime's own: its annotation pause sets Synced=False plus
+// Ready=True, and BOTH carry the emitted reason "ReconcilePaused". The graceful pause set only the
+// Ready half, so two pause mechanisms reported differently for no reason anyone chose. This makes
+// them consistent rather than inventing a third vocabulary — no new condition TYPE, and nothing for
+// a consumer to learn beyond what the annotation pause already does.
+//
+// THE EMITTED REASON IS "ReconcilePaused" ON BOTH CONDITIONS, and an earlier version of this
+// comment wrote the Ready half as "ReconcilePausedReady". That is the Go IDENTIFIER, not the value:
+// unstructured-runtime declares
+//
+//	ReasonReconcilePausedReady string = "ReconcilePaused"   // written on Ready
+//	ReasonReconcilePaused      string = "ReconcilePaused"   // written on Synced
+//
+// Two identifiers, ONE string. The old wording cost a real wrong answer: asked what a cluster
+// emits, I quoted it back as "Ready=True/ReconcilePausedReady" and told the installer session that
+// `True/ReconcilePaused` could not exist. They printed the object and it does — on every engine
+// since runtime v1.7.3, which is older than anything deployed. A comment naming a constant where a
+// reader expects a wire value reads as the value, so it must be the value.
+//
+// FOR A CONSUMER: the reason alone cannot tell Ready-paused from Synced-paused, because it is the
+// same string on both. The condition TYPE is the only discriminator, so a gate that wants "is this
+// converging" must read Synced rather than pattern-match a reason on Ready.
 //
 // REQUIRES unstructured-runtime with the handler-condition fix (core-provider#241, runtime #41).
 // Before it, the runtime stamped its own ReconcileSuccess (Synced=True) over whatever the handler
