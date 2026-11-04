@@ -170,7 +170,6 @@ func CalculateReleaseName(o runtime.Object, safeReleaseName bool) string {
 	return obj.GetName()
 }
 
-
 func GetReleaseName(o metav1.Object) string {
 	return o.GetLabels()[ReleaseNameLabel]
 }
