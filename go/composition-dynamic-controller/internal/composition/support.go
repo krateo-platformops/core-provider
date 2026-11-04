@@ -260,6 +260,34 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		return fmt.Errorf("setting chart version in status: %w", err)
 	}
 
+	// The resolved helm release name, so that RESOLUTION and PERSISTENCE can be told apart from the
+	// object alone.
+	//
+	// WHY A STATUS FIELD WHEN THE LABEL EXISTS. The krateo.io/release-name label is write-once
+	// (meta.SetReleaseName), which is deliberate: an established composition's label names the
+	// release it has been upgrading all along, and consulting helm for it again would be a chance
+	// to change the answer. The consequence is that the label tells you nothing about a composition
+	// that has no label yet -- a new or recreated one -- and "resolved and persisted" was
+	// indistinguishable from "resolved in memory and lost", which is the 2.13.61 defect (#335).
+	//
+	// The only instrument that could separate them was a LOG COUNT: the ironic session read 11
+	// "Adopting the existing helm release" lines on its probe against 0 in production, because
+	// managedFields is stripped on these objects -- zero entries on the probe AND zero on a
+	// production object that demonstrably carries the label, so ownership was silent in both
+	// directions. An inference from log volume breaks the moment the log line is reworded.
+	//
+	// GUARDED ON NON-EMPTY, and the guard is the feature rather than defensiveness. Absence is a
+	// meaningful third state (resolved but never persisted), so writing "" on a path that happens
+	// to have no release name would manufacture the key and erase precisely the distinction this
+	// field exists to expose -- the same reason it is declared in status.schema.json with no
+	// `default`. A field that is always present cannot report that something is missing.
+	if opts.releaseName != "" {
+		err = maps.SetNestedField(mg.Object, opts.releaseName, "status", "releaseName")
+		if err != nil {
+			return fmt.Errorf("setting release name in status: %w", err)
+		}
+	}
+
 	// status.lastReconcileTime — the LIVENESS signal, written on EVERY reconcile whether or not
 	// anything changed (#298).
 	//

@@ -59,6 +59,11 @@ var reservedStatusFields = map[string]struct{}{
 	"lastReconcileTime":       {},
 	"conditions":              {},
 	"observedGeneration":      {},
+	// The resolved helm release name. Reserved as well as declared because a blueprint author
+	// would reasonably reach for `releaseName` as a forPath, and the controller overwrites it on
+	// every phase that resolves one -- the collision would present as a projected field that
+	// silently takes the controller's value instead of the blueprint's.
+	"releaseName": {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision
