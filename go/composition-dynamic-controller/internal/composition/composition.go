@@ -252,8 +252,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		DynamicClient: dyn,
 	}
 
-	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
-	releaseName := compositionMeta.GetReleaseName(mg)
+	// THE PAUSE CHECK COMES BEFORE THE RELEASE-NAME RESOLUTION BELOW, and that ordering is now
+	// load-bearing rather than incidental. resolveReleaseName performs a helm LIST when the object
+	// carries no release-name label, and a paused composition must not touch the cluster at all —
+	// that is what pausing is. It used to sit after the resolution harmlessly, because resolution
+	// returned early without I/O whenever safeReleaseName was off; removing that early return (it
+	// was skipping the same-name collision check) turned a paused composition's Observe into a
+	// cluster call that fails when the cluster is unreachable. Caught by
+	// TestObserve_PausedBranchMakesThePauseObservable, which is the test #258 added for a different
+	// reason entirely.
 	_, paused := compositionMeta.GetGracefullyPausedTime(mg)
 	if paused && compositionMeta.IsGracefullyPaused(mg) {
 		log.Debug("Composition is gracefully paused, skipping observe.")
@@ -298,6 +305,16 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			},
 		}, nil
 	}
+	// RESOLVED, not minted. On a CR whose UID is new — which is what a recreation produces — a name
+	// minted from that UID matches no release, so GetRelease below returns nil, Observe reports
+	// ResourceExists=false, and the runtime installs a SECOND release beside the first (#303).
+	// resolveReleaseName adopts the existing one instead, which makes this an upgrade.
+	resolved, err := h.resolveReleaseName(ctx, mg)
+	if err != nil {
+		return controller.ExternalObservation{}, fmt.Errorf("resolving release name: %w", err)
+	}
+	compositionMeta.SetReleaseName(mg, resolved)
+	releaseName := compositionMeta.GetReleaseName(mg)
 	// Observe MUST be a pure read of external state. It previously persisted metadata here (release
 	// name + CD def-ref labels via tools.Update), which bumped the CR's resourceVersion mid-observe.
 	// A concurrent writer (an umbrella re-applying the instance, a human kubectl edit, or the
@@ -713,7 +730,15 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
-	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
+	// RESOLVED, not minted, for the same reason as in Observe (#303) — and it matters here even
+	// though Observe should have routed a recreated CR to Update instead: if Create is reached at
+	// all, the name it persists must be the adopted one, or the write-once label would freeze the
+	// wrong release for the rest of this CR's life.
+	resolvedRelease, rerr := h.resolveReleaseName(ctx, mg)
+	if rerr != nil {
+		return fmt.Errorf("resolving release name: %w", rerr)
+	}
+	compositionMeta.SetReleaseName(mg, resolvedRelease)
 	// Freeze this CR's origin version (#168). At FIRST reconcile the delivered apiVersion is the
 	// version the object was actually written at, so this is the one moment it can be captured
 	// truthfully; after a chart-version bump re-points the CRD the apiVersion no longer says

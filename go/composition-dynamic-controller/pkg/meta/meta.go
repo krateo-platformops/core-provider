@@ -137,6 +137,23 @@ func SetOriginVersion(o metav1.Object, version string) bool {
 	return true
 }
 
+// releaseNameSuffixLen is how many characters of the UID the release-name suffix is built from, and
+// therefore how long that suffix is.
+//
+// rand.SafeEncodeString is length-preserving (it allocates len(input) bytes and writes one per
+// rune), so the suffix is exactly this many characters.
+//
+// THERE USED TO BE A MATCHER SHARING THIS CONSTANT. ReleaseNameCouldBelongTo recognised a name this
+// function had produced, by prefix plus suffix length, and #322 used it to decide which existing
+// release a recreated composition should adopt. Diego refuted the identity: two compositions can
+// share a name in one namespace (different CompositionDefinitions are different CRDs), so the shape
+// test cannot tell their releases apart — and the release name can be overridden outright, in which
+// case it need not begin with the CR name at all. Adoption now matches the composition identity
+// RECORDED in the release's manifest instead; see internal/composition/releaseidentity.go. The
+// matcher is deleted rather than left unused, because a name-shaped matcher in this package is an
+// invitation to decide something with it.
+const releaseNameSuffixLen = 8
+
 // CalculateReleaseName generates a release name for the Helm chart based on the name and UID of the resource.
 // If safeReleaseName is false, it will not append a random suffix to the release name, which can lead to collisions but is necessary for certain complex charts that have issues with long release names.
 func CalculateReleaseName(o runtime.Object, safeReleaseName bool) string {
@@ -145,9 +162,9 @@ func CalculateReleaseName(o runtime.Object, safeReleaseName bool) string {
 		uid := obj.GetUID()
 		if uid == "" {
 			// Generate random string if UID is not set
-			return fmt.Sprintf("%s-%s", obj.GetName(), rand.SafeEncodeString(rand.String(8)))
+			return fmt.Sprintf("%s-%s", obj.GetName(), rand.SafeEncodeString(rand.String(releaseNameSuffixLen)))
 		}
-		hashstr := rand.SafeEncodeString(string(obj.GetUID())[:8])
+		hashstr := rand.SafeEncodeString(string(obj.GetUID())[:releaseNameSuffixLen])
 		return fmt.Sprintf("%s-%s", obj.GetName(), hashstr)
 	}
 	return obj.GetName()

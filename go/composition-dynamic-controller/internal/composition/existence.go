@@ -41,7 +41,16 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 
 	// Match Observe: the release-name label may not be set yet on a composition whose first create
 	// was interrupted, which is exactly the case recovery runs in.
-	compositionMeta.SetReleaseName(mg, compositionMeta.CalculateReleaseName(mg, h.safeReleaseName))
+	//
+	// RESOLVED, not minted, and this path needs it most. Recovery exists precisely for a CR with no
+	// release-name label, so it is the path on which a recreated CR is most likely to arrive — and
+	// answering "does not exist" about a composition whose release is sitting right there is what
+	// tells recovery to create a second one (#303).
+	resolved, err := h.resolveReleaseName(ctx, mg)
+	if err != nil {
+		return false, fmt.Errorf("resolving release name: %w", err)
+	}
+	compositionMeta.SetReleaseName(mg, resolved)
 	releaseName := compositionMeta.GetReleaseName(mg)
 
 	// #202: the shared discovery cache, as at every other helm.NewClient site. Without it this
