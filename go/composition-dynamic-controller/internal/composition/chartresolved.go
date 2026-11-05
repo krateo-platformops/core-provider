@@ -63,8 +63,8 @@ const (
 // handlers/resources/get/resources.go): 400, 422 and 500. Its ServeMux adds 404 for a path that is
 // not registered. Nothing in it writes 401, 403, 405, 409 or 429.
 //
-//	400  two parameter checks, which Validate pre-empts so this client never receives them, and a
-//	     values-schema violation (#325). Hence: a 400 that reaches here is the schema one.
+//	400  two parameter checks (reason BadRequest), which Validate pre-empts, and a values-schema
+//	     violation (#325), which chart-inspector MARKS with reason ValuesSchemaViolation.
 //	422  a kind this cluster does not serve (#265).
 //	500  everything else the handler can fail at.
 //
@@ -73,12 +73,10 @@ const (
 // filed under InspectorUnavailable with the words "refused the request" in the message, which is a
 // reason that says one thing and a message that says another.
 //
-// THE 400 READING IS BY ELIMINATION, NOT BY A MARKER, and that is the limit of this classification.
-// chart-inspector's Status body carries reason "BadRequest" for its parameter 400s and its
-// values-schema 400 alike. Validate makes the elimination hold for every 400 chart-inspector
-// emits today; a NEW 400 cause added to chart-inspector would be reported here as a schema
-// violation, with its own message beside it. A machine-readable cause in chart-inspector's body
-// would replace the elimination with evidence.
+// THE SCHEMA 400 IS READ FROM ITS MARKER, NOT BY ELIMINATION. An earlier draft read "any 400 that
+// reaches here" as the schema one, which held only while Validate and chart-inspector agreed on
+// every parameter and would have mislabelled the next 400 cause anyone added. A 400 without the
+// marker is a refusal (InspectorRejected), with chart-inspector's message beside it.
 func chartRenderableFailure(err error) (reason, message string) {
 	// Before the status check: Validate's refusal carries no status, and it is not "could not
 	// reach" either. No request was sent.
@@ -94,15 +92,15 @@ func chartRenderableFailure(err error) (reason, message string) {
 			return reasonUnservedKind, fmt.Sprintf(
 				"the chart references an API kind this cluster does not serve; install the missing "+
 					"CRD and this resolves without further action (chart-inspector HTTP %d)", se.Code)
-		case se.BadRequest():
+		case se.ValuesSchemaViolation():
 			return reasonValuesSchemaViolation, fmt.Sprintf(
 				"the chart's values do not satisfy its values.schema.json, so helm refused to render "+
 					"it; this does not resolve by itself, change the values or the schema "+
 					"(chart-inspector HTTP %d): %s", se.Code, detailOrNoBody(se))
 		case se.ClientSide():
 			return reasonInspectorRejected, fmt.Sprintf(
-				"chart-inspector refused the request (HTTP %d). Its handler answers no 4xx but 400 and "+
-					"422, so check that the cdc's chart-inspector URL reaches /resources and that the "+
+				"chart-inspector refused the request (HTTP %d) without marking it a values-schema "+
+					"violation. Check that the cdc's chart-inspector URL reaches /resources and that the "+
 					"cdc and chart-inspector versions match: %s", se.Code, detailOrNoBody(se))
 		case se.ServerSide():
 			return reasonInspectorUnavailable, fmt.Sprintf(

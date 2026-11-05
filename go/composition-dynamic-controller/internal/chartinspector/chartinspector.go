@@ -101,12 +101,10 @@ func (c *ChartInspector) WithServer(server string) {
 // ReleaseName was documented REQUIRED on Parameters and was not checked here, so an empty one went
 // over the wire and came back as a 400.
 //
-// THAT MATTERS BEYOND THE ROUND TRIP (#325). A 400 from chart-inspector is how the cdc learns that a
-// chart's values do not satisfy its values.schema.json, and the cdc can read a 400 that way only if
-// a parameter-check 400 cannot reach it: chart-inspector's Status body carries reason "BadRequest"
-// for both, so nothing in the response tells them apart. What tells them apart is that this client
-// never sends the request a parameter check exists to reject. Each failure is a
-// *MissingParameterError, so a caller classifies it by type and not as "could not reach".
+// An incomplete request is a cdc defect, and refusing it here reports it as one (a
+// *MissingParameterError, classified by type and not as "could not reach") instead of a round trip
+// that comes back as an anonymous 400. The schema 400 is told apart by its own Status reason
+// (StatusError.ValuesSchemaViolation, #325), not by this check.
 func (c *ChartInspector) Validate(params Parameters) error {
 	for _, p := range []struct{ name, value string }{
 		{"compositionName", params.CompositionName},

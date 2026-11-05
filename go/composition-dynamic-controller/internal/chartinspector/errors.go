@@ -34,9 +34,30 @@ func (e *StatusError) Error() string {
 // computed once from state nobody refreshes (#261, #273).
 func (e *StatusError) Unprocessable() bool { return e.Code == http.StatusUnprocessableEntity }
 
-// BadRequest reports a 400. Which 400 it is depends on what this client can send; see
-// ChartInspector.Validate for why, from this client, it is the values-schema one (#325).
-func (e *StatusError) BadRequest() bool { return e.Code == http.StatusBadRequest }
+// ReasonValuesSchemaViolation is the Status reason chart-inspector puts on a values-schema 400
+// (#325). A CONTRACT: chart-inspector's internal/handlers/resources/get declares the same value, and
+// the two modules cannot share a declaration, so each pins the literal in a test.
+const ReasonValuesSchemaViolation = "ValuesSchemaViolation"
+
+// ValuesSchemaViolation reports a 400 that chart-inspector MARKED as a values-schema violation.
+//
+// BY WHAT THE RESPONSE SAYS, NOT BY ELIMINATION. chart-inspector answers 400 for missing query
+// parameters and a missing releaseName too, all with reason BadRequest. Classifying "any 400 this
+// client could not have caused" as a schema violation would hold only while Validate and the
+// server agree on every parameter, and would mislabel the next 400 cause anyone adds. A 400 without
+// the reason is a refusal, and is reported as one.
+func (e *StatusError) ValuesSchemaViolation() bool {
+	return e.Code == http.StatusBadRequest && e.Reason() == ReasonValuesSchemaViolation
+}
+
+// Reason is the Status reason chart-inspector sent, or "" when the body is not a Status that has one.
+func (e *StatusError) Reason() string {
+	var st response.Status
+	if err := json.Unmarshal([]byte(e.Body), &st); err != nil {
+		return ""
+	}
+	return string(st.Reason)
+}
 
 // ClientSide reports any 4xx, including the two above.
 func (e *StatusError) ClientSide() bool { return e.Code >= 400 && e.Code < 500 }
