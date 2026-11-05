@@ -388,7 +388,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		cond := condition.Unavailable()
 		cond.Message = err.Error()
 		unstructuredtools.SetConditions(mg, cond)
-		if _, uerr := updateStatusWithRetry(ctx, mg, updateOpts); uerr != nil {
+		if _, uerr := updateStatus(ctx, mg, updateOpts); uerr != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", uerr)
 		}
 		return controller.ExternalObservation{}, err
@@ -426,9 +426,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				"waiting for an in-flight helm operation to settle (status %s, pending for %s)",
 				string(rel.Status), pendingFor.Truncate(time.Second))
 			unstructuredtools.SetConditions(mg, pendingCond)
-			if _, uerr := updateStatusWithRetry(ctx, mg, updateOpts); uerr != nil {
-				// Non-fatal: the wait itself is not an error, and failing the reconcile here would
-				// burn retry budget on a purely cosmetic write.
+			_, uerr := updateStatus(ctx, mg, updateOpts)
+			if err := pendingConditionWriteOutcome(uerr); err != nil {
+				return controller.ExternalObservation{}, err
+			}
+			if uerr != nil {
 				log.Debug("Could not record the pending-operation condition", "error", uerr)
 			}
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
@@ -568,7 +570,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		condition := condition.Unavailable()
 		condition.Message = retErr.Error()
 		unstructuredtools.SetConditions(mg, condition)
-		_, err = updateStatusWithRetry(ctx, mg, updateOpts)
+		_, err = updateStatus(ctx, mg, updateOpts)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", err)
 		}
@@ -699,7 +701,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return controller.ExternalObservation{}, err
 	}
 
-	_, err = updateStatusWithRetry(ctx, mg, updateOpts)
+	_, err = updateStatus(ctx, mg, updateOpts)
 	if err != nil {
 		return controller.ExternalObservation{}, err
 	}
@@ -966,7 +968,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	log.Debug("Composition created.", "package", pkg.URL)
 
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Composition created: %s", mg.GetName())))
-	mg, err = updateStatusWithRetry(ctx, mg, updateOpts)
+	mg, err = updateStatus(ctx, mg, updateOpts)
 	if err != nil {
 		return fmt.Errorf("updating cr with values: %w", err)
 	}
@@ -1215,7 +1217,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("setting status: %w", err)
 	}
 
-	mg, err = updateStatusWithRetry(ctx, mg, tools.UpdateOptions{
+	mg, err = updateStatus(ctx, mg, tools.UpdateOptions{
 		Pluralizer:    h.pluralizer,
 		DynamicClient: dyn,
 	})
@@ -1224,7 +1226,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 
 	// The ANNOTATION work has to stay here, after the status update, even though the decision above
-	// moved earlier. updateStatusWithRetry returns the server's response to a status-subresource
+	// moved earlier. updateStatus returns the server's response to a status-subresource
 	// write, which does not carry local metadata edits — so annotations set on mg before it are
 	// silently dropped, and only edits applied to the returned object survive tools.Update below.
 	if paused {
