@@ -12,9 +12,10 @@
 # expired credential skips the job with a warning rather than a red tick.
 name: release-notes
 
+# #360: on a tag push this runs as the release-notes JOB of release-tag.yaml, AFTER verify-artifacts,
+# so a release is published only once its artifacts exist. This workflow is kept for regenerating
+# notes by hand.
 on:
-  push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:

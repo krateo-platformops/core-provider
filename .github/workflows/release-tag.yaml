@@ -1,7 +1,10 @@
-# Canonical Krateo COMPONENT (code-repo) release workflow — THE single way every krateo-*
-# code repo builds & pushes its image and (if it owns CRDs) publishes them. Identical
-# byte-for-byte across ALL component repos (no per-repo config); everything is derived from
-# the repo itself.
+# core-provider's release pipeline. It started as the canonical component release workflow,
+# shared byte-for-byte across component repos; core-provider's copy diverged with the release gate
+# (#92, three per-module test jobs) and again with #360 (charts, verification and release notes are
+# jobs here, so each one waits for what it depends on).
+#
+#   tests -> build (3 images) --+
+#            release-oci (3 charts) --+--> verify-artifacts --> release-notes (publishes the release)
 #
 #   • build  — ONE multi-platform image (linux/amd64 + linux/arm64) via the shared reusable
 #              workflow, tagged from the pushed git tag. Image = ghcr.io/<owner>/<mod>.
@@ -71,3 +74,40 @@ jobs:
       build_args: |
         VERSION=${{ github.ref_name }}
         COMMIT_HASH=${{ github.sha }}
+
+  # Charts. This used to be its own workflow (release-oci.yaml) triggered by the same tag push, so
+  # nothing could wait for it. It is a job here so verify-artifacts can `need` it. release-oci.yaml
+  # keeps its workflow_dispatch for republishing a chart by hand.
+  release-oci:
+    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      chart_version: ""
+      app_version: ""
+
+  # #360. A GitHub release is a public claim that a version exists, and it used to be published at
+  # tag time, about 30 minutes before the images did. Pull every artifact by tag, and require each
+  # image's revision label to be THIS commit, before anything is published.
+  verify-artifacts:
+    needs: [build, release-oci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Pull all six artifacts by tag
+        run: .github/scripts/verify-release-artifacts.sh "${{ github.ref_name }}" "${{ github.sha }}"
+
+  # Publishes the release, now only once its artifacts exist. release-notes.yaml keeps its
+  # workflow_dispatch for regenerating notes by hand.
+  release-notes:
+    needs: [verify-artifacts]
+    uses: krateo-platformops/.github/.github/workflows/release-notes.yaml@main
+    permissions:
+      contents: write # the release body and the CHANGELOG commit
+      id-token: write # claude-code-action's GitHub App auth; the reusable cannot grant itself this
+    secrets: inherit
+    with:
+      tag: ${{ github.ref_name }}
