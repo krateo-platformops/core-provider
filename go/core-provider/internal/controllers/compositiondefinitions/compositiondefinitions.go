@@ -989,14 +989,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			return reconciler.ExternalObservation{}, err
 		}
 		if owner != nil {
+			// #362: the owner generates the CRD and reports on it; a follower has no verdict of its own.
+			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
 		}
 	}
 
-	genCRD, err := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
+	generated, err := crdutils.GenerateCRDWithWarnings(specSchemaBytes, chartGVK)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error generating CRD: %w", err)
 	}
+	genCRD := generated.CRD
+	// #362: what crdgen could not carry faithfully. The condition is recomputed on every pass from
+	// the current render (the cache returns the warnings with the CRD); Events fire only when the
+	// render actually ran.
+	cr.SetConditions(schemaEnforcedCondition(generated.Warnings))
+	emitSchemaEvents(e.rec, cr, generated.Warnings, generated.Fresh)
 
 	statusFields := statusFieldsFromSpec(cr)
 	if err := crdutils.ValidateStatusFields(statusFields); err != nil {

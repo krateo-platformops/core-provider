@@ -35,7 +35,7 @@ import (
 //   - serialize the actual invocation so concurrent cache-misses on cold start run the toolchain
 //     one at a time instead of stampeding it.
 var (
-	crdGenCache sync.Map   // digest string -> []byte (generated CRD manifest)
+	crdGenCache sync.Map   // digest string -> crdGenResult (generated CRD manifest AND its warnings)
 	crdGenMu    sync.Mutex // serializes crdgen.Generate (the go-toolchain exec) across goroutines
 	// crdGenRuns counts ACTUAL toolchain invocations, i.e. cache misses. It exists so the cache can
 	// be tested by observing the thing it is meant to prevent, instead of by timing two calls and
@@ -283,15 +283,49 @@ func Unmarshal(dat []byte) (*apiextensionsv1.CustomResourceDefinition, error) {
 }
 
 func GenerateCRD(specSchema []byte, gvk schema.GroupVersionKind) (*apiextensionsv1.CustomResourceDefinition, error) {
-	bcrd, err := generateCRD(specSchema, gvk, false)
+	g, err := GenerateCRDWithWarnings(specSchema, gvk)
 	if err != nil {
-		return nil, fmt.Errorf("error generating CRD: %w", err)
+		return nil, err
 	}
-	crd, err := Unmarshal(bcrd)
+	return g.CRD, nil
+}
+
+// Generated is a generated CRD together with what crdgen could not carry faithfully (#362).
+type Generated struct {
+	CRD *apiextensionsv1.CustomResourceDefinition
+	// Warnings are crdgen's TYPED warnings for this CRD (plumbing v1.28.0). They come from the cache
+	// together with the CRD, so a cache hit reports the same warnings as the run that produced it:
+	// a durable signal computed from them must not turn clean just because generation was skipped.
+	Warnings []crdgen.Warning
+	// Fresh is true when crdgen actually ran for this call (a cache miss), i.e. the schema is new to
+	// this process. It marks "this just happened", which is when an Event is worth emitting.
+	Fresh bool
+}
+
+// GenerateCRDWithWarnings is GenerateCRD plus crdgen's warnings and whether generation ran.
+func GenerateCRDWithWarnings(specSchema []byte, gvk schema.GroupVersionKind) (Generated, error) {
+	res, fresh, err := generateCRD(specSchema, gvk, false)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling generated CRD: %w", err)
+		return Generated{}, fmt.Errorf("error generating CRD: %w", err)
 	}
-	return crd, nil
+	crd, err := Unmarshal(res.manifest)
+	if err != nil {
+		return Generated{}, fmt.Errorf("error unmarshalling generated CRD: %w", err)
+	}
+	return Generated{CRD: crd, Warnings: res.warnings, Fresh: fresh}, nil
+}
+
+// crdGenResult is what the cache holds: the manifest AND its warnings, never one without the other.
+type crdGenResult struct {
+	manifest []byte
+	warnings []crdgen.Warning
+}
+
+func (r crdGenResult) clone() crdGenResult {
+	return crdGenResult{
+		manifest: append([]byte(nil), r.manifest...),
+		warnings: append([]crdgen.Warning(nil), r.warnings...),
+	}
 }
 
 func StatusEqual(crd1, crd2 *apiextensionsv1.CustomResourceDefinition) (bool, error) {
@@ -348,11 +382,11 @@ func GVKExists(crd *apiextensionsv1.CustomResourceDefinition, gvk schema.GroupVe
 }
 
 func GetGVRFromGeneratedCRD(specSchema []byte, gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
-	bcrd, err := generateCRD(specSchema, gvk, true)
+	res, _, err := generateCRD(specSchema, gvk, true)
 	if err != nil {
 		return schema.GroupVersionResource{}, fmt.Errorf("error generating CRD for GVR fallback: %w", err)
 	}
-	crd, err := Unmarshal(bcrd)
+	crd, err := Unmarshal(res.manifest)
 	if err != nil {
 		return schema.GroupVersionResource{}, fmt.Errorf("error unmarshalling generated CRD for GVR fallback: %w", err)
 	}
@@ -364,7 +398,7 @@ func GetGVRFromGeneratedCRD(specSchema []byte, gvk schema.GroupVersionKind) (sch
 	return gvr, nil
 }
 
-func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bool) ([]byte, error) {
+func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bool) (crdGenResult, bool, error) {
 	// Read static status schema
 	statusSchema := statusJsonSchema
 
@@ -387,18 +421,18 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 	// EFFECTIVE schemas (post onlyMetadata substitution) so metadata-only calls collapse to one entry.
 	key := crdGenKey(specSchema, statusSchema, gvk)
 	if v, ok := crdGenCache.Load(key); ok {
-		return append([]byte(nil), v.([]byte)...), nil
+		return v.(crdGenResult).clone(), false, nil
 	}
 
 	crdGenMu.Lock()
 	defer crdGenMu.Unlock()
 	// Another goroutine may have generated this identical CRD while we waited for the lock.
 	if v, ok := crdGenCache.Load(key); ok {
-		return append([]byte(nil), v.([]byte)...), nil
+		return v.(crdGenResult).clone(), false, nil
 	}
 
 	crdGenRuns.Add(1)
-	res, err := crdgen.Generate(crdgen.Options{
+	res, warnings, err := crdgen.GenerateWithDiagnostics(crdgen.Options{
 		Group:        gvk.Group,
 		Version:      gvk.Version,
 		Kind:         gvk.Kind,
@@ -408,10 +442,11 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 		StatusSchema: statusSchema,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("generating crd: %w", err)
+		return crdGenResult{}, false, fmt.Errorf("generating crd: %w", err)
 	}
-	crdGenCache.Store(key, append([]byte(nil), res...))
-	return res, nil
+	out := crdGenResult{manifest: res, warnings: warnings}
+	crdGenCache.Store(key, out.clone())
+	return out, true, nil
 }
 
 // normalizeIntOrStringUnions rewrites JSON-Schema int-or-string unions
