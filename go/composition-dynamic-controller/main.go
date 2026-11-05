@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/authn"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/composition"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/health"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
@@ -129,6 +130,12 @@ func main() {
 		env.Int("COMPOSITION_CONTROLLER_MAX_ERROR_RETRIES", 5), "How many times to retry the processing of a resource when an error occurs before giving up and dropping the resource.")
 	metricsServerPort := flag.Int("metrics-server-port",
 		env.Int("COMPOSITION_CONTROLLER_METRICS_SERVER_PORT", 0), "The address to bind the metrics server to. If empty, metrics server is disabled.")
+	// The probe port is a contract with the per-version Deployment template
+	// (helm/core-provider/assets/cdc/deployment.yaml, cdc.healthProbe.port), whose readiness and
+	// liveness probes point here. It is on by default because the template probes it by default.
+	healthProbePort := flag.Int("health-probe-port",
+		env.Int("COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT", 8081),
+		"The port serving /healthz (liveness: the process answers) and /readyz (readiness: the informer has completed its first successful list). 0 disables both.")
 	gracefulShutdownTimeout := flag.Duration("graceful-shutdown-timeout",
 		env.Duration("COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT", 30*time.Second),
 		"Max time to let in-flight reconciles finish after SIGTERM before the process exits. Must be set below the pod's terminationGracePeriodSeconds. 0 disables the drain (abrupt shutdown); negative waits indefinitely.")
@@ -282,6 +289,7 @@ func main() {
 		WithValues("maxErrorRetryInterval", *maxErrorRetryInterval).
 		WithValues("maxErrorRetry", *maxErrorRetry).
 		WithValues("metricsServerPort", *metricsServerPort).
+		WithValues("healthProbePort", *healthProbePort).
 		WithValues("safeReleaseName", *safeReleaseName).
 		Info("Starting composition dynamic controller.")
 
@@ -426,6 +434,26 @@ func main() {
 	}
 
 	controller.SetExternalClient(handler)
+
+	// Probes start BEFORE Run, because Run begins by waiting for the informer's first list, and
+	// that wait is exactly the window /readyz exists to report (#333): a controller whose list
+	// never succeeds stays inside it forever, answering not-ready. The server outlives the
+	// SIGTERM ctx so liveness keeps answering through the graceful drain; it stops when main
+	// returns.
+	if *healthProbePort != 0 {
+		healthCtx, stopHealth := context.WithCancel(context.Background())
+		defer stopHealth()
+		addr, err := health.Serve(healthCtx, fmt.Sprintf(":%d", *healthProbePort), controller,
+			func(err error) { log.Error(err, "Health probe server failed.") })
+		if err != nil {
+			log.Error(err, "Starting health probe server.")
+			os.Exit(1)
+		}
+		log.Info("Health probe server enabled", "bindAddress", addr.String(),
+			"liveness", health.LivenessPath, "readiness", health.ReadinessPath)
+	} else {
+		log.Info("Health probe server disabled")
+	}
 
 	err = controller.Run(ctx, *workers)
 	if err != nil {
