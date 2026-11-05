@@ -88,8 +88,15 @@ resources:
     memory: 512Mi
   limits:
     memory: 2Gi
-# Interim probes: the binary has no /healthz endpoint yet, so we TCP-probe the always-bound metrics
-# port (8080). Replace with httpGet /healthz + /readyz once the binary exposes a health endpoint.
+# Probes (#333). The binary serves /healthz and /readyz on healthProbe.port (rendered into its
+# ConfigMap as CORE_PROVIDER_HEALTH_PROBE_PORT and declared as the container port named "health"):
+#   /readyz  — not ready until the manager's informers have completed their first successful list.
+#              An engine that cannot list what it reconciles is not ready.
+#   /healthz — the probe server answering at all; it never consults readiness, so a failing list
+#              never restarts the engine.
+# These replace the interim TCP probes on the metrics port (8080), which a process that had never
+# listed anything satisfied. Set either probe to null to switch it off ({} does not: helm merges a
+# user map into this default).
 #
 # Tolerances are explicit because the Kubernetes defaults (timeoutSeconds:1, failureThreshold:3)
 # kill HEALTHY pods under CPU contention: a busy-but-alive process misses the 1s probe deadline
@@ -97,16 +104,20 @@ resources:
 # lenient (~120s of consecutive failures (periodSeconds 20 × failureThreshold 6) before a restart — only truly dead processes die);
 # readiness keeps failureThreshold:3 so a genuinely wedged pod is promptly removed from
 # endpoints, but load alone must not flap it (same tolerances as the chart-inspector block below).
+healthProbe:
+  port: 8081
 livenessProbe:
-  tcpSocket:
-    port: 8080
+  httpGet:
+    path: /healthz
+    port: health
   initialDelaySeconds: 15
   periodSeconds: 20
   timeoutSeconds: 5
   failureThreshold: 6
 readinessProbe:
-  tcpSocket:
-    port: 8080
+  httpGet:
+    path: /readyz
+    port: health
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 5
@@ -413,13 +424,49 @@ cdc:
   # and then be silently overridden by this one, which is the same shape of quiet failure as the
   # "128Mi" suffix above. The values schema therefore REFUSES GOMEMLIMIT under `cdc.env`.
   goMemLimit: request
-  # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
-  # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
-  # (graceful drain), not readiness-gating — probes are intentionally left off BY DESIGN: a
-  # liveness kill mid-helm-operation manufactures stale-lock states (see issue #57), so do NOT
-  # add a liveness probe here.
-  # livenessProbe: {}
-  # readinessProbe: {}
+  # Probes (#333). Without them a CDC whose informer can never list its resource (its CRD version
+  # is no longer served) reports Ready=true for as long as its process runs: measured for four days
+  # on five controllers logging `"Failed to watch" ... failed to list *unstructured.Unstructured: the
+  # server could not find the requested resource` every ~30s.
+  #
+  # The CDC serves both endpoints on healthProbe.port (rendered into its ConfigMap as
+  # COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT, and declared as the container port named "health").
+  # They are deliberately NOT of equal strength:
+  #   /readyz  — not ready until the informer has completed its FIRST SUCCESSFUL LIST of the
+  #              controller's resource. This is the one fact that separates a working controller
+  #              from a blind one. core-provider waits for this Deployment to be Ready after
+  #              applying it (internal/tools/deploy, 1m), so that wait now means "can see its
+  #              resource", not "process started".
+  #   /healthz — answers from the process alone and never consults /readyz. A failing list is a
+  #              real and recoverable state (a version briefly unserved mid-bump), and a restart
+  #              does not repair it, so it must never restart the pod.
+  #
+  # NO LIVENESS PROBE BY DEFAULT, deliberately (#57, decided again for #333 on 2026-11-05). A kill in
+  # the middle of a helm operation leaves the release pending, and a probe timeout under CPU pressure
+  # is exactly how a healthy-but-busy controller gets killed: the provider-runtime session measured
+  # 1-3 probe failures under CPU pressure on kind with no governor. The CDC still SERVES /healthz,
+  # so a cluster that wants restarts on a hung process can opt in with a full probe, e.g.
+  #
+  #   livenessProbe:
+  #     httpGet: {path: /healthz, port: health}
+  #     initialDelaySeconds: 15
+  #     periodSeconds: 20
+  #     timeoutSeconds: 5
+  #     failureThreshold: 6
+  #
+  # Holding cdc.image.tag back to a build without the health server (before #333) requires setting
+  # readinessProbe: null: such a build never answers /readyz, so it would never be Ready.
+  healthProbe:
+    port: 8081
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    # No initial delay: an unready answer is the truth until the first list completes, and
+    # core-provider is waiting on the transition.
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 3
 
   # Graceful drain (unstructured-runtime v1.3.2+): let in-flight reconciles finish on SIGTERM.
   # terminationGracePeriodSeconds MUST exceed the drain window so the kubelet does not SIGKILL

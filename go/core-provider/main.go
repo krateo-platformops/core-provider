@@ -29,6 +29,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimiter"
 	"github.com/krateo-platformops/provider-runtime/pkg/telemetry"
 
+	"github.com/krateo-platformops/core-provider/internal/tools/health"
 	coretelemetry "github.com/krateo-platformops/core-provider/internal/tools/telemetry"
 	"github.com/stoewer/go-strcase"
 )
@@ -72,6 +73,11 @@ func main() {
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
 	minErrorRetryInterval := flag.Duration("min-error-retry-interval", env.Duration(fmt.Sprintf("%s_MIN_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Second), "The minimum interval between retries when an error occurs. This should be less than max-error-retry-interval.")
+
+	// The chart's livenessProbe/readinessProbe reach this port by the container port name "health"
+	// (helm/core-provider, healthProbe.port), and render it into this env var, so the two move together.
+	healthProbePort := flag.Int("health-probe-port", env.Int(fmt.Sprintf("%s_HEALTH_PROBE_PORT", envVarPrefix), 8081),
+		"The port serving /healthz (liveness: the process answers) and /readyz (readiness: the manager's informers have completed their first successful list). 0 disables both.")
 
 	flag.Parse()
 
@@ -185,11 +191,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// "0" is controller-runtime's value for "no probe server".
+	healthProbeBindAddress := "0"
+	if *healthProbePort != 0 {
+		healthProbeBindAddress = fmt.Sprintf(":%d", *healthProbePort)
+	}
+
 	// core-provider hosts no admission webhooks (None conversion + an in-apiserver
 	// MutatingAdmissionPolicy), so there is no webhook server or serving certificate.
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		LeaderElection:   *leaderElection,
-		LeaderElectionID: fmt.Sprintf("leader-election-%s-provider", strcase.KebabCase(providerName)),
+		HealthProbeBindAddress: healthProbeBindAddress,
+		LeaderElection:         *leaderElection,
+		LeaderElectionID:       fmt.Sprintf("leader-election-%s-provider", strcase.KebabCase(providerName)),
 		Cache: cache.Options{
 			SyncPeriod: syncPeriod,
 		},
@@ -202,6 +215,16 @@ func main() {
 	})
 	if err != nil {
 		log.Error(err, "Cannot create controller manager")
+		os.Exit(1)
+	}
+
+	// Probes (#333). Liveness answers from the probe server alone, so a slow or failing reconcile
+	// never restarts the engine. Readiness reports whether the engine can SEE what it reconciles:
+	// not ready until the manager's informers have completed their first successful list. The chart
+	// used to TCP-probe the always-bound metrics port instead, which a process that had never listed
+	// anything satisfied.
+	if err := health.Register(mgr); err != nil {
+		log.Error(err, "Cannot register health probes")
 		os.Exit(1)
 	}
 

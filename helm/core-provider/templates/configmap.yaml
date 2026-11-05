@@ -5,6 +5,8 @@ metadata:
   labels:
     {{- include "core-provider.labels" . | nindent 4 }}
 data:
+  # Must match the container port named "health" in deployment.yaml, which the probes use.
+  CORE_PROVIDER_HEALTH_PROBE_PORT: "{{ .Values.healthProbe.port }}"
   {{- if .Values.otel.enabled }}
   OTEL_ENABLED: "true"
   OTEL_TRACING_ENABLED: "{{ .Values.otel.tracing }}"

@@ -20,6 +20,8 @@ data:
   URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081/
   KRATEO_NAMESPACE: {{ .Release.Namespace }}
   DEPLOYMENT_NAME: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+  # Must match the container port named "health" in assets/cdc/deployment.yaml, which the probes use.
+  COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT: "{{ .Values.cdc.healthProbe.port }}"
   {{- if .Values.cdc.metrics.enabled }}
   COMPOSITION_CONTROLLER_METRICS_SERVER_PORT: "{{ .Values.cdc.metrics.port | default 0 }}" # Set to 0 to disable metrics server
   {{- end }}

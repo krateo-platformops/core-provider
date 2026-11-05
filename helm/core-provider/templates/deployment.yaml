@@ -47,6 +47,10 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            # /healthz and /readyz (#333); the probes below reach it by this name.
+            - name: health
+              containerPort: {{ .Values.healthProbe.port }}
+              protocol: TCP
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

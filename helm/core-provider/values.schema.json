@@ -601,6 +601,21 @@
           "pattern": "^$|^request$|^limit$|^[0-9]+(B|KiB|MiB|GiB|TiB)$",
           "title": "GOMEMLIMIT for each spawned CDC: 'request' (default) or 'limit' to track the container's own resource field, '' to omit, or a literal in Go syntax e.g. 192MiB (NOT a k8s quantity like 192Mi)"
         },
+        "healthProbe": {
+          "type": "object",
+          "title": "Health probe server",
+          "description": "The port the CDC serves /healthz (liveness: the process answers) and /readyz (readiness: its informer has completed its first successful list) on. The cdc livenessProbe/readinessProbe point at it by the container port name \"health\".",
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "type": "integer",
+              "title": "Health probe port",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 8081
+            }
+          }
+        },
         "image": {
           "type": "object",
           "title": "CDC image",
@@ -786,6 +801,21 @@
           "title": "Global image registry override",
           "description": "When set, replaces the registry host of every image in the chart (mirror / air-gapped installs). Repository paths are preserved.",
           "default": ""
+        }
+      }
+    },
+    "healthProbe": {
+      "type": "object",
+      "title": "Health probe server",
+      "description": "The port core-provider serves /healthz (liveness: the probe server answers) and /readyz (readiness: the manager's informers have completed their first successful list) on. livenessProbe/readinessProbe point at it by the container port name \"health\".",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "title": "Health probe port",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8081
         }
       }
     },
