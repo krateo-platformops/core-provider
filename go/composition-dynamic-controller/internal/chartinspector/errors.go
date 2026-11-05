@@ -1,9 +1,12 @@
 package chartinspector
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/krateo-platformops/plumbing/http/response"
 )
 
 // StatusError carries chart-inspector's HTTP status so a caller can tell WHOSE fault a failure is.
@@ -31,9 +34,36 @@ func (e *StatusError) Error() string {
 // computed once from state nobody refreshes (#261, #273).
 func (e *StatusError) Unprocessable() bool { return e.Code == http.StatusUnprocessableEntity }
 
+// BadRequest reports a 400. Which 400 it is depends on what this client can send; see
+// ChartInspector.Validate for why, from this client, it is the values-schema one (#325).
+func (e *StatusError) BadRequest() bool { return e.Code == http.StatusBadRequest }
+
+// ClientSide reports any 4xx, including the two above.
+func (e *StatusError) ClientSide() bool { return e.Code >= 400 && e.Code < 500 }
+
 // ServerSide reports a 5xx: chart-inspector itself failed and the caller's blueprint is not
 // implicated.
 func (e *StatusError) ServerSide() bool { return e.Code >= 500 }
+
+// Detail is what chart-inspector SAID, in the form a person reads it.
+//
+// chart-inspector answers every failure with plumbing's response.Status, a JSON object whose
+// `message` is the sentence (for a values-schema 400, helm's own explanation). Quoting Body verbatim
+// put that sentence inside a JSON string, escaped quotes and all, which is the burying #325 is
+// about. So the message is extracted when the body is a Status that carries one.
+//
+// DEFENSIVE, AND IT NEVER DROPS THE BODY. Anything else in front of chart-inspector can answer too
+// (net/http's ServeMux answers a wrong path with the text "404 page not found"), and an older or
+// newer chart-inspector may shape its body differently. A body that is not a JSON object, or is one
+// without a string `message`, comes back verbatim: an unparsed sentence is less readable, a dropped
+// one is lost.
+func (e *StatusError) Detail() string {
+	var st response.Status
+	if err := json.Unmarshal([]byte(e.Body), &st); err == nil && st.Message != "" {
+		return st.Message
+	}
+	return e.Body
+}
 
 // AsStatusError unwraps to a *StatusError if the chain carries one.
 func AsStatusError(err error) (*StatusError, bool) {
@@ -43,3 +73,12 @@ func AsStatusError(err error) (*StatusError, bool) {
 	}
 	return nil, false
 }
+
+// MissingParameterError is Validate refusing a request chart-inspector would refuse. No request was
+// sent, so a caller must not report it as chart-inspector being unreachable.
+type MissingParameterError struct {
+	// Name is the query parameter, spelled as chart-inspector reads it.
+	Name string
+}
+
+func (e *MissingParameterError) Error() string { return e.Name + " is required" }

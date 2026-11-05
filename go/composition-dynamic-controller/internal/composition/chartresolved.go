@@ -2,6 +2,7 @@ package composition
 
 import (
 	"context"
+	"errors"
 
 	"fmt"
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
@@ -25,14 +26,29 @@ import (
 // possible now that chart-inspector answers 422 for it.
 const ConditionTypeChartRenderable = "ChartRenderable"
 
+// The reasons are a CONSUMER CONTRACT and an OPEN set: frontend and portal read them, and a consumer
+// must treat a reason it does not know as "not renderable, cause unrecognised" rather than as any
+// particular one. ValuesSchemaViolation and InspectorRejected were added by #325.
 const (
 	// reasonChartRenderable: the render succeeded.
 	reasonChartRenderable = "Renderable"
 	// reasonUnservedKind: chart-inspector answered 422. The blueprint is well-formed and references
 	// a kind this cluster does not currently serve.
 	reasonUnservedKind = "UnservedKind"
-	// reasonInspectorUnavailable: chart-inspector itself failed (5xx or transport). NOT the
-	// blueprint's fault, and the distinction is the entire point of this condition.
+	// reasonValuesSchemaViolation: chart-inspector answered 400. The chart's values do not satisfy
+	// its values.schema.json, so helm refused the render before it began. The blueprint's fault,
+	// like UnservedKind, and unlike it NOT self-resolving: nothing on the cluster changes a
+	// chart's schema or the values it is given, so only the author can (#325).
+	reasonValuesSchemaViolation = "ValuesSchemaViolation"
+	// reasonInspectorRejected: chart-inspector refused the request with a 4xx that is neither of the
+	// above, or the cdc did not send it because chart-inspector would have. Neither the blueprint
+	// nor chart-inspector's availability is implicated: it is the cdc and chart-inspector
+	// disagreeing about the request, which is a URL that does not reach /resources, a version skew,
+	// or a cdc defect.
+	reasonInspectorRejected = "InspectorRejected"
+	// reasonInspectorUnavailable: chart-inspector itself failed (5xx, transport, or a status outside
+	// its protocol). NOT the blueprint's fault, and the distinction is the entire point of this
+	// condition.
 	reasonInspectorUnavailable = "InspectorUnavailable"
 )
 
@@ -40,23 +56,73 @@ const (
 //
 // Classified by errors.As on a typed status, never by matching message text. helm's wording is
 // not ours to depend on and has changed under us before.
+//
+// # Which status means what, from what chart-inspector actually emits
+//
+// chart-inspector's /resources handler writes exactly three codes besides 200 (go/chart-inspector,
+// handlers/resources/get/resources.go): 400, 422 and 500. Its ServeMux adds 404 for a path that is
+// not registered. Nothing in it writes 401, 403, 405, 409 or 429.
+//
+//	400  two parameter checks, which Validate pre-empts so this client never receives them, and a
+//	     values-schema violation (#325). Hence: a 400 that reaches here is the schema one.
+//	422  a kind this cluster does not serve (#265).
+//	500  everything else the handler can fail at.
+//
+// Every other 4xx therefore came from something chart-inspector's handler is not: the mux, a proxy,
+// or a version this cdc does not know. That is a REFUSAL of the cdc's request and it used to be
+// filed under InspectorUnavailable with the words "refused the request" in the message, which is a
+// reason that says one thing and a message that says another.
+//
+// THE 400 READING IS BY ELIMINATION, NOT BY A MARKER, and that is the limit of this classification.
+// chart-inspector's Status body carries reason "BadRequest" for its parameter 400s and its
+// values-schema 400 alike. Validate makes the elimination hold for every 400 chart-inspector
+// emits today; a NEW 400 cause added to chart-inspector would be reported here as a schema
+// violation, with its own message beside it. A machine-readable cause in chart-inspector's body
+// would replace the elimination with evidence.
 func chartRenderableFailure(err error) (reason, message string) {
+	// Before the status check: Validate's refusal carries no status, and it is not "could not
+	// reach" either. No request was sent.
+	var missing *chartinspector.MissingParameterError
+	if errors.As(err, &missing) {
+		return reasonInspectorRejected, fmt.Sprintf(
+			"the cdc did not call chart-inspector, because the request lacks %q and chart-inspector "+
+				"refuses a request without it. This is a cdc defect, not the blueprint's", missing.Name)
+	}
 	if se, ok := chartinspector.AsStatusError(err); ok {
 		switch {
 		case se.Unprocessable():
 			return reasonUnservedKind, fmt.Sprintf(
 				"the chart references an API kind this cluster does not serve; install the missing "+
 					"CRD and this resolves without further action (chart-inspector HTTP %d)", se.Code)
+		case se.BadRequest():
+			return reasonValuesSchemaViolation, fmt.Sprintf(
+				"the chart's values do not satisfy its values.schema.json, so helm refused to render "+
+					"it; this does not resolve by itself, change the values or the schema "+
+					"(chart-inspector HTTP %d): %s", se.Code, detailOrNoBody(se))
+		case se.ClientSide():
+			return reasonInspectorRejected, fmt.Sprintf(
+				"chart-inspector refused the request (HTTP %d). Its handler answers no 4xx but 400 and "+
+					"422, so check that the cdc's chart-inspector URL reaches /resources and that the "+
+					"cdc and chart-inspector versions match: %s", se.Code, detailOrNoBody(se))
 		case se.ServerSide():
 			return reasonInspectorUnavailable, fmt.Sprintf(
 				"chart-inspector failed to render the chart (HTTP %d): %s", se.Code, se.Body)
 		default:
 			return reasonInspectorUnavailable, fmt.Sprintf(
-				"chart-inspector refused the request (HTTP %d): %s", se.Code, se.Body)
+				"chart-inspector answered HTTP %d, which is outside its protocol: %s", se.Code,
+				detailOrNoBody(se))
 		}
 	}
 	// No status at all: the request never got an answer.
 	return reasonInspectorUnavailable, fmt.Sprintf("could not reach chart-inspector: %v", err)
+}
+
+// detailOrNoBody says so when chart-inspector sent nothing, rather than ending a message on a colon.
+func detailOrNoBody(se *chartinspector.StatusError) string {
+	if d := se.Detail(); d != "" {
+		return d
+	}
+	return "(no response body)"
 }
 
 // markChartRenderable records a SUCCESSFUL render, and exists because that arm did not.

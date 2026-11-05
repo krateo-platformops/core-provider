@@ -93,24 +93,33 @@ func (c *ChartInspector) WithServer(server string) {
 	c.server = server
 }
 
+// Validate refuses, before it is sent, every request chart-inspector's parameter checks would
+// refuse.
+//
+// The set is chart-inspector's own: its /resources handler answers 400 when any of the first six is
+// empty ("missing required query parameters") and, separately, when releaseName is (#329).
+// ReleaseName was documented REQUIRED on Parameters and was not checked here, so an empty one went
+// over the wire and came back as a 400.
+//
+// THAT MATTERS BEYOND THE ROUND TRIP (#325). A 400 from chart-inspector is how the cdc learns that a
+// chart's values do not satisfy its values.schema.json, and the cdc can read a 400 that way only if
+// a parameter-check 400 cannot reach it: chart-inspector's Status body carries reason "BadRequest"
+// for both, so nothing in the response tells them apart. What tells them apart is that this client
+// never sends the request a parameter check exists to reject. Each failure is a
+// *MissingParameterError, so a caller classifies it by type and not as "could not reach".
 func (c *ChartInspector) Validate(params Parameters) error {
-	if params.CompositionName == "" {
-		return fmt.Errorf("compositionName is required")
-	}
-	if params.CompositionNamespace == "" {
-		return fmt.Errorf("compositionNamespace is required")
-	}
-	if params.CompositionVersion == "" {
-		return fmt.Errorf("compositionVersion is required")
-	}
-	if params.CompositionResource == "" {
-		return fmt.Errorf("compositionResource is required")
-	}
-	if params.CompositionDefinitionName == "" {
-		return fmt.Errorf("compositionDefinitionName is required")
-	}
-	if params.CompositionDefinitionNamespace == "" {
-		return fmt.Errorf("compositionDefinitionNamespace is required")
+	for _, p := range []struct{ name, value string }{
+		{"compositionName", params.CompositionName},
+		{"compositionNamespace", params.CompositionNamespace},
+		{"compositionVersion", params.CompositionVersion},
+		{"compositionResource", params.CompositionResource},
+		{"compositionDefinitionName", params.CompositionDefinitionName},
+		{"compositionDefinitionNamespace", params.CompositionDefinitionNamespace},
+		{"releaseName", params.ReleaseName},
+	} {
+		if p.value == "" {
+			return &MissingParameterError{Name: p.name}
+		}
 	}
 	return nil
 }
@@ -148,6 +157,19 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 	if err != nil {
 		return nil, fmt.Errorf("getting chartinspector: %w", err)
 	}
+	// Closed on EVERY path, as http.Client requires of a caller. This defer used to sit below the
+	// non-200 return, so a refused or failed request's body was never closed.
+	//
+	// WHAT THAT COST IS NARROWER THAN "A LEAK", and it is stated here so nobody repeats the larger
+	// claim. The non-200 arm reads the body with io.ReadAll, and both layers under this client
+	// release on a read that reaches io.EOF, without a Close: net/http's bodyEOFSignal hands the
+	// connection back to the pool (transport.go, readLoop's waitForBodyRead), and otelhttp's
+	// wrappedBody ends the client span (otelhttp v0.70.0 transport.go). So the default transport
+	// did not lose a connection per non-200. What it relied on was how two implementations behave,
+	// not what their contract promises (net/http asks for the body to be read to EOF AND closed),
+	// plus the arm happening to read to EOF; a transport that releases only on Close would have held
+	// one per refused request.
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		bbody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -156,8 +178,6 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 
 		return nil, &StatusError{Code: resp.StatusCode, Body: string(bbody)}
 	}
-
-	defer resp.Body.Close()
 
 	dec := json.NewDecoder(resp.Body)
 

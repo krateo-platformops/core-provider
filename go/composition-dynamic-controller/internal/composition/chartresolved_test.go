@@ -38,10 +38,10 @@ func TestChartRenderableFailure(t *testing.T) {
 			why:        "every 5xx is the service's",
 		},
 		{
-			name:       "a 4xx that is not 422 is not an unserved kind",
-			err:        &chartinspector.StatusError{Code: http.StatusBadRequest, Body: "missing query parameters"},
-			wantReason: reasonInspectorUnavailable,
-			why:        "only 422 carries the unserved-kind meaning; a 400 is the cdc calling the API wrongly, which is not the blueprint author's problem to fix",
+			name:       "a 4xx that is neither 400 nor 422 is a refusal, not an unserved kind",
+			err:        &chartinspector.StatusError{Code: http.StatusNotFound, Body: "404 page not found\n"},
+			wantReason: reasonInspectorRejected,
+			why:        "only 422 carries the unserved-kind meaning, and chart-inspector's handler writes no other 4xx but 400, so this is the request not reaching it",
 		},
 		{
 			name:       "no status at all",
