@@ -136,6 +136,15 @@ func main() {
 	healthProbePort := flag.Int("health-probe-port",
 		env.Int("COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT", 8081),
 		"The port serving /healthz (liveness: the process answers) and /readyz (readiness: the informer has completed its first successful list). 0 disables both.")
+	// CPU-saturation gating (#66), OFF BY DEFAULT. With it on, the controller bounds its own
+	// reconciles by its container's CPU pressure, so a saturated controller slows itself down before
+	// its probes fail.
+	saturationEnabled := flag.Bool("saturation-enabled",
+		env.Bool("COMPOSITION_CONTROLLER_SATURATION_ENABLED", false),
+		"Bound reconciles by this controller's own CPU pressure (cgroup v2 cpu.pressure). Off by default.")
+	cpuPressureThreshold := flag.Float64("cpu-pressure-threshold",
+		env.Float64("COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD", 0),
+		"cpu.pressure \"some avg10\" percentage above which the controller counts as saturated. 0 = the runtime default (50, provisional). Read only with -saturation-enabled.")
 	gracefulShutdownTimeout := flag.Duration("graceful-shutdown-timeout",
 		env.Duration("COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT", 30*time.Second),
 		"Max time to let in-flight reconciles finish after SIGTERM before the process exits. Must be set below the pod's terminationGracePeriodSeconds. 0 disables the drain (abrupt shutdown); negative waits indefinitely.")
@@ -291,6 +300,8 @@ func main() {
 		WithValues("metricsServerPort", *metricsServerPort).
 		WithValues("healthProbePort", *healthProbePort).
 		WithValues("safeReleaseName", *safeReleaseName).
+		WithValues("saturationEnabled", *saturationEnabled).
+		WithValues("cpuPressureThreshold", *cpuPressureThreshold).
 		Info("Starting composition dynamic controller.")
 
 	log.WithValues("deploymentName", *deploymentName).
@@ -406,6 +417,14 @@ func main() {
 		}),
 		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
 		builder.WithTelemetryMetrics(telemetryMetrics),
+	}
+	gov, err := newSaturationGovernor(*saturationEnabled, *cpuPressureThreshold, *workers, log)
+	if err != nil {
+		log.Error(err, "Invalid CPU-saturation configuration")
+		os.Exit(1)
+	}
+	if gov != nil {
+		opts = append(opts, builder.WithRateLimitGovernor(gov))
 	}
 
 	metricsServerBindAddress := ""
