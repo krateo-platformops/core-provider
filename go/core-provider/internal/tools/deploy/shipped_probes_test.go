@@ -152,10 +152,11 @@ func containerPort(c corev1.Container, name string) (int32, bool) {
 }
 
 // TestShippedControllerDeployment_CarriesTheProbes is #333's template half. With the chart's
-// defaults, the per-version Deployment core-provider applies must probe readiness on /readyz and
-// liveness on /healthz, both through the container port named "health". That port must be the one
-// the controller is told to serve on (COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT in its envFrom
-// ConfigMap); otherwise every probe fails against a port nothing listens on.
+// defaults, the per-version Deployment core-provider applies must probe READINESS on /readyz through
+// the container port named "health", and carry NO liveness probe (#57: a kill mid-helm-operation
+// leaves the release pending; decided again for #333 on 2026-11-05). The port must be the one the
+// controller is told to serve on (COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT in its envFrom ConfigMap);
+// otherwise readiness fails against a port nothing listens on.
 func TestShippedControllerDeployment_CarriesTheProbes(t *testing.T) {
 	dep, cm := renderControllerObjects(t, nil)
 	c := controllerContainer(t, dep)
@@ -163,24 +164,19 @@ func TestShippedControllerDeployment_CarriesTheProbes(t *testing.T) {
 	if c.ReadinessProbe == nil {
 		t.Fatal("the per-version Deployment has no readinessProbe: a controller that cannot list its resource reports Ready (#333)")
 	}
-	if c.LivenessProbe == nil {
-		t.Fatal("the per-version Deployment has no livenessProbe")
+	if c.LivenessProbe != nil {
+		t.Fatalf("the per-version Deployment carries a livenessProbe by default (%+v). #57: a kill in the "+
+			"middle of a helm operation leaves the release pending, and a probe timeout under CPU "+
+			"pressure kills a busy, healthy controller. Liveness is opt-in", c.LivenessProbe)
 	}
-	for name, probe := range map[string]*corev1.Probe{"readiness": c.ReadinessProbe, "liveness": c.LivenessProbe} {
-		if probe.HTTPGet == nil {
-			t.Fatalf("%s probe is not httpGet: %+v", name, probe.ProbeHandler)
-		}
-		if probe.HTTPGet.Port != intstr.FromString("health") {
-			t.Errorf("%s probe targets port %s, want the named port \"health\"", name, probe.HTTPGet.Port.String())
-		}
+	if c.ReadinessProbe.HTTPGet == nil {
+		t.Fatalf("readiness probe is not httpGet: %+v", c.ReadinessProbe.ProbeHandler)
 	}
-	// The paths are what make liveness weaker than readiness: /healthz never consults the informer.
-	// The same path on both would restart-loop a controller through a briefly unserved version.
+	if c.ReadinessProbe.HTTPGet.Port != intstr.FromString("health") {
+		t.Errorf("readiness probe targets port %s, want the named port \"health\"", c.ReadinessProbe.HTTPGet.Port.String())
+	}
 	if got := c.ReadinessProbe.HTTPGet.Path; got != "/readyz" {
 		t.Errorf("readiness path = %q, want /readyz", got)
-	}
-	if got := c.LivenessProbe.HTTPGet.Path; got != "/healthz" {
-		t.Errorf("liveness path = %q, want /healthz", got)
 	}
 
 	port, ok := containerPort(c, "health")
@@ -192,13 +188,6 @@ func TestShippedControllerDeployment_CarriesTheProbes(t *testing.T) {
 	}
 	if got := cm.Data["COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT"]; got != "8081" {
 		t.Errorf("the controller is told to serve probes on %q, but the probes reach port %d", got, port)
-	}
-
-	// Liveness must tolerate a busy process for longer than readiness does: it restarts the pod,
-	// readiness only reports.
-	window := func(p *corev1.Probe) int32 { return p.InitialDelaySeconds + p.PeriodSeconds*p.FailureThreshold }
-	if lw, rw := window(c.LivenessProbe), window(c.ReadinessProbe); lw <= rw {
-		t.Errorf("liveness gives up after %ds, readiness after %ds: liveness must be the more tolerant", lw, rw)
 	}
 }
 
@@ -221,31 +210,35 @@ func TestShippedControllerDeployment_ProbePortMovesAsOne(t *testing.T) {
 	}
 }
 
-// TestShippedControllerDeployment_LivenessCanBeSwitchedOff is the documented opt-out (values.yaml):
-// `cdc.livenessProbe: null` drops liveness and leaves readiness in place. That is the knob for anyone
-// who holds cdc.image.tag back to a build without the health server, or who wants no restarts.
-//
-// It must be null, not {}: helm MERGES a user map into the default, so {} leaves every default key in
-// place and renders the probe unchanged. This test caught exactly that in the first draft of the
-// values.yaml comment; the {} arm below keeps it caught.
-func TestShippedControllerDeployment_LivenessCanBeSwitchedOff(t *testing.T) {
+// TestShippedControllerDeployment_LivenessIsOptIn: the documented opt-in (values.yaml) renders exactly
+// the probe supplied, on /healthz through the named port, and leaves readiness alone. The control for
+// the default test above: without it, "no liveness" passes against a template that can never render
+// one. The supplied probe must also be the more tolerant of the two, since it restarts the pod and
+// readiness only reports.
+func TestShippedControllerDeployment_LivenessIsOptIn(t *testing.T) {
 	dep, _ := renderControllerObjects(t, map[string]any{
-		"cdc": map[string]any{"livenessProbe": nil},
+		"cdc": map[string]any{"livenessProbe": map[string]any{
+			"httpGet":             map[string]any{"path": "/healthz", "port": "health"},
+			"initialDelaySeconds": 15, "periodSeconds": 20, "timeoutSeconds": 5, "failureThreshold": 6,
+		}},
 	})
 	c := controllerContainer(t, dep)
-	if c.LivenessProbe != nil {
-		t.Errorf("cdc.livenessProbe: null still rendered a liveness probe: %+v", c.LivenessProbe)
+	if c.LivenessProbe == nil || c.LivenessProbe.HTTPGet == nil {
+		t.Fatalf("an opted-in cdc.livenessProbe did not render: %+v", c.LivenessProbe)
 	}
-	if c.ReadinessProbe == nil {
-		t.Error("switching liveness off also removed readiness")
+	if got := c.LivenessProbe.HTTPGet.Path; got != "/healthz" {
+		t.Errorf("liveness path = %q, want /healthz: /readyz there would restart-loop a controller "+
+			"through a briefly unserved version", got)
 	}
-
-	dep, _ = renderControllerObjects(t, map[string]any{
-		"cdc": map[string]any{"livenessProbe": map[string]any{}},
-	})
-	if controllerContainer(t, dep).LivenessProbe == nil {
-		t.Error("cdc.livenessProbe: {} removed the probe; helm used to merge it into the default, so " +
-			"the values.yaml advice to use null (not {}) needs revisiting")
+	if c.LivenessProbe.HTTPGet.Port != intstr.FromString("health") {
+		t.Errorf("liveness targets port %s, want the named port \"health\"", c.LivenessProbe.HTTPGet.Port.String())
+	}
+	if c.ReadinessProbe == nil || c.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Errorf("opting in to liveness changed readiness: %+v", c.ReadinessProbe)
+	}
+	window := func(p *corev1.Probe) int32 { return p.InitialDelaySeconds + p.PeriodSeconds*p.FailureThreshold }
+	if lw, rw := window(c.LivenessProbe), window(c.ReadinessProbe); lw <= rw {
+		t.Errorf("the documented liveness example gives up after %ds, readiness after %ds: liveness must be the more tolerant", lw, rw)
 	}
 }
 
