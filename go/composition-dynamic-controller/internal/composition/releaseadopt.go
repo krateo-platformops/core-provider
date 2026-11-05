@@ -18,16 +18,22 @@ import (
 // AN EXPLICIT MASK IS LOAD-BEARING, AND MY FIRST STATEMENT OF WHY WAS WRONG. This comment used to
 // say "ListDeployed alone is the default", which is true of neither layer:
 //
-//	plumbing helm/v3/config.go:113   applyListConfig OVERWRITES client.StateMask unconditionally,
-//	                                 so an unset ListConfig.StateMask sets the mask to 0 -- and
+//	plumbing < v1.25.0               applyListConfig OVERWROTE client.StateMask unconditionally,
+//	                                 so an unset ListConfig.StateMask set the mask to 0 -- and
 //	                                 helm's filterStateMask skips every release when the mask is
 //	                                 0, returning an EMPTY list with a nil error (plumbing#74).
+//	plumbing >= v1.25.0 (#75)        a zero mask now means "not specified" and keeps helm's own
+//	                                 default instead.
 //	helm action.NewList              sets ListDeployed|ListFailed. Its own comment says
 //	                                 "The default is ListDeployed" and is wrong about its own code.
 //
-// So the real hazard is worse than a narrow default: omitting the mask here would have listed
+// So before v1.25.0 the hazard was worse than a narrow default: omitting the mask here listed
 // NOTHING, every time, and "no release exists" means install a second one beside the live one --
 // the exact outage #303 is about. The plausible value is the destructive one.
+//
+// The mask is STILL required from v1.25.0, for the reason below rather than that one: helm's
+// default (deployed|failed) omits `pending-install`, so relying on it would miss exactly the
+// half-finished second install this lookup exists to find.
 //
 // What the mask has to span is still the same, and the measured case proves it: the release that
 // caused #303's outage was `failed` at revision 6, sitting beside a second `deployed` release at
