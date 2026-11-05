@@ -70,6 +70,7 @@ package crdtightening
 // than "what the newest release declares", that is where it should come from.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -231,18 +232,37 @@ func parseUmbrella(chartYAML []byte, chart string) (version, umbrella string, er
 // latestPublished asks the registry rather than git. `helm show chart` with no --version resolves
 // the registry's own notion of latest, which is what an unpinned install would get.
 func latestPublished(ref string) (string, error) {
-	out, err := exec.Command("helm", "show", "chart", ref).CombinedOutput()
+	// stdout alone is the metadata; stderr (warnings, deprecations) is kept for the error message
+	// but never parsed as YAML.
+	var stderr bytes.Buffer
+	cmd := exec.Command("helm", "show", "chart", ref)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("helm show chart %s: %w\n%s", ref, err, out)
+		return "", fmt.Errorf("helm show chart %s: %w\n%s", ref, err, stderr.String())
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "version:"); ok {
-			if v = strings.TrimSpace(v); v != "" {
-				return v, nil
-			}
-		}
+	return chartVersion(out)
+}
+
+// chartVersion reads the TOP-LEVEL version out of chart metadata, parsed as YAML.
+//
+// NOT LINE BY LINE. The first version of this matched `version:` after TrimSpace, which also
+// matches an indented `dependencies[].version` — and `helm show chart` prints keys in alphabetical
+// order, so `dependencies` comes BEFORE the top-level `version`. On any chart with dependencies
+// the first match was a subchart's version. parseUmbrella had already been written to avoid exactly
+// this; the fallback had not (reported by the frontend session, who wrote both). Inert for
+// core-provider-crds today, which declares no dependencies — which is why it went unnoticed.
+func chartVersion(metadata []byte) (string, error) {
+	var doc struct {
+		Version string `json:"version"`
 	}
-	return "", fmt.Errorf("no `version:` line in the chart metadata:\n%s", out)
+	if err := yaml.Unmarshal(metadata, &doc); err != nil {
+		return "", fmt.Errorf("parsing the chart metadata: %w", err)
+	}
+	if !versionRe.MatchString(doc.Version) {
+		return "", fmt.Errorf("the chart metadata's top-level version %q is not a version:\n%s", doc.Version, metadata)
+	}
+	return doc.Version, nil
 }
 
 var (
