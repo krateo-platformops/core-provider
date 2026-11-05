@@ -38,6 +38,7 @@ import (
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 
 	mapper "github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
 	"github.com/krateo-platformops/plumbing/e2e"
@@ -540,15 +541,22 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
-	}).Assess("Regression: Observe Tolerates Stale ResourceVersion", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-		// Regression for the external-create wedge (unstructured-runtime incomplete-create recovery).
-		// The runtime re-Observes with the copy of the CR it began the reconcile with; a concurrent
-		// writer (an umbrella re-applying the instance, a kubectl edit, or the reconcile's own
-		// external-create annotation write) may have bumped its resourceVersion in the meantime.
-		// Observe previously did a NON-retrying tools.Update (release name + CD def-ref labels) that
-		// 409'd on such a stale version and returned an error; the recovery then treats an Observe
-		// error as "cannot determine creation result" and refuses forever, wedging the composition.
-		// Observe must now be a pure read that tolerates a stale resourceVersion.
+	}).Assess("Regression: A Stale ResourceVersion Is A Quiet Requeue, Never A Wedge", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// A reconcile holds the copy of the CR it began with, and a concurrent writer (an umbrella
+		// re-applying the instance, a kubectl edit, the reconcile's own external-create annotation
+		// write) may bump its resourceVersion meanwhile.
+		//
+		// WHAT THIS USED TO ASSERT, AND WHY IT CHANGED. It required Observe to return NO error for the
+		// stale copy, because the runtime's incomplete-create recovery once treated any Observe error
+		// as "cannot determine creation result" and refused forever. Two things have since moved:
+		//   - the cdc implements controller.ExistenceChecker (existence.go, #110/#130), so recovery
+		//     asks Exists, a pure read, and never Observe;
+		//   - #359: Observe's status write with a stale resourceVersion used to be force-re-submitted
+		//     over the newer write (a lost update that wiped status.managed). It now RETURNS the
+		//     conflict, which unstructured-runtime >= v1.9.0 requeues quietly after 1s.
+		// So the property that matters is no longer "no error". It is: the error is the quiet-requeue
+		// kind and nothing else, the newer write survives, the next pass converges, and recovery's
+		// own question is still answerable from the stale copy.
 		dy := dynamic.NewForConfigOrDie(c)
 		var obj unstructured.Unstructured
 		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
@@ -585,11 +593,74 @@ func TestController(t *testing.T) {
 			t.Error("Concurrent update failed.", "error", err)
 			return ctx
 		}
+		// ...and a newer STATUS write, which is what #359's lost update destroyed. A condition of a
+		// type the cdc never writes: the stale copy does not have it, so the old force-re-submit
+		// (re-read, put the stale-computed status on the live object, write) would remove it, while
+		// a fresh pass upserts its own conditions by type and leaves it alone.
+		fresh2, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Error("Getting composition.", "error", err)
+			return ctx
+		}
+		conds, _, _ := unstructured.NestedSlice(fresh2.Object, "status", "conditions")
+		conds = append(conds, map[string]any{
+			"type": "ConcurrentWriter", "status": "True", "reason": "Test",
+			"message": "written by a concurrent writer", "lastTransitionTime": time.Now().UTC().Format(time.RFC3339),
+		})
+		if err := unstructured.SetNestedSlice(fresh2.Object, conds, "status", "conditions"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cli.UpdateStatus(ctx, fresh2, metav1.UpdateOptions{}); err != nil {
+			t.Error("Concurrent status update failed.", "error", err)
+			return ctx
+		}
+		hasConcurrentCondition := func(u *unstructured.Unstructured) bool {
+			cs, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+			for _, c := range cs {
+				if m, ok := c.(map[string]any); ok && m["type"] == "ConcurrentWriter" {
+					return true
+				}
+			}
+			return false
+		}
 
-		// Observe with the STALE object. A pure-read Observe must not 409 here; the pre-fix code did,
-		// which is exactly what wedged the external-create recovery.
-		if _, err := handler.Observe(ctx, stale); err != nil {
-			t.Errorf("Observe must tolerate a concurrently-bumped resourceVersion (pure read), got error: %v", err)
+		// 1. Observe with the STALE copy: either nothing to write (nil), or the status write lost the
+		//    race. Any OTHER error is a failure the runtime would record, which is the wedge class.
+		if _, err := handler.Observe(ctx, stale.DeepCopy()); err != nil && !stderrors.Is(err, tools.ErrStatusConflict) {
+			t.Errorf("a stale resourceVersion must end Observe as a status conflict (a quiet requeue) or "+
+				"not at all; got an ordinary error the runtime would record: %v", err)
+		}
+
+		// 2. The concurrent write survived: a stale pass must never replace a newer write.
+		after, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Error("Getting composition.", "error", err)
+			return ctx
+		}
+		if after.GetAnnotations()["krateo.io/test-concurrent-write"] != "1" {
+			t.Errorf("the concurrent write was lost after a stale Observe: annotations=%v", after.GetAnnotations())
+		}
+		if !hasConcurrentCondition(after) {
+			t.Errorf("the newer STATUS write was replaced by the stale pass's status (#359's lost update): " +
+				"condition ConcurrentWriter is gone")
+		}
+
+		// 3. The next pass reads the current object, as the requeued pass would, and converges.
+		if _, err := handler.Observe(ctx, after); err != nil {
+			t.Errorf("the pass after a status conflict must converge from a fresh read, got: %v", err)
+		}
+		if converged, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{}); err == nil && !hasConcurrentCondition(converged) {
+			t.Errorf("the converging pass removed a condition it does not own (ConcurrentWriter)")
+		}
+
+		// 4. Recovery's question is answerable from the STALE copy: Exists is a pure read.
+		checker, ok := handler.(controller.ExistenceChecker)
+		if !ok {
+			t.Fatal("the handler no longer implements controller.ExistenceChecker, so incomplete-create " +
+				"recovery would fall back to Observe, whose status conflict it would then have to handle")
+		}
+		if exists, err := checker.Exists(ctx, stale.DeepCopy()); err != nil || !exists {
+			t.Errorf("Exists must answer from a stale copy without error: exists=%v err=%v", exists, err)
 		}
 		return ctx
 	}).Assess("SelfHeal: Recreate Deleted Child", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
