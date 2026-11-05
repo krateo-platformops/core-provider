@@ -27,9 +27,43 @@ func NewRBACInstaller(cli dynamic.Interface) *RBACInstaller {
 	return &RBACInstaller{DynamicClient: cli}
 }
 
-func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) error {
+// SkippedObject is a namespaced RBAC object that was not applied because its namespace is being
+// deleted (#357).
+type SkippedObject struct {
+	Kind      string
+	Namespace string
+	Name      string
+}
+
+// ApplyReport says what ApplyRBAC did NOT apply, on a call that otherwise succeeded.
+type ApplyReport struct {
+	// SkippedTerminating lists the objects the apiserver refused because their namespace is
+	// terminating. A grant into a namespace that is going away is moot.
+	SkippedTerminating []SkippedObject
+}
+
+// namespaceTerminating reports the apiserver's refusal to create content in a namespace that is
+// being deleted. The NamespaceLifecycle admission plugin returns a Forbidden StatusError carrying a
+// NamespaceTerminating CAUSE ("unable to create new content in namespace X because it is being
+// terminated"). The cause is typed, so this never matches on message text, and HasStatusCause
+// unwraps with errors.As, so it sees through the %w wrapping in ApplyRole/ApplyRoleBinding.
+func namespaceTerminating(err error) bool {
+	return errors.HasStatusCause(err, corev1.NamespaceTerminatingCause)
+}
+
+// ApplyRBAC applies the derived RBAC.
+//
+// ONE TERMINATING NAMESPACE NO LONGER FAILS THE WHOLE CALL (#357). A composition's derived RBAC can
+// put a Role into a namespace other than its own, and while that namespace terminates the apiserver
+// refuses to create anything in it. Failing on that refusal failed the composition's reconcile on
+// every pass for as long as the namespace terminated, and cascaded through the health rollup to its
+// parents (portal and installer on krateo-057, demo-system deleted by hand). Such objects are now
+// skipped and RETURNED in the report, so the caller can say so. EVERY OTHER ERROR STILL FAILS: a
+// Role that cannot be created in a namespace that is NOT terminating is a real failure.
+func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
+	var report ApplyReport
 	if rbac == nil {
-		return fmt.Errorf("RBAC cannot be nil")
+		return report, fmt.Errorf("RBAC cannot be nil")
 	}
 
 	if rbac.Namespaces != nil {
@@ -37,7 +71,7 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) error {
 			if ns != nil {
 				_, err := i.ApplyNamespace(context.Background(), ns)
 				if err != nil {
-					return fmt.Errorf("failed to Apply Namespace %s: %w", ns.Name, err)
+					return report, fmt.Errorf("failed to Apply Namespace %s: %w", ns.Name, err)
 				}
 			}
 		}
@@ -46,30 +80,36 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) error {
 	if rbac.ClusterRole != nil {
 		_, err := i.ApplyClusterRole(context.Background(), rbac.ClusterRole)
 		if err != nil {
-			return fmt.Errorf("failed to Apply ClusterRole: %w - name: %s", err, rbac.ClusterRole.Name)
+			return report, fmt.Errorf("failed to Apply ClusterRole: %w - name: %s", err, rbac.ClusterRole.Name)
 		}
 	}
 	if rbac.ClusterRoleBinding != nil {
 		_, err := i.ApplyClusterRoleBinding(context.Background(), rbac.ClusterRoleBinding)
 		if err != nil {
-			return fmt.Errorf("failed to Apply ClusterRoleBinding: %w - name: %s", err, rbac.ClusterRoleBinding.Name)
+			return report, fmt.Errorf("failed to Apply ClusterRoleBinding: %w - name: %s", err, rbac.ClusterRoleBinding.Name)
 		}
 	}
 	for _, ns := range rbac.Namespaced {
 		if ns.Role != nil {
 			_, err := i.ApplyRole(context.Background(), ns.Role)
-			if err != nil {
-				return fmt.Errorf("failed to Apply Role: %w - name: %s", err, ns.Role.Name)
+			if namespaceTerminating(err) {
+				report.SkippedTerminating = append(report.SkippedTerminating,
+					SkippedObject{Kind: "Role", Namespace: ns.Role.Namespace, Name: ns.Role.Name})
+			} else if err != nil {
+				return report, fmt.Errorf("failed to Apply Role: %w - name: %s", err, ns.Role.Name)
 			}
 		}
 		if ns.RoleBinding != nil {
 			_, err := i.ApplyRoleBinding(context.Background(), ns.RoleBinding)
-			if err != nil {
-				return fmt.Errorf("failed to Apply RoleBinding: %w - name: %s", err, ns.RoleBinding.Name)
+			if namespaceTerminating(err) {
+				report.SkippedTerminating = append(report.SkippedTerminating,
+					SkippedObject{Kind: "RoleBinding", Namespace: ns.RoleBinding.Namespace, Name: ns.RoleBinding.Name})
+			} else if err != nil {
+				return report, fmt.Errorf("failed to Apply RoleBinding: %w - name: %s", err, ns.RoleBinding.Name)
 			}
 		}
 	}
-	return nil
+	return report, nil
 
 }
 

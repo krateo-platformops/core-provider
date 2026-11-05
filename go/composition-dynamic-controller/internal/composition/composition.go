@@ -1511,15 +1511,26 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		if cerr := setChartRenderableCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
 			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
 		}
+		setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
 
 	rbInstaller := rbac.NewRBACInstaller(dyn)
-	if err := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
-		return rbInstaller.ApplyRBAC(generated)
-	}); err != nil {
-		return fmt.Errorf("applying rbac: %w", err)
+	var report rbac.ApplyReport
+	applyErr := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
+		var err error
+		report, err = rbInstaller.ApplyRBAC(generated)
+		return err
+	})
+	// #357: RBAC into a terminating namespace was skipped, not failed. Say so on the CR.
+	setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(true, report, applyErr))
+	if len(report.SkippedTerminating) > 0 {
+		xcontext.Logger(ctx).Info("Skipped RBAC into namespaces being deleted",
+			"skipped", describeSkipped(report.SkippedTerminating))
+	}
+	if applyErr != nil {
+		return fmt.Errorf("applying rbac: %w", applyErr)
 	}
 	return nil
 }
