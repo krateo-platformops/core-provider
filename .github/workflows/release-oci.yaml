@@ -8,9 +8,9 @@
 # (krateo-platformops/oasgen-provider#62).
 name: release-oci
 
+# #360: on a tag push this runs as the release-oci JOB of release-tag.yaml, so verify-artifacts
+# can wait for it. This workflow is kept for republishing a chart by hand.
 on:
-  push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       chart_version:
