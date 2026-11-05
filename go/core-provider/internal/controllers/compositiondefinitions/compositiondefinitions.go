@@ -1856,6 +1856,30 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	return gvr, nil
 }
 
+// deleteGVK resolves the GVK Delete tears down, from the chart when it is readable and from status
+// when it is not (#314). Extracted so the decision is testable on its own, without the clients the
+// rest of Delete needs.
+//
+//	chart readable                     -> the chart's GVK
+//	chart unreadable, GVK on status    -> the recorded GVK. Delete uses nothing else from the chart.
+//	chart unreadable, nothing recorded -> the chart error. Never reconciled, so in principle nothing
+//	                                      to tear down — but on a teardown path "could not determine"
+//	                                      must not read as "nothing to do". It is also unreachable in
+//	                                      practice: observeWithoutChart reports ResourceExists=false
+//	                                      for a definition with no recorded GVK, so the runtime
+//	                                      finalizes it without calling Delete. Reaching it means
+//	                                      something disagrees, and an error saying so is safer than a
+//	                                      finalizer removed on a guess.
+func deleteGVK(chartGVK schema.GroupVersionKind, chartErr error, recorded schema.GroupVersionKind) (schema.GroupVersionKind, error) {
+	if chartErr == nil {
+		return chartGVK, nil
+	}
+	if recorded.Empty() {
+		return schema.GroupVersionKind{}, chartErr
+	}
+	return recorded, nil
+}
+
 // statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
 // at deploy time (apiVersion + resource). For a remote target this is the source of truth, since the
 // generated CRD is not visible to the management-cluster pluralizer. ok is false until status records it.
@@ -1934,14 +1958,43 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 	cr.SetConditions(rtv1.Deleting())
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
-	if err != nil {
-		return fmt.Errorf("error getting chart info: %w", err)
+	// DELETE NEEDS THE GVK, NOT THE CHART — and it must not wedge when the chart is unreadable
+	// (#314). This used to return on any chart-read failure, BEFORE every guard below, and that
+	// made a CompositionDefinition whose chart had become unreadable impossible to delete:
+	//
+	//	Observe  chart unreadable -> observeWithoutChart -> CRD still exists -> ResourceExists=true
+	//	runtime  WasDeleted && ResourceExists -> calls Delete
+	//	Delete   chart fetch fails -> returns here, before the instance guard or Undeploy
+	//	runtime  Synced=False "delete failed: error getting chart info" -> requeue -> forever
+	//
+	// Observe has answered from status on every chart-read failure since #235, for exactly this
+	// reason — "the question does not actually need the chart, it needs the GVK". Delete never got
+	// the same treatment, so the two disagreed: one could proceed without the chart and the other
+	// could not, on the path where the chart is MOST likely to be gone. A namespace deletion removes
+	// a passwordRef Secret living in that namespace before any CD finalizer runs, and this file
+	// already records a definition that failed its chart fetch for five days on krateo-057.
+	//
+	// Nothing below uses the chart's CONTENTS: pkg and dir are read only to derive the GVK, and
+	// Undeploy works from cr.Spec.Chart and fixed template paths. So status is a complete substitute,
+	// not a degraded one.
+	//
+	// CurrentGVK RATHER THAN statusGVR or a fresh parse of the raw fields: #234A made it the single
+	// authoritative reconstruction of the generated-CRD reference, and a third derivation here is
+	// exactly what that consolidated away.
+	var chartGVK schema.GroupVersionKind
+	pkg, dir, chartErr := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
+	if chartErr != nil {
+		chartErr = fmt.Errorf("error getting chart info: %w", chartErr)
+	} else if chartGVK, chartErr = chart.ChartGroupVersionKind(pkg, dir); chartErr != nil {
+		chartErr = fmt.Errorf("error getting chart GVK: %w", chartErr)
 	}
-
-	gvk, err := chart.ChartGroupVersionKind(pkg, dir)
+	gvk, err := deleteGVK(chartGVK, chartErr, cr.Status.CurrentGVK())
 	if err != nil {
-		return fmt.Errorf("error getting chart GVK: %w", err)
+		return err
+	}
+	if chartErr != nil {
+		log.Info("Chart unreadable during delete; tearing down the GVK recorded on status instead",
+			"gvk", gvk.String(), "error", chartErr.Error())
 	}
 
 	var gvr schema.GroupVersionResource
