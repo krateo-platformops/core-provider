@@ -2,6 +2,7 @@ package chartinspector
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,22 +50,28 @@ func TestResources_SendsTheReleaseNameOnTheWire(t *testing.T) {
 			"'not my fault, retry later'", got, "mariadb-9c847c79", gotQuery)
 	}
 
-	// CONTROL: an empty ReleaseName must not be sent as an empty parameter either, because
-	// setQueryIfNotEmpty omits it — which is what makes chart-inspector's 400 fire and name the
-	// parameter, instead of it dry-running an install with "".
-	gotQuery = ""
-	if _, err := ci.Resources(context.Background(), Parameters{
+	// CONTROL: an empty ReleaseName is not sent AT ALL. It used to go out with the parameter
+	// omitted, so that chart-inspector's 400 fired and named it; since #325 a 400 is how this
+	// client learns of a values-schema violation, and so Validate refuses the request before it
+	// leaves (see TestValidatePreemptsEveryParameterCheck400 for the whole set).
+	const notCalled = "<no request reached the server>"
+	gotQuery = notCalled
+	_, err := ci.Resources(context.Background(), Parameters{
 		CompositionName:                "mariadb",
 		CompositionNamespace:           "openstack",
 		CompositionVersion:             "v0-3-28",
 		CompositionResource:            "mariadbs",
 		CompositionDefinitionName:      "mariadb",
 		CompositionDefinitionNamespace: "krateo-system",
-	}); err != nil {
-		t.Fatalf("Resources: %v", err)
+	})
+	var missing *MissingParameterError
+	if !errors.As(err, &missing) || missing.Name != "releaseName" {
+		t.Errorf("Resources with no ReleaseName returned %v; want a *MissingParameterError naming "+
+			"releaseName", err)
 	}
-	if got := queryValue(gotQuery, "releaseName"); got != "" {
-		t.Errorf("releaseName = %q with no ReleaseName set; want the parameter absent", got)
+	if gotQuery != notCalled {
+		t.Errorf("a request reached the server with query %q; an empty ReleaseName must be refused "+
+			"before it is sent", gotQuery)
 	}
 }
 

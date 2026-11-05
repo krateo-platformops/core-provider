@@ -67,6 +67,7 @@ func TestChartInspector_Validate(t *testing.T) {
 				CompositionResource:            "compositions",
 				CompositionDefinitionName:      "test-def",
 				CompositionDefinitionNamespace: "test-def-namespace",
+				ReleaseName:                    "test-release",
 			},
 			wantErr: false,
 		},
@@ -126,6 +127,19 @@ func TestChartInspector_Validate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "compositionDefinitionNamespace is required",
 		},
+		{
+			name: "missing release name",
+			params: Parameters{
+				CompositionName:                "test",
+				CompositionNamespace:           "test-ns",
+				CompositionVersion:             "v1",
+				CompositionResource:            "compositions",
+				CompositionDefinitionName:      "test-def",
+				CompositionDefinitionNamespace: "test-def-ns",
+			},
+			wantErr: true,
+			errMsg:  "releaseName is required",
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,6 +176,7 @@ func TestChartInspector_Resources(t *testing.T) {
 				CompositionResource:            "compositions",
 				CompositionDefinitionName:      "test-def",
 				CompositionDefinitionNamespace: "test-def-namespace",
+				ReleaseName:                    "test-release",
 			},
 			serverResponse: `[{"group":"apps","version":"v1","resource":"deployments","name":"test","namespace":"default"}]`,
 			statusCode:     http.StatusOK,
@@ -177,6 +192,7 @@ func TestChartInspector_Resources(t *testing.T) {
 				CompositionResource:            "compositions",
 				CompositionDefinitionName:      "test-def",
 				CompositionDefinitionNamespace: "test-def-namespace",
+				ReleaseName:                    "test-release",
 			},
 			serverResponse: "internal server error",
 			statusCode:     http.StatusInternalServerError,
@@ -191,6 +207,7 @@ func TestChartInspector_Resources(t *testing.T) {
 				CompositionResource:            "compositions",
 				CompositionDefinitionName:      "test-def",
 				CompositionDefinitionNamespace: "test-def-namespace",
+				ReleaseName:                    "test-release",
 			},
 			serverResponse: "invalid json",
 			statusCode:     http.StatusOK,
@@ -281,6 +298,7 @@ func TestChartInspector_ResourcesQueryParameters(t *testing.T) {
 			"compositionDefinitionName":      "test-def",
 			"compositionDefinitionNamespace": "test-def-namespace",
 			"compositionGroup":               "custom.group",
+			"releaseName":                    "test-release",
 		}
 
 		for key, expected := range expectedParams {
@@ -302,6 +320,7 @@ func TestChartInspector_ResourcesQueryParameters(t *testing.T) {
 		CompositionResource:            "compositions",
 		CompositionDefinitionName:      "test-def",
 		CompositionDefinitionNamespace: "test-def-namespace",
+		ReleaseName:                    "test-release",
 		CompositionGroup:               "custom.group",
 	}
 
