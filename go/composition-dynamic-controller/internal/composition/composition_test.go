@@ -1420,6 +1420,32 @@ func TestController(t *testing.T) {
 			_, err = handler.Observe(ctx, u)
 			return err
 		}
+		// converge runs what the runtime runs: Observe, then Update while Observe reports drift, so the
+		// assertions below start from a settled composition rather than whatever the previous
+		// assessment left (the adoption assessments leave the inventory unrecorded until an Update).
+		converge := func() {
+			for i := 0; i < 4; i++ {
+				u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("getting composition: %v", err)
+				}
+				obs, err := handler.Observe(ctx, u)
+				if err != nil {
+					t.Fatalf("converging: Observe: %v", err)
+				}
+				if obs.ResourceExists && obs.ResourceUpToDate {
+					return
+				}
+				u, err = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("getting composition: %v", err)
+				}
+				if err := handler.Update(ctx, u); err != nil {
+					t.Fatalf("converging: Update: %v", err)
+				}
+			}
+			t.Fatal("the composition did not converge before the assessment")
+		}
 		waitFor := func(what string, cond func() bool) {
 			deadline := time.Now().Add(90 * time.Second)
 			for time.Now().Before(deadline) {
@@ -1455,6 +1481,16 @@ func TestController(t *testing.T) {
 			return err == nil && ns.Status.Phase == corev1.NamespaceTerminating
 		})
 
+		// Baseline from a settled composition, so "the skip does not move Ready" is a DIFFERENTIAL, not
+		// an assumption about the state the previous assessment left. A first version asserted
+		// Ready=True outright and failed on Unknown/InventoryNotRecorded inherited from the adoption
+		// assessments, which had nothing to do with the skip.
+		converge()
+		baseStatus, baseReason, _ := condition("Ready")
+		if baseStatus != "True" {
+			t.Fatalf("setup: Ready is %s/%s after converging, so a skip leaving Ready alone could not be told apart", baseStatus, baseReason)
+		}
+
 		// The chart now renders an object into the terminating namespace, so the derived RBAC has a
 		// Role there.
 		setChartInspectorExtra([]map[string]string{{
@@ -1468,8 +1504,8 @@ func TestController(t *testing.T) {
 		if st != "False" || reason != "NamespaceTerminating" || !strings.Contains(msg, termNS) {
 			t.Errorf("RBACComplete = %s/%s %q, want False/NamespaceTerminating naming %s", st, reason, msg, termNS)
 		}
-		if st, reason, _ := condition("Ready"); st != "True" {
-			t.Errorf("the skip moved Ready to %s/%s; RBACComplete is informational and must not", st, reason)
+		if st, reason, _ := condition("Ready"); st != baseStatus || reason != baseReason {
+			t.Errorf("the skip moved Ready from %s/%s to %s/%s; RBACComplete is informational and must not", baseStatus, baseReason, st, reason)
 		}
 
 		// THE OPEN CASE, characterized rather than fixed (#366): once the namespace is GONE, creating
