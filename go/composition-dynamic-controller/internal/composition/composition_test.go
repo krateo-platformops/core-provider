@@ -1482,14 +1482,25 @@ func TestController(t *testing.T) {
 		})
 
 		// Baseline from a settled composition, so "the skip does not move Ready" is a DIFFERENTIAL, not
-		// an assumption about the state the previous assessment left. A first version asserted
-		// Ready=True outright and failed on Unknown/InventoryNotRecorded inherited from the adoption
-		// assessments, which had nothing to do with the skip.
+		// an assumption about the state the previous assessment left.
+		//
+		// TWO WRONG VERSIONS PRECEDED THIS. The first asserted Ready=True outright and failed on
+		// Unknown/InventoryNotRecorded, inherited from the adoption assessments. The second required
+		// Ready=True as a precondition and failed on Unknown/ZeroEvidence, which is this fixture's
+		// CORRECT settled state: its finops children have no controller here and publish no status. So
+		// the precondition is that Ready is STABLE: one more pass without the change must leave it
+		// exactly as it was. Any settled value then works as the baseline, and a move caused by the skip
+		// is still detected.
 		converge()
 		baseStatus, baseReason, _ := condition("Ready")
-		if baseStatus != "True" {
-			t.Fatalf("setup: Ready is %s/%s after converging, so a skip leaving Ready alone could not be told apart", baseStatus, baseReason)
+		if err := observe(); err != nil {
+			t.Fatalf("setup: the stability pass failed: %v", err)
 		}
+		if st, reason, _ := condition("Ready"); st != baseStatus || reason != baseReason {
+			t.Fatalf("setup: Ready is not stable without any change (%s/%s then %s/%s), so the skip's effect on it cannot be isolated",
+				baseStatus, baseReason, st, reason)
+		}
+		t.Logf("baseline Ready = %s/%s (stable across a pass)", baseStatus, baseReason)
 
 		// The chart now renders an object into the terminating namespace, so the derived RBAC has a
 		// Role there.
