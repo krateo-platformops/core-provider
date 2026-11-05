@@ -300,7 +300,7 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 	// `kubectl get` can still show to answer "is the controller alive".
 	//
 	// UNCONDITIONAL on purpose, and it is free: every caller of setStatus follows it with an
-	// unconditional updateStatusWithRetry (composition.go:617 in Observe, :882 in Create, :1106 in
+	// unconditional updateStatus (composition.go:617 in Observe, :882 in Create, :1106 in
 	// Update), so the status subresource is already written once per reconcile. This adds a field to
 	// a request that was happening anyway, not a request.
 	//

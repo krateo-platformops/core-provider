@@ -11,7 +11,7 @@ import (
 //
 // A reconcile whose self-heal apply changed an object used to return
 // ExternalObservation{ResourceExists: true, ResourceUpToDate: false} BEFORE the setStatus /
-// updateStatusWithRetry pair, so it reported drift without ever computing or writing Ready. The
+// updateStatus pair, so it reported drift without ever computing or writing Ready. The
 // runtime cannot compensate: its !ResourceUpToDate branch persists only the conditions the handler
 // RETURNED, and that path returns none.
 //
@@ -46,12 +46,12 @@ func TestObserveWritesStatusBeforeEveryDriftReturn(t *testing.T) {
 			"otherwise pass. Fix the lookup, not the assertion")
 	}
 
-	// THE LANDMARK IS setStatus, NOT updateStatusWithRetry, AND THE FIRST VERSION OF THIS TEST GOT
-	// THAT WRONG — it took the EARLIEST updateStatusWithRetry, which is at line ~391 in an entirely
+	// THE LANDMARK IS setStatus, NOT updateStatus, AND THE FIRST VERSION OF THIS TEST GOT
+	// THAT WRONG — it took the EARLIEST updateStatus, which is at line ~391 in an entirely
 	// different branch near the top of Observe. Every drift return is after line 391, so the test
 	// passed trivially and a mutant restoring the #337 defect SURVIVED it.
 	//
-	// setStatus is the call that COMPUTES the Ready verdict for this pass; updateStatusWithRetry
+	// setStatus is the call that COMPUTES the Ready verdict for this pass; updateStatus
 	// appears four times and merely flushes whatever is on the object. Ordering against a flush
 	// that may belong to another branch measures nothing. The requirement is: before a path reports
 	// exists-but-not-up-to-date, this pass must have COMPUTED its Ready.
