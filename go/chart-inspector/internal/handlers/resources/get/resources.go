@@ -2,6 +2,7 @@ package resources
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -244,32 +245,25 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),
 		)
-		// #265. A blueprint referencing a kind this cluster does not serve is the CALLER's
-		// blueprint disagreeing with the cluster, not a fault in this service. It used to answer
-		// 500/InternalError, which is the one class a caller is entitled to read as "not my fault,
-		// retry later" — so every consumer retried forever while the response body already carried
-		// the actionable sentence helm produces: "ensure CRDs are installed first".
-		//
-		// 422 rather than 400: the request is WELL-FORMED and semantically unprocessable right
-		// now. plumbing's status machinery already maps 422 to reason UnprocessableEntity
-		// (http/response/status.go:128); only the convenience helper is absent, so Encode/New is
-		// the supported call rather than a workaround.
-		//
-		// IT MEANS "NOT SATISFIABLE NOW", NOT "NOT SATISFIABLE", and a consumer must not latch on
-		// it. The detector cannot distinguish a kind that will never exist from one whose CRD was
-		// created moments ago and has not reached this process's RESTMapper — plumbing's own doc
-		// says so. What makes the classification sound HERE is the CRD informer: this client is
-		// built WithCRDInformer, which Resets the mapper on CRD arrival, so a miss that survives it
-		// is evidence of absence rather than of staleness. That reasoning lives in this handler;
-		// nothing in the detector supplies it.
-		if helmv3.IsRESTMappingMiss(err) {
+		// Answered with the code that says WHOSE fault this is; see installFailureStatus for the
+		// three classes and why each gets the code it does (#265, #325).
+		code := installFailureStatus(err)
+		switch code {
+		case http.StatusBadRequest:
+			err = withKrateoGlobalNote(err)
+			log.ErrorContext(ctx, "chart values do not satisfy the chart's values.schema.json",
+				slog.Any("err", err),
+			)
+		case http.StatusUnprocessableEntity:
 			log.ErrorContext(ctx, "chart references a kind this cluster does not serve",
 				slog.Any("err", err),
 			)
-			response.Encode(w, response.New(http.StatusUnprocessableEntity, err))
-			return
 		}
-		response.InternalError(w, err)
+		st := response.New(code, err)
+		if code == http.StatusBadRequest {
+			st.Reason = ReasonValuesSchemaViolation
+		}
+		response.Encode(w, st)
 		return
 	}
 
@@ -368,4 +362,94 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.InfoContext(ctx, "Successfully handled request to get resources")
+}
+
+// ReasonValuesSchemaViolation marks the values-schema 400, so a caller can tell it from the other
+// 400s this handler answers (missing query parameters, a missing releaseName) by what the response
+// SAYS rather than by ruling the others out. plumbing documents Status.reason as clarifying the HTTP
+// code without overriding it, which is exactly this use.
+//
+// A CONTRACT WITH THE CDC. go/composition-dynamic-controller/internal/chartinspector reads this exact
+// value; the two modules cannot share a declaration, so each pins the literal in a test.
+const ReasonValuesSchemaViolation response.StatusReason = "ValuesSchemaViolation"
+
+// installFailureStatus maps an Install failure to the HTTP status that tells the caller WHOSE fault
+// it is. A 5xx is a claim about THIS SERVER: it is the one class a caller is entitled to read as
+// "not my fault, retry later", so answering it for a caller's mistake sends the caller to this
+// service's logs and into a retry that cannot work.
+//
+// 400 — the chart's values do not satisfy its values.schema.json (core-provider#325).
+//
+//	Classified with errors.Is on plumbing's helmconfig.ErrValuesSchema (plumbing v1.25.0), never on
+//	helm's text: helm has a typed error and flattens it to a string before an install returns
+//	(chartutil/jsonschema.go:107, values.go:168), so plumbing validates first with helm's typed
+//	entry point and wraps the failure in the sentinel. The canonical case is a subchart with
+//	`additionalProperties: false`, which rejects the `global` key helm injects into every
+//	dependency; plumbing's message names that case and says to remove the prohibition.
+//
+//	400 AND NOT 422, for two reasons that are each sufficient:
+//	  - 422 already means something else here, and its consumer acts on that meaning. The cdc's
+//	    chartRenderableFailure maps 422 to reason UnservedKind with a FIXED message, "install the
+//	    missing CRD and this resolves without further action", and does not include the body. A
+//	    schema violation answered 422 would tell the author to install a CRD and drop helm's
+//	    explanation — the burying this issue is about, done by the consumer instead.
+//	  - The two are different in time. 422 means "not satisfiable AS THINGS STAND" and must not be
+//	    latched, because a CRD can arrive (see below). A schema violation is a property of the chart
+//	    and the values the caller sent: nothing on the cluster changes it, and only the author can.
+//	    That is a request the caller must change, which is what 400 says.
+//	The message is err.Error() unchanged: the sentinel's sentence, then plumbing's description with
+//	helm's own wording after "helm said:". It is the Status `message`, at the top of the body.
+//
+// 422 — the chart references a kind this cluster does not serve (#265).
+//
+//	A blueprint disagreeing with the cluster, not a fault in this service. 422 rather than 400: the
+//	request is well-formed and unprocessable right now. IT MEANS "NOT SATISFIABLE NOW", NOT "NOT
+//	SATISFIABLE", and a consumer must not latch on it. The detector cannot distinguish a kind that
+//	will never exist from one whose CRD was created moments ago and has not reached this process's
+//	RESTMapper — plumbing's own doc says so. What makes the classification sound HERE is the CRD
+//	informer: this client is built WithCRDInformer, which Resets the mapper on CRD arrival, so a
+//	miss that survives it is evidence of absence rather than of staleness.
+//
+// 500 — everything else: fetching the chart, building the client, reaching the API server.
+//
+// THE SCHEMA CHECK COMES FIRST, deliberately. The two classes are disjoint in production — plumbing
+// returns ErrValuesSchema before the install resolves any kind — but IsRESTMappingMiss falls back to
+// substring matching on the whole message, and helm's schema message quotes the caller's property
+// names: a values key spelled "ensure CRDs are installed first" makes both fire (measured in
+// TestHandler_SchemaViolationWhoseTextLooksLikeAnUnservedKindIs400Not422). A typed sentinel is the
+// stronger evidence, so it decides.
+func installFailureStatus(err error) int {
+	switch {
+	case errors.Is(err, helmconfig.ErrValuesSchema):
+		return http.StatusBadRequest
+	case helmv3.IsRESTMappingMiss(err):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// krateoGlobalNote is appended to every values-schema 400, because only this service knows it.
+//
+// plumbing's description of a rejected top-level `global` says "helm does NOT inject `global` at the
+// top level, so either drop `global` from the values or remove `additionalProperties: false`". That
+// is true of helm and false of a Krateo render: InjectGlobalValues, called above on the very values
+// this install validates, ASSIGNS values["global"] (maps.SetNestedField replaces the key outright),
+// and the cdc's real install does the same. So `global` is present on every composition whatever its
+// spec says, and "drop it from the values" sends the author looking for a key their spec does not
+// have — the misdirection #325 asks the 400 to prevent.
+//
+// UNCONDITIONAL, not gated on the message mentioning `global`. Gating it would mean matching helm's
+// text, which this classification exists to avoid; and the note is a true statement about every
+// render this service performs, so it is never wrong, only sometimes not the cause.
+const krateoGlobalNote = "Note: Krateo adds a top-level `global` key (compositionName, compositionId " +
+	"and other composition metadata) to every composition's values before rendering, replacing any " +
+	"`global` in the composition's spec, so it is always present and cannot be dropped from the " +
+	"values. A top-level values.schema.json with `additionalProperties: false` must declare `global` " +
+	"under `properties`, or drop the prohibition."
+
+// withKrateoGlobalNote keeps err in the chain, so errors.Is still finds the sentinel, and keeps its
+// text first and unchanged; the note follows.
+func withKrateoGlobalNote(err error) error {
+	return fmt.Errorf("%w. %s", err, krateoGlobalNote)
 }
