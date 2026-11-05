@@ -1,0 +1,65 @@
+name: integration-cdc
+
+# The composition-dynamic-controller's `integration`-tagged suites (a real kind cluster, real helm,
+# the real handler) were run by NO job. release-pullrequest.yaml said so in a comment, and the
+# result was the predictable one: three SelfHeal assessments failed on main, because the fixture
+# CRDs had fallen behind the status fields the cdc writes and the apiserver pruned them. Nobody saw.
+# The same suite is where the #322 adoption end-to-end test lives, and it found a real defect
+# (plumbing maps.NestedValue, fixed in v1.26.0) the first time it ran.
+#
+# Its own workflow, not a job in release-pullrequest.yaml, because PATH filters only exist at
+# workflow level. When no listed path changes, this workflow does not run and shows no check at
+# all. That is deliberate: an ABSENT check cannot be mistaken for a passing one, which a
+# skip-step inside an always-running job would be (the trap release-pullrequest.yaml's
+# `branches:` comment describes). Decided by Diego on 2026-11-05: per PR, path-filtered.
+on:
+  pull_request:
+    paths:
+      - "go/composition-dynamic-controller/**"
+      # The baseline status schema decides what the fixture CRDs must declare.
+      - "go/core-provider/internal/tools/crd/generation/statics/**"
+      - ".github/workflows/integration-cdc.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "go/composition-dynamic-controller/**"
+      - "go/core-provider/internal/tools/crd/generation/statics/**"
+      - ".github/workflows/integration-cdc.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: integration (kind + helm, cdc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/composition-dynamic-controller/go.mod
+      # The suites create and destroy their OWN clusters through e2e-framework's kind provider,
+      # which shells out to the `kind` binary. So install kind, but do not create a cluster here.
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run the integration suites
+        working-directory: go/composition-dynamic-controller
+        # -p 1: the two suites boot separate clusters ("kind" and "krateo"); serialising them keeps
+        # one cluster on the runner at a time. -count=1: a cached pass is not a run.
+        run: |
+          set -euo pipefail
+          go test -tags integration -count=1 -p 1 -timeout 35m -v \
+            ./internal/composition/ ./internal/tools/archive/ 2>&1 | tee /tmp/integration.log
+          # Denominator, BY NAME. The `integration` tag also compiles each package's ~200 unit tests,
+          # so a count of passing tests is satisfied without either cluster suite running: a build
+          # constraint that dropped them would still print hundreds of PASS lines and exit 0.
+          for suite in TestController TestGetter; do
+            if ! grep -q -- "^--- PASS: ${suite} " /tmp/integration.log; then
+              echo "::error::the kind suite ${suite} did not run and pass"
+              exit 1
+            fi
+          done
+          echo "kind suites passed: TestController, TestGetter"

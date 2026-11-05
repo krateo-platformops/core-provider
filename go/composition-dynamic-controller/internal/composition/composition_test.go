@@ -4,9 +4,14 @@
 package composition
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +42,8 @@ import (
 	mapper "github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
 	"github.com/krateo-platformops/plumbing/e2e"
 	xenv "github.com/krateo-platformops/plumbing/env"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
+	helmv3 "github.com/krateo-platformops/plumbing/helm/v3"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -699,7 +706,22 @@ func TestController(t *testing.T) {
 			t.Errorf("expected revision to bump exactly once (%d -> %d), got %d", revBefore, revBefore+1, revAfterHeal)
 		}
 
-		// Subsequent steady-state reconciles (via Observe) must NOT bump the revision again.
+		// THE RUNTIME'S NEXT STEP, which this assessment used to skip. The healing pass wrote a NEW
+		// revision, so the recorded inventory is now stamped with the PREVIOUS release's digest, and
+		// Observe correctly keeps reporting drift ("the recorded set was decoded from release digest
+		// X, the current release is Y", #273) until Update re-records it. The runtime dispatches that
+		// Update on drift; calling only Observe in a loop models a runtime that does not exist, and
+		// that loop failed for exactly that reason once the fixture CRDs stopped pruning
+		// managedDigest. Update must re-record WITHOUT writing another revision (#175).
+		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err := handler.Update(ctx, u); err != nil {
+			t.Fatalf("[selfheal-delete] the Update the runtime dispatches after the healing pass: %v", err)
+		}
+		if r := latestRevision(); r != revAfterHeal {
+			t.Errorf("[selfheal-delete] re-recording the inventory wrote a revision (%d -> %d); #175 is back", revAfterHeal, r)
+		}
+
+		// Subsequent steady-state reconciles (via Observe) must NOT report drift or bump the revision.
 		for i := 0; i < 3; i++ {
 			u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
 			obs, err := handler.Observe(ctx, u)
@@ -1003,6 +1025,270 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Adoption: a recreated CR with no release-name label upgrades its existing release (#322)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// #322 END TO END, against real helm releases. The unit decision tables
+		// (releaseadopt_test.go) prove which release pickAdoptableRelease chooses; nothing proved
+		// the whole path: a CR recreated with a NEW UID and NO release-name label, beside the release
+		// its predecessor installed. Before #322 the minted name (from the new UID) matched no
+		// release, Observe reported ResourceExists=false, and the runtime installed a SECOND release
+		// beside the first. #329 then showed that choosing right is not enough: the reconcile must
+		// also COMPLETE. So this asserts the outcome: one release, not a second one, and a converged
+		// second pass.
+		//
+		// The label is stripped on purpose. resolveReleaseName returns at its first branch when the
+		// label exists, so a recreate that kept it would never reach adoption. That is why a live
+		// cluster whose CR still carries the label (a0-openstack-d3) could not verify this.
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Fatalf("decoding composition manifest: %v", err)
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+
+		u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting composition: %v", err)
+		}
+		original := compositionMeta.GetReleaseName(u)
+		if original == "" {
+			t.Fatalf("setup: the composition carries no release-name label, so there is no release to adopt")
+		}
+		oldUID := u.GetUID()
+
+		clientset := kubernetes.NewForConfigOrDie(cfg.Client().RESTConfig())
+		// release name -> latest revision, for every helm release in the namespace.
+		releases := func() map[string]int {
+			t.Helper()
+			list, err := clientset.CoreV1().Secrets(obj.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: "owner=helm"})
+			if err != nil {
+				t.Fatalf("listing helm release secrets: %v", err)
+			}
+			out := map[string]int{}
+			for _, sec := range list.Items {
+				if n, err := strconv.Atoi(sec.Labels["version"]); err == nil && n > out[sec.Labels["name"]] {
+					out[sec.Labels["name"]] = n
+				}
+			}
+			return out
+		}
+		before := releases()
+		if before[original] == 0 {
+			t.Fatalf("setup: release %q has no revision in %s (releases: %v)", original, obj.GetNamespace(), before)
+		}
+
+		// Orphan the release, the precondition the field produced: the CR goes, its release stays.
+		if _, err := cli.Patch(ctx, u.GetName(), types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatalf("dropping finalizers: %v", err)
+		}
+		if err := cli.Delete(ctx, u.GetName(), metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("deleting the composition: %v", err)
+		}
+		gone := false
+		for i := 0; i < 50 && !gone; i++ {
+			if _, err := cli.Get(ctx, u.GetName(), metav1.GetOptions{}); errors.IsNotFound(err) {
+				gone = true
+			} else {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		if !gone {
+			t.Fatalf("setup: the composition was not deleted")
+		}
+		// CONTROL: the release must have survived, or there is nothing to adopt and the assertions
+		// below pass against a cluster with no release at all.
+		if got := releases()[original]; got != before[original] {
+			t.Fatalf("setup: deleting the CR changed release %q (revision %d -> %d)", original, before[original], got)
+		}
+
+		recreated := obj.DeepCopy()
+		labels := recreated.GetLabels()
+		delete(labels, compositionMeta.ReleaseNameLabel)
+		recreated.SetLabels(labels)
+		created, err := cli.Create(ctx, recreated, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("recreating the composition: %v", err)
+		}
+		// PRECONDITIONS that make the adoption path the one under test.
+		if created.GetUID() == oldUID {
+			t.Fatalf("precondition: the recreated CR kept UID %s", oldUID)
+		}
+		if got := compositionMeta.GetReleaseName(created); got != "" {
+			t.Fatalf("precondition: the recreated CR carries release-name %q, so resolveReleaseName returns before adoption", got)
+		}
+		minted := compositionMeta.CalculateReleaseName(created, true)
+		if minted == original {
+			t.Fatalf("precondition: the name minted from the new UID equals %q, so adoption is not needed", original)
+		}
+
+		obs, err := handler.Observe(ctx, created)
+		if err != nil {
+			t.Fatalf("Observe on the recreated CR failed: %v. #329 was exactly this: the right release chosen, the reconcile never completing", err)
+		}
+		if !obs.ResourceExists {
+			t.Fatalf("Observe reported ResourceExists=false: the runtime would install a SECOND release %q beside %q (#322)", minted, original)
+		}
+		cur, err := cli.Get(ctx, created.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting the recreated composition: %v", err)
+		}
+		if _, err := handleObservation(t, ctx, handler, obs, cur); err != nil {
+			t.Fatalf("handling the observation: %v", err)
+		}
+
+		after := releases()
+		if _, ok := after[minted]; ok {
+			t.Fatalf("a SECOND release %q was installed beside %q: %v", minted, original, after)
+		}
+		if len(after) != len(before) {
+			t.Errorf("the namespace's release set changed: before %v, after %v", before, after)
+		}
+		if after[original] < before[original] {
+			t.Errorf("release %q went backwards: revision %d -> %d", original, before[original], after[original])
+		}
+
+		// CONVERGED: a second pass must report the resource present and up to date.
+		cur, err = cli.Get(ctx, created.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting the recreated composition: %v", err)
+		}
+		obs2, err := handler.Observe(ctx, cur)
+		if err != nil || !obs2.ResourceExists || !obs2.ResourceUpToDate {
+			t.Errorf("the adopted composition did not converge: observation %+v, err %v", obs2, err)
+		}
+		t.Logf("adopted %q (the minted name would have been %q); releases before %v, after %v; label after: %q",
+			original, minted, before, after, compositionMeta.GetReleaseName(cur))
+
+		return context.WithValue(ctx, adoptedReleaseKey{}, original)
+	}).Assess("Adoption: two releases claiming the composition (one failed, one deployed) is refused, never a third install (the d3 shape)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// a0-openstack-d3's measured state, reproduced: TWO releases recorded as belonging to one
+		// composition, one FAILED and one deployed. pickAdoptableRelease must refuse
+		// (ErrAmbiguousRelease) rather than choose either, and must never mint a THIRD release beside
+		// them. The unit table proves the decision; this proves the whole path against real helm
+		// storage, including that a FAILED release counts as a claimant (adoptableStates lists it).
+		adopted, _ := ctx.Value(adoptedReleaseKey{}).(string)
+		if adopted == "" {
+			t.Fatal("setup: the adoption step did not hand over a release name")
+		}
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Fatalf("decoding composition manifest: %v", err)
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+		clientset := kubernetes.NewForConfigOrDie(cfg.Client().RESTConfig())
+		releases := func() map[string]string { // release name -> status of its latest revision
+			t.Helper()
+			list, err := clientset.CoreV1().Secrets(obj.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: "owner=helm"})
+			if err != nil {
+				t.Fatalf("listing helm release secrets: %v", err)
+			}
+			latest := map[string]int{}
+			out := map[string]string{}
+			for _, sec := range list.Items {
+				n, _ := strconv.Atoi(sec.Labels["version"])
+				if n >= latest[sec.Labels["name"]] {
+					latest[sec.Labels["name"]] = n
+					out[sec.Labels["name"]] = sec.Labels["status"]
+				}
+			}
+			return out
+		}
+		orphanAndRecreate := func(label string) *unstructured.Unstructured {
+			t.Helper()
+			if _, err := cli.Patch(ctx, obj.GetName(), types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+				t.Fatalf("dropping finalizers: %v", err)
+			}
+			if err := cli.Delete(ctx, obj.GetName(), metav1.DeleteOptions{}); err != nil {
+				t.Fatalf("deleting the composition: %v", err)
+			}
+			for i := 0; i < 50; i++ {
+				if _, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{}); errors.IsNotFound(err) {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			re := obj.DeepCopy()
+			labels := re.GetLabels()
+			delete(labels, compositionMeta.ReleaseNameLabel)
+			if label != "" {
+				labels[compositionMeta.ReleaseNameLabel] = label
+			}
+			re.SetLabels(labels)
+			created, err := cli.Create(ctx, re, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("recreating the composition: %v", err)
+			}
+			return created
+		}
+
+		// 1. A SECOND release for the same composition, installed by the real Create path: the CR
+		//    is recreated with its label naming a release that does not exist yet.
+		const second = "focus-2"
+		cr := orphanAndRecreate(second)
+		obs, err := handler.Observe(ctx, cr)
+		if err != nil {
+			t.Fatalf("observe before installing %q: %v", second, err)
+		}
+		cur, _ := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if _, err := handleObservation(t, ctx, handler, obs, cur); err != nil {
+			t.Fatalf("installing %q: %v", second, err)
+		}
+		if st := releases()[second]; st != "deployed" {
+			t.Fatalf("setup: %q is %q, want deployed (releases: %v)", second, st, releases())
+		}
+
+		// 2. Make it FAILED in helm's own storage: the latest revision's payload and its label.
+		markLatestRevisionFailed(t, ctx, clientset, obj.GetNamespace(), second)
+		got := releases()
+		if got[second] != "failed" || got[adopted] != "deployed" {
+			t.Fatalf("setup: want %s=deployed and %s=failed, got %v", adopted, second, got)
+		}
+		before := len(got)
+
+		// 3. Recreate with NO label: two releases claim it.
+		recreated := orphanAndRecreate("")
+		minted := compositionMeta.CalculateReleaseName(recreated, true)
+		_, err = handler.Observe(ctx, recreated)
+		if err == nil {
+			t.Fatalf("Observe chose a release although %q (deployed) and %q (failed) both claim the composition", adopted, second)
+		}
+		if !stderrors.Is(err, ErrAmbiguousRelease) {
+			t.Fatalf("Observe failed, but not with ErrAmbiguousRelease: %v", err)
+		}
+		for _, name := range []string{adopted, second} {
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("the refusal does not name %q, so an operator cannot see which releases collide: %v", name, err)
+			}
+		}
+		after := releases()
+		if _, ok := after[minted]; ok || len(after) != before {
+			t.Fatalf("a release was installed during the refusal (minted %q): before %d releases, after %v", minted, before, after)
+		}
+		t.Logf("refused as ambiguous: %v; releases unchanged: %v", err, after)
+
+		// Cleanup for the Delete step: remove the second release and point the CR at the first.
+		hc, err := helmv3.NewClient(cfg.Client().RESTConfig(), helmv3.WithNamespace(obj.GetNamespace()))
+		if err != nil {
+			t.Fatalf("helm client: %v", err)
+		}
+		if err := hc.Uninstall(ctx, second, &helmconfig.UninstallConfig{IgnoreNotFound: true}); err != nil {
+			t.Fatalf("uninstalling %q: %v", second, err)
+		}
+		patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, compositionMeta.ReleaseNameLabel, adopted)
+		if _, err := cli.Patch(ctx, obj.GetName(), types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+			t.Fatalf("restoring the release-name label: %v", err)
+		}
+		return ctx
 	}).Assess("Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		dy := dynamic.NewForConfigOrDie(c)
 		var obj unstructured.Unstructured
@@ -1022,6 +1308,17 @@ func TestController(t *testing.T) {
 		if err != nil {
 			t.Error("Getting composition.", "error", err)
 			return ctx
+		}
+		// The release the deletion must remove. An ADOPTED composition need not carry the label:
+		// Observe is a pure read, and nothing persists the adopted name on a pass with no drift. So
+		// the adoption step hands the name over. Without that, an empty label made the check below
+		// select "name=" and pass against a release that was never removed.
+		expectedRelease := compositionMeta.GetReleaseName(u)
+		if adopted, ok := ctx.Value(adoptedReleaseKey{}).(string); ok && expectedRelease == "" {
+			expectedRelease = adopted
+		}
+		if expectedRelease == "" {
+			t.Fatal("no release name to check the deletion against")
 		}
 
 		observation, err := handler.Observe(ctx, u)
@@ -1095,7 +1392,7 @@ func TestController(t *testing.T) {
 			Version:  "v1",
 			Resource: "secrets",
 		}).Namespace(obj.GetNamespace()).List(ctx, metav1.ListOptions{
-			LabelSelector: "name=" + compositionMeta.GetReleaseName(u) + ",owner=helm",
+			LabelSelector: "name=" + expectedRelease + ",owner=helm",
 		})
 		if tmp != nil && len(tmp.Items) > 0 {
 			t.Error("Helm release secret still exists after deletion.")
@@ -1117,6 +1414,67 @@ func TestController(t *testing.T) {
 
 	testenv.Test(t, f)
 }
+
+// markLatestRevisionFailed sets a release's latest revision to FAILED in helm's own storage: the
+// "status" label on the secret and info.status in the payload. The payload is decoded the way helm's
+// storage driver encodes it: base64, then gzip if the magic header is present, then JSON.
+func markLatestRevisionFailed(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns, name string) {
+	t.Helper()
+	list, err := cs.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{LabelSelector: "owner=helm,name=" + name})
+	if err != nil || len(list.Items) == 0 {
+		t.Fatalf("finding release %q: %v (%d secrets)", name, err, len(list.Items))
+	}
+	latest := list.Items[0]
+	for _, sec := range list.Items {
+		a, _ := strconv.Atoi(sec.Labels["version"])
+		b, _ := strconv.Atoi(latest.Labels["version"])
+		if a > b {
+			latest = sec
+		}
+	}
+	raw, err := base64.StdEncoding.DecodeString(string(latest.Data["release"]))
+	if err != nil {
+		t.Fatalf("decoding release payload: %v", err)
+	}
+	gzipped := len(raw) > 2 && raw[0] == 0x1f && raw[1] == 0x8b
+	if gzipped {
+		zr, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("gunzip: %v", err)
+		}
+		if raw, err = io.ReadAll(zr); err != nil {
+			t.Fatalf("gunzip: %v", err)
+		}
+	}
+	var rel map[string]any
+	if err := json.Unmarshal(raw, &rel); err != nil {
+		t.Fatalf("parsing release: %v", err)
+	}
+	info, _ := rel["info"].(map[string]any)
+	if info == nil {
+		t.Fatalf("release %q has no info", name)
+	}
+	info["status"] = "failed"
+	out, err := json.Marshal(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gzipped {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write(out)
+		_ = zw.Close()
+		out = buf.Bytes()
+	}
+	latest.Data["release"] = []byte(base64.StdEncoding.EncodeToString(out))
+	latest.Labels["status"] = "failed"
+	if _, err := cs.CoreV1().Secrets(ns).Update(ctx, &latest, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("writing release %q back: %v", name, err)
+	}
+}
+
+// adoptedReleaseKey carries the adopted release name from the adoption step to the deletion step.
+type adoptedReleaseKey struct{}
 
 func handleObservation(t *testing.T, ctx context.Context, handler controller.ExternalClient, observation controller.ExternalObservation, u *unstructured.Unstructured) (context.Context, error) {
 	var err error
