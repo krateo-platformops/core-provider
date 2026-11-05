@@ -37,6 +37,8 @@ import (
 	"github.com/krateo-platformops/plumbing/ptr"
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
+
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/saturation"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/workqueue"
 	"k8s.io/apimachinery/pkg/labels"
@@ -418,7 +420,7 @@ func main() {
 		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
 		builder.WithTelemetryMetrics(telemetryMetrics),
 	}
-	gov, err := newSaturationGovernor(*saturationEnabled, *cpuPressureThreshold, *workers, log)
+	gov, err := saturation.NewGovernor(*saturationEnabled, *cpuPressureThreshold, *workers, log)
 	if err != nil {
 		log.Error(err, "Invalid CPU-saturation configuration")
 		os.Exit(1)

@@ -1,4 +1,4 @@
-package main
+package saturation
 
 import (
 	"testing"
@@ -8,16 +8,16 @@ import (
 )
 
 // #66. The cdc's CPU-saturation opt-in.
-func TestNewSaturationGovernor(t *testing.T) {
+func TestNewGovernor(t *testing.T) {
 	// OFF (the default): no governor at all, so the controller is exactly as before. A governor
 	// without saturation would gate nothing for the cdc, which names no rate-limit key.
-	g, err := newSaturationGovernor(false, 0, 4, logging.NewNopLogger())
+	g, err := NewGovernor(false, 0, 4, logging.NewNopLogger())
 	if err != nil || g != nil {
 		t.Fatalf("off must return no governor and no error, got %v, %v", g, err)
 	}
 
 	// ON: a governor the controller's Run will start, with local capacity starting at 1.
-	g, err = newSaturationGovernor(true, 0, 4, logging.NewNopLogger())
+	g, err = NewGovernor(true, 0, 4, logging.NewNopLogger())
 	if err != nil || g == nil {
 		t.Fatalf("on must return a governor, got %v, %v", g, err)
 	}
@@ -37,7 +37,7 @@ func TestNewSaturationGovernor(t *testing.T) {
 	}
 
 	// An out-of-range threshold fails at startup instead of capping silently.
-	if _, err := newSaturationGovernor(true, 150, 4, logging.NewNopLogger()); err == nil {
+	if _, err := NewGovernor(true, 150, 4, logging.NewNopLogger()); err == nil {
 		t.Error("a threshold of 150 must be an error")
 	}
 }
