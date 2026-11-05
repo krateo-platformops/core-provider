@@ -524,7 +524,7 @@ func TestApplyRBAC(t *testing.T) {
 			},
 		}
 
-		err := installer.ApplyRBAC(rbac)
+		_, err := installer.ApplyRBAC(rbac)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
@@ -611,7 +611,7 @@ func TestApplyRBAC_IncrementalRules(t *testing.T) {
 			},
 		}
 
-		err := installer.ApplyRBAC(initialRBAC)
+		_, err := installer.ApplyRBAC(initialRBAC)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
@@ -683,7 +683,7 @@ func TestApplyRBAC_IncrementalRules(t *testing.T) {
 			},
 		}
 
-		err = installer.ApplyRBAC(newRBAC)
+		_, err = installer.ApplyRBAC(newRBAC)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
@@ -992,7 +992,7 @@ func TestUninstallRBAC(t *testing.T) {
 		}
 
 		// Apply the RBAC first
-		err := installer.ApplyRBAC(rbac)
+		_, err := installer.ApplyRBAC(rbac)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
