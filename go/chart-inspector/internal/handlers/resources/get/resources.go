@@ -259,7 +259,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				slog.Any("err", err),
 			)
 		}
-		response.Encode(w, response.New(code, err))
+		st := response.New(code, err)
+		if code == http.StatusBadRequest {
+			st.Reason = ReasonValuesSchemaViolation
+		}
+		response.Encode(w, st)
 		return
 	}
 
@@ -359,6 +363,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.InfoContext(ctx, "Successfully handled request to get resources")
 }
+
+// ReasonValuesSchemaViolation marks the values-schema 400, so a caller can tell it from the other
+// 400s this handler answers (missing query parameters, a missing releaseName) by what the response
+// SAYS rather than by ruling the others out. plumbing documents Status.reason as clarifying the HTTP
+// code without overriding it, which is exactly this use.
+//
+// A CONTRACT WITH THE CDC. go/composition-dynamic-controller/internal/chartinspector reads this exact
+// value; the two modules cannot share a declaration, so each pins the literal in a test.
+const ReasonValuesSchemaViolation response.StatusReason = "ValuesSchemaViolation"
 
 // installFailureStatus maps an Install failure to the HTTP status that tells the caller WHOSE fault
 // it is. A 5xx is a claim about THIS SERVER: it is the one class a caller is entitled to read as

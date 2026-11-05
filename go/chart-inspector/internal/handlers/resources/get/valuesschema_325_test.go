@@ -196,8 +196,12 @@ func require400WithHelmsMessage(t *testing.T, rec *httptest.ResponseRecorder, he
 			"chart-inspector, and sends the author to its logs instead of their chart (#325). body: %s",
 			rec.Code, rec.Code, rec.Body.String())
 	}
-	if b.Code != http.StatusBadRequest || b.Reason != "BadRequest" {
-		t.Errorf("body code/reason = %d/%q, want 400/BadRequest", b.Code, b.Reason)
+	// The literal, copied rather than referencing the const: it is a contract with the cdc
+	// (internal/chartinspector there pins the same string), and a test that read the const would
+	// pass a rename that breaks the other side.
+	if b.Code != http.StatusBadRequest || b.Reason != "ValuesSchemaViolation" {
+		t.Errorf("body code/reason = %d/%q, want 400/ValuesSchemaViolation. Without the reason a "+
+			"caller can tell this 400 from the parameter 400s only by ruling them out", b.Code, b.Reason)
 	}
 	if !strings.Contains(b.Message, helmSays) {
 		t.Errorf("the message does not carry helm's explanation %q; the status is right and the one "+
@@ -339,5 +343,24 @@ func TestInstallFailureStatus(t *testing.T) {
 				t.Errorf("installFailureStatus(%q) = %d, want %d", c.err, got, c.want)
 			}
 		})
+	}
+}
+
+// CONTROL for the reason: a 400 that is NOT a values-schema violation must not carry it. Without
+// this, the reason assertion above passes against a handler that stamps every 400.
+func TestHandler_ParameterBadRequestDoesNotClaimASchemaViolation(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/resources?"+
+		"compositionName=fw&compositionNamespace=krateo-system"+
+		"&compositionDefinitionName=fireworksapp&compositionDefinitionNamespace=krateo-system"+
+		"&compositionVersion=v1-0-0&compositionResource=fireworks", nil) // no releaseName
+	rec := httptest.NewRecorder()
+	wiringFixture(t, unservedKindHelmClient{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("setup: status = %d, want the releaseName 400. body=%s", rec.Code, rec.Body.String())
+	}
+	if b := decodeStatus(t, rec); b.Reason == "ValuesSchemaViolation" {
+		t.Errorf("a missing-parameter 400 carries reason ValuesSchemaViolation; the cdc would tell the " +
+			"chart author their values are wrong when the cdc sent an incomplete request")
 	}
 }
