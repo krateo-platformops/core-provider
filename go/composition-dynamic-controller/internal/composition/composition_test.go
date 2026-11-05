@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,6 +77,20 @@ var (
 	testenv     env.Environment
 	clusterName string
 )
+
+// chartInspectorExtra holds resources an assessment adds to the chart-inspector mock's answer for
+// as long as it needs them (#357's terminating-namespace case). Guarded because the mock serves from
+// the httptest goroutine.
+var (
+	chartInspectorExtraMu sync.Mutex
+	chartInspectorExtra   []map[string]string
+)
+
+func setChartInspectorExtra(rs []map[string]string) {
+	chartInspectorExtraMu.Lock()
+	defer chartInspectorExtraMu.Unlock()
+	chartInspectorExtra = rs
+}
 
 const (
 	testdataPath = "../../testdata"
@@ -183,6 +198,9 @@ func TestController(t *testing.T) {
 						"namespace": "demo-system",
 					},
 				}
+				chartInspectorExtraMu.Lock()
+				resources = append(resources, chartInspectorExtra...)
+				chartInspectorExtraMu.Unlock()
 				enc := json.NewEncoder(w)
 				w.Header().Set("Content-Type", "application/json")
 				_ = enc.Encode(resources)
@@ -1358,6 +1376,125 @@ func TestController(t *testing.T) {
 		patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, compositionMeta.ReleaseNameLabel, adopted)
 		if _, err := cli.Patch(ctx, obj.GetName(), types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 			t.Fatalf("restoring the release-name label: %v", err)
+		}
+		return ctx
+	}).Assess("RBAC into a terminating namespace is skipped and reported, not a failed reconcile (#357)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// The 057 shape on a real apiserver: the composition's derived RBAC includes a Role in a
+		// namespace that is TERMINATING. The NamespaceLifecycle admission refuses to create anything
+		// there with a NamespaceTerminating cause; the reconcile must still succeed and say so.
+		const termNS = "rbac-terminating-357"
+		const holdFinalizer = "krateo.io/test-hold"
+		adminCfg := cfg.Client().RESTConfig()
+		cs := kubernetes.NewForConfigOrDie(adminCfg)
+		adminDyn := dynamic.NewForConfigOrDie(adminCfg)
+
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Fatal("Decoding composition manifests.", "error", err)
+		}
+		gvr := schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  obj.GetLabels()["krateo.io/composition-version"],
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}
+		cli := dynamic.NewForConfigOrDie(c).Resource(gvr).Namespace(obj.GetNamespace())
+		condition := func(typ string) (status, reason, message string) {
+			u, err := adminDyn.Resource(gvr).Namespace(obj.GetNamespace()).Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("reading the composition: %v", err)
+			}
+			conds, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+			for _, c := range conds {
+				m, _ := c.(map[string]any)
+				if m["type"] == typ {
+					return fmt.Sprint(m["status"]), fmt.Sprint(m["reason"]), fmt.Sprint(m["message"])
+				}
+			}
+			return "", "", ""
+		}
+		observe := func() error {
+			u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("getting composition: %v", err)
+			}
+			_, err = handler.Observe(ctx, u)
+			return err
+		}
+		waitFor := func(what string, cond func() bool) {
+			deadline := time.Now().Add(90 * time.Second)
+			for time.Now().Before(deadline) {
+				if cond() {
+					return
+				}
+				time.Sleep(2 * time.Second)
+			}
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		releaseHold := func() {
+			cm, err := cs.CoreV1().ConfigMaps(termNS).Get(ctx, "held", metav1.GetOptions{})
+			if err == nil && len(cm.Finalizers) > 0 {
+				cm.Finalizers = nil
+				_, _ = cs.CoreV1().ConfigMaps(termNS).Update(ctx, cm, metav1.UpdateOptions{})
+			}
+		}
+		t.Cleanup(func() { setChartInspectorExtra(nil); releaseHold() })
+
+		// A namespace held in Terminating by a finalizer on an object inside it.
+		if _, err := cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: termNS}}, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("creating %s: %v", termNS, err)
+		}
+		if _, err := cs.CoreV1().ConfigMaps(termNS).Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: "held", Finalizers: []string{holdFinalizer}}}, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("creating the holding ConfigMap: %v", err)
+		}
+		if err := cs.CoreV1().Namespaces().Delete(ctx, termNS, metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("deleting %s: %v", termNS, err)
+		}
+		waitFor(termNS+" to be Terminating", func() bool {
+			ns, err := cs.CoreV1().Namespaces().Get(ctx, termNS, metav1.GetOptions{})
+			return err == nil && ns.Status.Phase == corev1.NamespaceTerminating
+		})
+
+		// The chart now renders an object into the terminating namespace, so the derived RBAC has a
+		// Role there.
+		setChartInspectorExtra([]map[string]string{{
+			"group": "", "version": "v1", "resource": "configmaps", "name": "held", "namespace": termNS,
+		}})
+
+		if err := observe(); err != nil {
+			t.Fatalf("a terminating RBAC target namespace failed the reconcile (#357): %v", err)
+		}
+		st, reason, msg := condition("RBACComplete")
+		if st != "False" || reason != "NamespaceTerminating" || !strings.Contains(msg, termNS) {
+			t.Errorf("RBACComplete = %s/%s %q, want False/NamespaceTerminating naming %s", st, reason, msg, termNS)
+		}
+		if st, reason, _ := condition("Ready"); st != "True" {
+			t.Errorf("the skip moved Ready to %s/%s; RBACComplete is informational and must not", st, reason)
+		}
+
+		// THE OPEN CASE, characterized rather than fixed (#366): once the namespace is GONE, creating
+		// the Role there is an ordinary failure. This assertion records today's behaviour on purpose.
+		releaseHold()
+		waitFor(termNS+" to be gone", func() bool {
+			_, err := cs.CoreV1().Namespaces().Get(ctx, termNS, metav1.GetOptions{})
+			return errors.IsNotFound(err)
+		})
+		if err := observe(); err == nil {
+			t.Errorf("the OPEN case changed: RBAC into a namespace that no longer exists no longer fails the " +
+				"reconcile. If that was fixed on purpose, update this assertion and #366's note")
+		}
+		if st, reason, _ := condition("RBACComplete"); st != "False" || reason != "ApplyFailed" {
+			t.Errorf("RBACComplete = %s/%s after the namespace is gone, want False/ApplyFailed (the open case)", st, reason)
+		}
+
+		// Recovery, so the assessments after this one start from a healthy composition: the chart no
+		// longer targets the namespace, and the next pass applies everything again.
+		setChartInspectorExtra(nil)
+		if err := observe(); err != nil {
+			t.Fatalf("the composition did not recover once the chart stopped targeting the namespace: %v", err)
+		}
+		if st, reason, _ := condition("RBACComplete"); st != "True" || reason != "Applied" {
+			t.Errorf("RBACComplete = %s/%s after recovery, want True/Applied", st, reason)
 		}
 		return ctx
 	}).Assess("Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
