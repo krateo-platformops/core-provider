@@ -95,6 +95,10 @@ spec:
             {{ "{{" }}- end }}
             {{- end }}
           ports:
+            # /healthz and /readyz (#333); the probes below reach it by this name.
+            - name: health
+              containerPort: {{ .Values.cdc.healthProbe.port }}
+              protocol: TCP
             {{- if .Values.cdc.metrics.enabled }}
             - name: metrics
               containerPort: {{ .Values.cdc.metrics.port }}
