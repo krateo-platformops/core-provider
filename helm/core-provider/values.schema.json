@@ -804,6 +804,21 @@
         }
       }
     },
+    "healthProbe": {
+      "type": "object",
+      "title": "Health probe server",
+      "description": "The port core-provider serves /healthz (liveness: the probe server answers) and /readyz (readiness: the manager's informers have completed their first successful list) on. livenessProbe/readinessProbe point at it by the container port name \"health\".",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "title": "Health probe port",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8081
+        }
+      }
+    },
     "livenessProbe": {
       "type": "object",
       "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",

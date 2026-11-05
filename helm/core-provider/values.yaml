@@ -88,8 +88,15 @@ resources:
     memory: 512Mi
   limits:
     memory: 2Gi
-# Interim probes: the binary has no /healthz endpoint yet, so we TCP-probe the always-bound metrics
-# port (8080). Replace with httpGet /healthz + /readyz once the binary exposes a health endpoint.
+# Probes (#333). The binary serves /healthz and /readyz on healthProbe.port (rendered into its
+# ConfigMap as CORE_PROVIDER_HEALTH_PROBE_PORT and declared as the container port named "health"):
+#   /readyz  — not ready until the manager's informers have completed their first successful list.
+#              An engine that cannot list what it reconciles is not ready.
+#   /healthz — the probe server answering at all; it never consults readiness, so a failing list
+#              never restarts the engine.
+# These replace the interim TCP probes on the metrics port (8080), which a process that had never
+# listed anything satisfied. Set either probe to null to switch it off ({} does not: helm merges a
+# user map into this default).
 #
 # Tolerances are explicit because the Kubernetes defaults (timeoutSeconds:1, failureThreshold:3)
 # kill HEALTHY pods under CPU contention: a busy-but-alive process misses the 1s probe deadline
@@ -97,16 +104,20 @@ resources:
 # lenient (~120s of consecutive failures (periodSeconds 20 × failureThreshold 6) before a restart — only truly dead processes die);
 # readiness keeps failureThreshold:3 so a genuinely wedged pod is promptly removed from
 # endpoints, but load alone must not flap it (same tolerances as the chart-inspector block below).
+healthProbe:
+  port: 8081
 livenessProbe:
-  tcpSocket:
-    port: 8080
+  httpGet:
+    path: /healthz
+    port: health
   initialDelaySeconds: 15
   periodSeconds: 20
   timeoutSeconds: 5
   failureThreshold: 6
 readinessProbe:
-  tcpSocket:
-    port: 8080
+  httpGet:
+    path: /readyz
+    port: health
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 5

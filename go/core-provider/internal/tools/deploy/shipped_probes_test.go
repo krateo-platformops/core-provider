@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,5 +246,54 @@ func TestShippedControllerDeployment_LivenessCanBeSwitchedOff(t *testing.T) {
 	if controllerContainer(t, dep).LivenessProbe == nil {
 		t.Error("cdc.livenessProbe: {} removed the probe; helm used to merge it into the default, so " +
 			"the values.yaml advice to use null (not {}) needs revisiting")
+	}
+}
+
+// TestShippedCoreProviderDeployment_ProbesTheHealthEndpoints covers core-provider's OWN Deployment,
+// whose probes were interim TCP checks on the always-bound metrics port (8080), satisfied by a
+// process that had never listed anything. They must now be httpGet /readyz and /healthz through the
+// container port named "health", and that port must be the one the binary is told to serve on
+// (CORE_PROVIDER_HEALTH_PROBE_PORT in its envFrom ConfigMap).
+func TestShippedCoreProviderDeployment_ProbesTheHealthEndpoints(t *testing.T) {
+	manifests := renderShippedChart(t, nil)
+	var dep appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(manifests["core-provider/templates/deployment.yaml"]), &dep); err != nil {
+		t.Fatalf("decoding core-provider's Deployment: %v", err)
+	}
+	var cm corev1.ConfigMap
+	if err := yaml.Unmarshal([]byte(manifests["core-provider/templates/configmap.yaml"]), &cm); err != nil {
+		t.Fatalf("decoding core-provider's ConfigMap: %v", err)
+	}
+	c := controllerContainer(t, dep)
+
+	for name, tc := range map[string]struct {
+		probe *corev1.Probe
+		path  string
+	}{
+		"readiness": {c.ReadinessProbe, "/readyz"},
+		"liveness":  {c.LivenessProbe, "/healthz"},
+	} {
+		if tc.probe == nil {
+			t.Fatalf("core-provider has no %s probe", name)
+		}
+		if tc.probe.TCPSocket != nil {
+			t.Errorf("%s probe is still a TCP check, which a blind process passes", name)
+		}
+		if tc.probe.HTTPGet == nil {
+			t.Fatalf("%s probe is not httpGet: %+v", name, tc.probe.ProbeHandler)
+		}
+		if tc.probe.HTTPGet.Path != tc.path {
+			t.Errorf("%s path = %q, want %q", name, tc.probe.HTTPGet.Path, tc.path)
+		}
+		if tc.probe.HTTPGet.Port != intstr.FromString("health") {
+			t.Errorf("%s probe targets port %s, want the named port \"health\"", name, tc.probe.HTTPGet.Port.String())
+		}
+	}
+	port, ok := containerPort(c, "health")
+	if !ok {
+		t.Fatalf("no container port named \"health\" (ports: %+v)", c.Ports)
+	}
+	if got := cm.Data["CORE_PROVIDER_HEALTH_PROBE_PORT"]; got != strconv.Itoa(int(port)) {
+		t.Errorf("core-provider is told to serve probes on %q, but the probes reach port %d", got, port)
 	}
 }
