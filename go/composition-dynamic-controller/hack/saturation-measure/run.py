@@ -98,17 +98,23 @@ def set_arm(limit, threshold):
        "--wait", "--timeout", "5m")
 
     # core-provider applies this on its own reconcile, so wait for what the cdc will actually read.
+    # Ready stays True while a bad value blocks every rollout, so Synced and the ConfigMap are the
+    # evidence: a sweep once ran with the OTEL settings stuck behind an invalid Deployment.
     want = {"COMPOSITION_CONTROLLER_SATURATION_ENABLED": "true" if on else "false",
-            "COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD": threshold if on else "0"}
+            "COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD": threshold if on else "0",
+            "OTEL_ENABLED": "true", "OTEL_EXPORT_INTERVAL": "5s"}
     deadline = time.time() + 300
     while True:
         data = json.loads(kubectl("-n", NS, "get", "cm", ENV_CM, "-o", "json")).get("data", {})
         dep = json.loads(kubectl("-n", NS, "get", "deploy", CDC, "-o", "json"))
         got = dep["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"]
-        if all(data.get(k) == v for k, v in want.items()) and normal_cpu(got) == normal_cpu(limit):
+        conds = json.loads(kubectl("-n", NS, "get", "compositiondefinition", "loadchart", "-o", "json"))["status"]["conditions"]
+        synced = next((c for c in conds if c["type"] == "Synced"), {})
+        if all(data.get(k) == v for k, v in want.items()) and normal_cpu(got) == normal_cpu(limit) and synced.get("status") == "True":
             break
         if time.time() > deadline:
-            sys.exit(f"arm never applied: want {want} limit {limit}, env {[data.get(k) for k in want]} limit {got}")
+            sys.exit(f"arm never applied: want {want} limit {limit}, env {[data.get(k) for k in want]} limit {got}, "
+                     f"Synced {synced.get('status')}: {synced.get('message', '')[:200]}")
         time.sleep(5)
 
     # The env arrives by ConfigMap, which a running pod does not re-read.
@@ -247,6 +253,8 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     periods, throttled = delta(start, end, "periods"), delta(start, end, "throttled")
     pressures = [s["input"] for s in samples if s["input"] is not None]
     locals_ = [s["local"] for s in samples if s["local"] is not None]
+    if threshold != "off" and not locals_:
+        sys.exit(f"an on-arm collected no `local` samples: the collector is not receiving ({limit}, {threshold})")
     live = cdc_pod()
     unhealthy = json.loads(kubectl("-n", NS, "get", "events", "--field-selector",
                                    f"involvedObject.name={name},reason=Unhealthy", "-o", "json"))["items"]
@@ -265,7 +273,7 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
         "deferred": {k: end["deferred"].get(k, 0) - start["deferred"].get(k, 0) for k in end["deferred"]},
         "restarts": sum(c["restartCount"] for c in live["status"].get("containerStatuses", [])),
         "same_pod": live["metadata"]["name"] == name,
-        "unhealthy_events": len(unhealthy),
+        "readiness_failures": len(unhealthy),  # the cdc has a readiness probe and no liveness probe
         "node_cores": round(delta(start, end, "node") / wall, 2) if delta(start, end, "node") is not None else None,
         "samples": len(samples),
     }

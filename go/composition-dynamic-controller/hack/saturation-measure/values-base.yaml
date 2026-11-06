@@ -4,8 +4,6 @@ otel:
   tracing: false
   endpoint: http://otel.otel.svc.cluster.local:4318
 cdc:
-  metrics:
-    enabled: true   # without it the cdc has no probes, and "liveness failures" would be a vacuous 0
   env:
     HOME: /tmp
     COMPOSITION_CONTROLLER_WORKERS: "16"
