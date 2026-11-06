@@ -92,6 +92,10 @@ capacity" in the message, except during the startup ramp, which writes nothing. 
 `cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota. The
 threshold is being measured on the cdc at sub-core and 1-core limits before it is relied on.
 
+With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity`, `.saturation.input` and
+`.deferred` show what the rule is doing (unstructured-runtime v1.11.0). See the
+[metrics reference](../go/composition-dynamic-controller/telemetry/metrics-reference.md).
+
 ## The env ConfigMap contract
 
 The engine reads env from a ConfigMap rendered by
