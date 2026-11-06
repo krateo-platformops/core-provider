@@ -1,0 +1,19 @@
+# Base values for the measurement; run.py overrides the CPU limit and the saturation env per arm.
+otel:
+  enabled: true
+  tracing: false
+  endpoint: http://otel.otel.svc.cluster.local:4318
+cdc:
+  metrics:
+    enabled: true   # without it the cdc has no probes, and "liveness failures" would be a vacuous 0
+  env:
+    HOME: /tmp
+    COMPOSITION_CONTROLLER_WORKERS: "16"
+    COMPOSITION_CONTROLLER_RESYNC_INTERVAL: "60s"
+    COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT: "30s"
+    COMPOSITION_CONTROLLER_SATURATION_ENABLED: "false"
+    COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD: "0"
+    OTEL_EXPORT_INTERVAL: "5s"
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 512Mi}

@@ -1,0 +1,8 @@
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: loadchart
+  namespace: load
+spec:
+  chart:
+    url: http://chartrepo.chartrepo.svc.cluster.local/loadchart-0.2.0.tgz

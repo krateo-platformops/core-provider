@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-sentinel
+  labels:
+    app.kubernetes.io/part-of: loadchart
+    app.kubernetes.io/component: sentinel
+data:
+  marker: {{ .Values.marker | quote }}

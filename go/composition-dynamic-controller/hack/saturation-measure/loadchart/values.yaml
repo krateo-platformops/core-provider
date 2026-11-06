@@ -1,2 +1,5 @@
 count: 40
 payloadKB: 4
+# Patched by a run. The sentinel ConfigMap carries it, so completion is read from what landed in the
+# cluster rather than from a condition the controller under test writes.
+marker: "0"

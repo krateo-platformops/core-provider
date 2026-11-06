@@ -1,5 +1,5 @@
 apiVersion: v2
 name: loadchart
 description: Measurement workload for unstructured-runtime#66. Renders `count` ConfigMaps of ~`payloadKB` KiB each, so every reconcile is real helm render/upgrade and real API work for the composition controller.
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
