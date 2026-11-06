@@ -1,0 +1,5 @@
+{"type": "object", "properties": {
+  "keptField": {"type": "string"},
+  "addedField": {"type": "string", "default": "added-by-default"},
+  "opt": {"type": "object", "properties": {"flag": {"type": "boolean", "default": false}}}
+}}

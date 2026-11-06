@@ -1,0 +1,4 @@
+apiVersion: v2
+name: holdref
+description: Names the old version in a stored manifest, so prune keeps it served
+version: 0.1.0

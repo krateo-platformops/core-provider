@@ -1,0 +1,4 @@
+apiVersion: v2
+name: migprobe
+description: Field-loss probe for the version migration
+version: 0.2.0

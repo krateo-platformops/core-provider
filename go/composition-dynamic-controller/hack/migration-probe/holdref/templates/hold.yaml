@@ -1,0 +1,7 @@
+apiVersion: composition.krateo.io/v0-1-0
+kind: Migprobe
+metadata:
+  name: hold
+spec:
+  keptField: held
+  removedField: SHOULD-IT-SURVIVE-MIGRATION
