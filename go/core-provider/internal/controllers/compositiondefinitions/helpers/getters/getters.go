@@ -44,7 +44,8 @@ const (
 	PrunedFieldsAnnotation = "krateo.io/pruned-fields"
 
 	// PrunedFieldsTruncatedAnnotation is set to "true" when the dropped subtree did not fit and
-	// PrunedFieldsAnnotation holds only the field paths. The full subtree is always logged.
+	// PrunedFieldsAnnotation holds only the field paths. The values are then not kept anywhere: they
+	// stay out of the controller log, which reaches further than the object does (#377).
 	PrunedFieldsTruncatedAnnotation = "krateo.io/pruned-fields-truncated"
 
 	// maxPrunedAnnotationBytes keeps the stash well inside the apiserver's ~256KB budget for ALL
@@ -289,7 +290,7 @@ func stashPrunedFields(u *unstructured.Unstructured, rep fieldloss.Report, log l
 
 	pathsOnly, err := json.Marshal(map[string]any{"paths": rep.Paths})
 	if err != nil || len(pathsOnly) > maxPrunedAnnotationBytes {
-		log.Warn("Pruned fields too large to record on the object; see the log line above for the full subtree",
+		log.Warn("Pruned fields too large to record on the object; their values are not kept, restore them from the source manifest",
 			"composition", compositionKey(u.GetNamespace(), u.GetName()), "bytes", len(payload))
 		return false
 	}

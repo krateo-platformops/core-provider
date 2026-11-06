@@ -114,7 +114,12 @@ write), and the doomed subtree is recorded **in the same update that discards it
 | `krateo.io/pruned-fields` annotation | the dropped subtree as JSON, **with its values**, so it can be re-applied by hand |
 | `krateo.io/pruned-fields-truncated` | `"true"` when the subtree exceeded 16 KiB and only the paths were stored |
 | `CompositionFieldsPruned` Event (Warning) | on the composition instance, naming the paths |
-| controller log (Warn) | always carries the full subtree, including when the annotation could not |
+| controller log (Warn) | the paths and whether the subtree was recorded, **never the values** |
+
+**Above 16 KiB the values are not kept anywhere in the cluster**: restore them from
+the source manifest, and the Event says so. They stay out of the controller log on
+purpose, because a log reaches further than the object does, and a composition can
+hold values nobody wants there.
 
 Annotations are used rather than Events alone because Events expire, and this is
 the only remaining copy of the data. They are safe for it: the pruner skips

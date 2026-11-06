@@ -472,6 +472,17 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
+// prunedFieldsDetail says where the discarded values went. When they did not fit, the honest answer
+// is nowhere (#377): spec values stay out of the controller log, which reaches further than the
+// object does. This sentence used to name that log as their home, so an operator went looking for
+// values that were never written.
+func prunedFieldsDetail(stashed bool) string {
+	if stashed {
+		return "the dropped values are recorded in the " + getters.PrunedFieldsAnnotation + " annotation"
+	}
+	return "the dropped values were too large to record and are not kept anywhere in the cluster: restore them from your source manifest"
+}
+
 // migrationLossOptions arms the #188 field-loss detection for one transition.
 //
 // The version migration can only move an instance's krateo.io/composition-version label by
@@ -512,13 +523,9 @@ func (e *external) migrationLossOptions(ctx context.Context, gvr schema.GroupVer
 			if e.rec == nil {
 				return
 			}
-			detail := "the dropped values are recorded in the " + getters.PrunedFieldsAnnotation + " annotation"
-			if !stashed {
-				detail = "the dropped values were too large to record on the object and appear only in the controller log"
-			}
 			e.rec.Eventf(obj, nil, corev1.EventTypeWarning, "CompositionFieldsPruned", "VersionMigration",
 				"Migration to %s discarded spec fields the target version does not declare: %s — %s",
-				gvr.Version, strings.Join(rep.Paths, ", "), detail)
+				gvr.Version, strings.Join(rep.Paths, ", "), prunedFieldsDetail(stashed))
 		},
 	}
 }
