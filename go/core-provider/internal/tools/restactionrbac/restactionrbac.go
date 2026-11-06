@@ -31,9 +31,8 @@ import (
 
 // ErrIncomplete is returned when snowplow answers 422 — at least one api[] stage
 // could not be enumerated without dispatching (residual ${…}, dependsOn, or a
-// non-kube path). The caller must NOT write partial RBAC; it surfaces the
-// composition's ApiRefRBACIncomplete condition instead. The 422 body (naming the
-// unresolvable stages) is wrapped for diagnostics.
+// non-kube path). The caller must NOT write partial RBAC. It arrives inside an
+// *Error with CauseStageUnresolvable, carrying the 422 body that names the stages.
 var ErrIncomplete = errors.New("restactionrbac: RESTAction read-set is incomplete (unresolvable stage)")
 
 // Resource is one read-set row: a (group, version, resource, namespace, verb)
@@ -174,9 +173,8 @@ func (p Params) validate() error {
 	return nil
 }
 
-// Inspect calls GET /rbac and returns the read-set. It returns ErrIncomplete on
-// 422 (unresolvable RESTAction — caller must fail loud, not write partial RBAC)
-// and a plain error on any other non-200.
+// Inspect calls GET /rbac and returns the read-set. Any other outcome is an *Error
+// naming its Cause; the caller must fail loud and must not write partial RBAC.
 func (c *Client) Inspect(ctx context.Context, params Params) ([]Resource, error) {
 	if err := params.validate(); err != nil {
 		return nil, err
@@ -205,14 +203,14 @@ func (c *Client) Inspect(ctx context.Context, params Params) ([]Resource, error)
 	if c.token != nil {
 		tok, err := c.token(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("restactionrbac: obtaining auth token: %w", err)
+			return nil, failedBeforeResponse(CauseUnauthorized, "obtaining auth token", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("restactionrbac: calling snowplow /rbac: %w", err)
+		return nil, failedBeforeResponse(CauseSnowplowUnavailable, "calling snowplow /rbac", err)
 	}
 	defer resp.Body.Close()
 
@@ -232,11 +230,8 @@ func (c *Client) Inspect(ctx context.Context, params Params) ([]Resource, error)
 				"fields", strings.Join(extra, ","), "apiRef", params.APIRefNamespace+"/"+params.APIRefName)
 		}
 		return body.ReadSet, nil
-	case http.StatusUnprocessableEntity:
-		detail, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%w: %s", ErrIncomplete, string(detail))
 	default:
-		detail, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("restactionrbac: unexpected status %d from /rbac: %s", resp.StatusCode, string(detail))
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return nil, fromResponse(resp.StatusCode, detail)
 	}
 }

@@ -1,0 +1,54 @@
+name: integration
+
+# `-tags integration` was run by no job: tag-compile only proved these tests still build, so a test
+# could assert anything and every check stayed green (#372's condition was documented everywhere and
+# set by no code, and its test first looked covered by 28 green checks). A test nothing runs is a
+# claim. Separate from release-pullrequest because each package starts its own kind cluster, which is
+# too slow for that workflow's fast checks.
+on:
+  pull_request:
+    paths:
+      - "go/core-provider/**"
+      - "helm/core-provider/**"
+      - ".github/workflows/integration.yaml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: integration (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run the integration suite
+        working-directory: go/core-provider
+        env:
+          # kindest/node has no v1.36.0 image; v1.36.4 is the usable 1.36 tag.
+          KIND_NODE_IMAGE: kindest/node:v1.36.4
+        run: |
+          set -uo pipefail
+          # -p 1: every package starts a cluster, and a runner cannot hold them all at once.
+          go test -tags=integration -count=1 -p 1 -timeout 55m -v ./... 2>&1 | tee /tmp/integration.log
+          rc=${PIPESTATUS[0]}
+          # A skipped test is not a passing test, and a test nothing reached is not a test at all.
+          # The one exception skips on purpose, to record that its call site is unreachable without
+          # a local chart fixture, and it is named so that any new skip still fails here.
+          if grep -- '--- SKIP' /tmp/integration.log | grep -v 'TestObserve_AvailableRequiresAnEstablishedCRD'; then
+            echo "::error::integration tests were SKIPPED - this job exists to run them"
+            exit 1
+          fi
+          if ! grep -q -- '--- PASS: TestController/Setup/Test_ApiRef_RBAC_condition' /tmp/integration.log; then
+            echo "::error::the ApiRef RBAC assessment did not pass, or never ran"
+            rc=1
+          fi
+          exit "$rc"

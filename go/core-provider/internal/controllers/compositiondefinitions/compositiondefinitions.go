@@ -1074,6 +1074,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
+	recordApiRefRBAC(cr, err)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error deploying dynamic controller in dry-run mode: %w", err)
 	}
@@ -1453,6 +1454,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
+	recordApiRefRBAC(cr, err)
 	if err != nil {
 		return err
 	}
@@ -1850,6 +1852,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
+	recordApiRefRBAC(cr, err)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}

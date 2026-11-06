@@ -30,7 +30,7 @@ All three pieces are **provisioned automatically by core-provider** when `apiRef
 
 Manual RBAC authoring remains only for clusters with `apiRefRBAC` disabled, or when
 the read-set cannot be fully enumerated (the definition then carries the
-`ApiRefRBACIncomplete` condition and **no partial RBAC is written**) — see below.
+`ApiRefRBACComplete=False` condition and **no partial RBAC is written**) — see below.
 
 ## The per-composition ServiceAccount
 
@@ -78,10 +78,10 @@ With `apiRefRBAC.enabled=true` (chart default) core-provider **generates this RB
 it asks snowplow's dispatch-free `GET /rbac` for the RESTAction's read-set (the
 group/version/resource/namespace/verb rows its in-cluster calls touch) and writes the
 ClusterRole/Binding (`internal/tools/deploy/restactionrbac.go`). If any stage is
-unresolvable, snowplow answers 422 and core-provider sets `ApiRefRBACIncomplete` instead of
+unresolvable, snowplow answers 422 and core-provider sets `ApiRefRBACComplete=False` instead of
 writing partial RBAC.
 
-With `apiRefRBAC` disabled (or while `ApiRefRBACIncomplete` stands), author the binding by
+With `apiRefRBAC` disabled (or while `ApiRefRBACComplete=False` stands), author the binding by
 hand:
 
 ```yaml

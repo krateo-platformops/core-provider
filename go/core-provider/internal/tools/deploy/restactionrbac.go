@@ -61,13 +61,13 @@ func decodeExtras(s string) (map[string]any, error) {
 }
 
 // restActionReadSet calls snowplow GET /rbac for the declared apiRef. Returns (nil, nil) without an
-// apiRef. Propagates restactionrbac.ErrIncomplete on a 422 so the caller can fail loud.
+// apiRef. A failure is a *restactionrbac.Error naming its cause, so the caller can report it.
 func restActionReadSet(ctx context.Context, opts DeployOptions) ([]restactionrbac.Resource, error) {
 	if opts.ApiRefName == "" {
 		return nil, nil
 	}
 	if opts.SnowplowURL == "" {
-		return nil, fmt.Errorf("apiRef RBAC: snowplow URL not configured (set CORE_PROVIDER_SNOWPLOW_URL)")
+		return nil, restactionrbac.NotConfigured()
 	}
 	extras, err := decodeExtras(opts.ApiRefExtras)
 	if err != nil {
@@ -103,8 +103,8 @@ func hashRestActionRBACObjects(cr *rbacv1.ClusterRole, crb *rbacv1.ClusterRoleBi
 
 // applyRestActionRBAC resolves the apiRef read-set and grants it to the per-composition group via a
 // ClusterRole + binding, applying and hashing them. No-op without apiRef. Returns
-// restactionrbac.ErrIncomplete (snowplow 422) so the caller sets ApiRefRBACIncomplete instead of
-// writing partial RBAC. In dry-run the apply is a server dry-run (applyOpts); the digest still
+// the read-set failure before anything is written, so RBAC is never partial. In dry-run the apply is
+// a server dry-run (applyOpts); the digest still
 // reflects the generated objects.
 func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, saName string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
 	if opts.ApiRefName == "" {
@@ -114,7 +114,7 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 
 	readSet, err := restActionReadSet(ctx, opts)
 	if err != nil {
-		return err // ErrIncomplete propagates
+		return err
 	}
 
 	// Before executing the RESTAction's api steps, snowplow reads the RESTAction OBJECT itself under

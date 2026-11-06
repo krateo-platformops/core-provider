@@ -123,7 +123,7 @@ namespace / absent authn = the token exchange never succeeds), and snowplow must
 reachable at `CORE_PROVIDER_SNOWPLOW_URL`. The per-composition group's RBAC **is**
 auto-generated from snowplow's `GET /rbac` read-set when `apiRefRBAC.enabled=true`
 (the chart default); an unresolvable RESTAction surfaces as the
-`ApiRefRBACIncomplete` condition and **no partial RBAC is written**. With
+`ApiRefRBACComplete=False` condition and **no partial RBAC is written**. With
 `apiRefRBAC` disabled you are back to hand-authoring the binding for
 `krateo:cdc:<resource>-<apiVersion>` — without it the resolved RESTAction is
 unauthorized and the projection silently reads nothing

@@ -42,9 +42,22 @@ blueprint must pin, see below** — `managed.versionInfo[]` (served CRD versions
 their CDC digests), `packageUrl`, `digest` (the FNV idempotency digest —
 [overview](./overview.md)), and `target`
 (`mode` Local/Remote, `connectionStatus` Healthy/Down, target k8s `version`,
-kubeconfig Secret `resourceVersion`). With `apiRef` + `apiRefRBAC`, an
-`ApiRefRBACIncomplete` condition reports a RESTAction whose read-set could not be
-fully enumerated (snowplow 422) — partial RBAC is never written.
+kubeconfig Secret `resourceVersion`). A definition with an `apiRef` also carries
+`ApiRefRBACComplete`: `True/ReadSetResolved`, or `False` with one of the reasons below.
+Partial RBAC is never written. While it is `False` the definition makes no progress, so a
+version bump is held too; the running controller and its compositions are untouched. It
+clears by itself once the read-set resolves.
+
+| Reason | Meaning |
+|---|---|
+| `RESTActionNotFound` | snowplow says the RESTAction does not exist |
+| `RESTActionForbidden` | The caller may not read it. It may also not exist, so this never means missing |
+| `StageUnresolvable` | A stage cannot be enumerated without dispatching it (snowplow 422) |
+| `InvalidApiRef` | snowplow refused the request, such as extras naming a reserved key |
+| `Unauthorized` | No usable identity reached snowplow |
+| `SnowplowUnavailable` | snowplow could not be reached or ran out of time |
+| `SnowplowError` | Anything else, including cyclic stages and a 404 that is not snowplow's own |
+| `SnowplowNotConfigured` | `apiRefRBAC.enabled` is off in the chart while the definition declares an `apiRef` |
 
 ### The GVK a blueprint must pin
 
