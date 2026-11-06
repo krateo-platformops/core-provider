@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
@@ -40,11 +42,46 @@ func newFakeSnowplowRBAC(t *testing.T) *fakeSnowplowRBAC {
 	return f
 }
 
+// installAuthnMapping provides what Deploy applies before it reaches /rbac: authn owns this CRD and
+// the namespace the mapping lands in, and neither exists on the test cluster.
+func installAuthnMapping(ctx context.Context, t *testing.T, r *resources.Resources) {
+	t.Helper()
+	open := true
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "serviceaccounts.serviceaccount.authn.krateo.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "serviceaccount.authn.krateo.io",
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural: "serviceaccounts", Singular: "serviceaccount", Kind: "ServiceAccount", ListKind: "ServiceAccountList",
+			},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name: "v1alpha1", Served: true, Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+					Type: "object", XPreserveUnknownFields: &open,
+				}},
+			}},
+		},
+	}
+	if err := r.Create(ctx, crd); err != nil {
+		t.Fatalf("creating the authn ServiceAccount CRD: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Delete(context.Background(), crd) })
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "krateo-system"}}
+	if err := r.Create(ctx, ns); err != nil {
+		t.Fatalf("creating the authn namespace: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Delete(context.Background(), ns) })
+}
+
 // assessApiRefRBACCondition drives the real controller, because the failure this exists to prevent is
 // a condition documented everywhere and set by no code (#372). A unit test of the helper stays green
 // with every call to it deleted.
 func assessApiRefRBACCondition(ctx context.Context, t *testing.T, r *resources.Resources, f *fakeSnowplowRBAC) {
 	t.Helper()
+	installAuthnMapping(ctx, t, r)
+
 	cd := &v1alpha1.CompositionDefinition{ObjectMeta: metav1.ObjectMeta{Name: "apiref-rbac", Namespace: namespace}}
 	cd.Spec.Chart = &v1alpha1.ChartInfo{Url: "oci://ghcr.io/krateo-platformops/charts/core-provider", Version: "2.12.4"}
 	cd.Spec.ApiRef = &v1alpha1.ApiReference{Name: "ra", Namespace: "ns"}

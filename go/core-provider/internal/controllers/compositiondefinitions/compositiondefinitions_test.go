@@ -163,6 +163,10 @@ func TestMain(m *testing.M) {
 			if err != nil {
 				return ctx, err
 			}
+			err = os.Link(filepath.Join(manifestsPath, "rbac", "authn-serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "authn-serviceaccount.yaml"))
+			if err != nil {
+				return ctx, err
+			}
 			err = os.Link(filepath.Join(manifestsPath, "rbac", "serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "serviceaccount.yaml"))
 			if err != nil {
 				return ctx, err
