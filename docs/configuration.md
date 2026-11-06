@@ -71,7 +71,7 @@ writable-home requirement.
 | `cdc.workers` / `cdc.resyncInterval` | unset | Optional fleet-wide floor for reconcile concurrency / resync; a definition's `spec.controller` still overrides per Kind. |
 | `cdc.env` | `COMPOSITION_CONTROLLER_WORKERS: "10"`, `..._RESYNC_INTERVAL: "60s"`, `..._GRACEFUL_SHUTDOWN_TIMEOUT: "30s"`, `HOME: /tmp` | The 60s resync makes umbrella self-bootstrap advance in minutes; the drain window must stay below `cdc.terminationGracePeriodSeconds` (45). |
 | `cdc.resources` | requests `50m`/`128Mi`, limits `512Mi` (no CPU limit) | One Deployment per composition Kind runs concurrently. `64Mi` was too low, but the 200-239Mi fleet figures in #99 were inflated by the helm-client goroutine leak (fixed separately) — sizing from them would over-reserve. The clean control (`builderpublishes`, zero compositions, never reconciles) idles at `37Mi`, so `128Mi` covers the floor plus real reconcile working room. Limits are not reserved, so `512Mi` is free headroom for a large chart render. No CPU limit — a limit on a bursty reconcile loop throttles it to zero progress (same measured finding as the engine). **Re-derive from post-fix measurements.** |
-| `cdc.metrics.enabled` | `false` | No port exposed by default, hence no probes. |
+| `cdc.metrics.enabled` / `cdc.metrics.port` | `false` / `8080` | No metrics port exposed by default. Readiness is served separately on `cdc.healthProbe.port`, so probes do not depend on this. |
 
 Per-definition override: `CompositionDefinition.spec.controller`
 (`workers`, `resyncInterval`) tunes ONE Kind's CDC without touching the fleet

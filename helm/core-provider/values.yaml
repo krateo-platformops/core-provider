@@ -308,7 +308,7 @@ cdc:
   fullnameOverride: ""
   metrics:
     enabled: false
-    #port: 8080
+    port: 8080
   serviceAccount:
     # Specifies whether a service account should be created
     create: true
