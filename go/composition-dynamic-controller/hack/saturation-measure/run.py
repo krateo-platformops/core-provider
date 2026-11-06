@@ -180,7 +180,7 @@ def sample(node, pod, container):
         "throttled": series(text, "container_cpu_cfs_throttled_periods_total", pod, container),
         "node": node_usage(text),
         "local": gauge(other, "unstructured_runtime_ratelimit_local_capacity"),
-        "input": gauge(other, "unstructured_runtime_ratelimit_saturation_input"),
+        "input": gauge(other, r"unstructured_runtime_ratelimit_saturation_input(_percent)?"),
         "deferred": deferred(other),
         "reconciled": reconciled(other),
     }
@@ -219,7 +219,10 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     set_arm(limit, threshold)
     marker = f"{int(time.time())}"
     if mode == "restart":
-        # Stop the controller, queue the backlog, then start it into the backlog.
+        # Stop the controller, queue the backlog, then start it into the backlog. core-provider
+        # restores a Deployment scaled by hand, so it has to stop first or the pod comes back.
+        kubectl("-n", "krateo-system", "scale", "deploy/core-provider", "--replicas=0")
+        kubectl("-n", "krateo-system", "rollout", "status", "deploy/core-provider", "--timeout=120s")
         kubectl("-n", NS, "scale", f"deploy/{CDC}", "--replicas=0")
         wait_no_pods()
         apply_all(n, marker, count, payload)
@@ -247,6 +250,9 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     t1 = time.time()
     end = sample(node, name, container)
     samples.append(end)
+    if mode == "restart":
+        kubectl("-n", "krateo-system", "scale", "deploy/core-provider", "--replicas=1")
+        kubectl("-n", "krateo-system", "rollout", "status", "deploy/core-provider", "--timeout=120s")
 
     # The driver runs on a laptop. A sleep during a run stops the sampling but not the controller, so
     # the drain time and every rate below would be wrong while the run still looks complete.
@@ -258,7 +264,10 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     usage, waiting = delta(start, end, "usage"), delta(start, end, "waiting")
     periods, throttled = delta(start, end, "periods"), delta(start, end, "throttled")
     pressures = [s["input"] for s in samples if s["input"] is not None]
-    locals_ = [s["local"] for s in samples if s["local"] is not None]
+    # The collector keeps a series after its pod is gone, so an off arm would read the last on arm's.
+    locals_ = [s["local"] for s in samples if s["local"] is not None] if threshold != "off" else []
+    if threshold == "off":
+        pressures = []
     if threshold != "off" and not locals_:
         sys.exit(f"an on-arm collected no `local` samples: the collector is not receiving ({limit}, {threshold})")
     live = cdc_pod()
@@ -269,7 +278,8 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
         "objects": n, "count": count, "payloadKB": payload,
         "chart": os.environ["CHART_VERSION"], "drained": done, "sentinels": total, "complete": done == n,
         "drain_s": round(t1 - t0, 1),
-        "reconciles": delta(start, end, "reconciled"),
+        # A restarted controller counts from zero, and the start sample may hold the old pod's total.
+        "reconciles": end["reconciled"] if mode == "restart" else delta(start, end, "reconciled"),
         "pressure_mean_pct": round(100 * waiting / wall, 1) if waiting is not None else None,
         "psi_avg10_max": max(pressures) if pressures else None,
         "local_mean": round(sum(locals_) / len(locals_), 2) if locals_ else None,
@@ -319,14 +329,29 @@ def main():
         one(a.objects, a.limit, a.threshold, 0, a.count, a.payload, a.mode)
         return
 
+    done = {}
+    if os.path.exists(RESULTS):
+        for line in open(RESULTS):
+            r = json.loads(line)
+            if r.get("chart") == os.environ["CHART_VERSION"]:
+                key = (r["mode"], r["limit"], r["threshold"], r["run"])
+                done[key] = done.get(key, 0) + 1
+
+    def planned(mode, limit, threshold, run):
+        key = (mode, limit, threshold, run)
+        if done.get(key, 0) > 0:
+            done[key] -= 1
+            return
+        one(a.objects, limit, threshold, run, a.count, a.payload, mode)
+
     # Alternated within each repetition, so drift over the morning cannot sit in one arm.
     for run in range(1, a.runs + 1):
         for limit in ("250m", "1000m"):
             for threshold in ("off", "50", "off", "25", "off", "75"):
-                one(a.objects, limit, threshold, run, a.count, a.payload)
+                planned("steady", limit, threshold, run)
             # The ramp's own case: threshold 50 against off, kept apart from the steady figures.
             for threshold in ("off", "50"):
-                one(a.objects, limit, threshold, run, a.count, a.payload, "restart")
+                planned("restart", limit, threshold, run)
 
 
 if __name__ == "__main__":
