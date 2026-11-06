@@ -37,6 +37,7 @@ EXPECTED_CONTEXT = "gke_integration-test-431120_us-central1-a_cpu-sat-66"
 RESULTS = os.path.expanduser("~/krateo/cpu-sat-66-results/results.jsonl")
 STEADY_WAIT = 45  # the issue discards the first ~40s; the backlog starts after it
 DRAIN_TIMEOUT = 1800
+MAX_SAMPLE_GAP = 45  # a sample takes a few seconds; more than this means the driver was not running
 
 
 def sh(*args, check=True, stdin=None):
@@ -247,6 +248,11 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     end = sample(node, name, container)
     samples.append(end)
 
+    # The driver runs on a laptop. A sleep during a run stops the sampling but not the controller, so
+    # the drain time and every rate below would be wrong while the run still looks complete.
+    gaps = [b["t"] - a["t"] for a, b in zip(samples, samples[1:])]
+    max_gap = max(gaps) if gaps else 0
+
     wall = end["t"] - start["t"]
     limit_cores = normal_cpu(limit) / 1000
     usage, waiting = delta(start, end, "usage"), delta(start, end, "waiting")
@@ -276,6 +282,8 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
         "readiness_failures": len(unhealthy),  # the cdc has a readiness probe and no liveness probe
         "node_cores": round(delta(start, end, "node") / wall, 2) if delta(start, end, "node") is not None else None,
         "samples": len(samples),
+        "max_sample_gap_s": round(max_gap, 1),
+        "discard": f"driver suspended: {max_gap:.0f}s between samples" if max_gap > MAX_SAMPLE_GAP else None,
     }
     os.makedirs(os.path.dirname(RESULTS), exist_ok=True)
     with open(RESULTS, "a") as f:
