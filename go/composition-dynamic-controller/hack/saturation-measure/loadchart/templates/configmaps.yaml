@@ -1,0 +1,13 @@
+{{- $payload := repeat (int (mul .Values.payloadKB 1024)) "x" }}
+{{- range $i := until (int .Values.count) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Release.Name }}-cm-{{ $i }}
+  labels:
+    app.kubernetes.io/part-of: loadchart
+data:
+  index: {{ $i | quote }}
+  payload: {{ $payload | quote }}
+{{- end }}
