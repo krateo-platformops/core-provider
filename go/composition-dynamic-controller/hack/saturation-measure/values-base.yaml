@@ -3,6 +3,9 @@ otel:
   enabled: true
   tracing: false
   endpoint: http://otel.otel.svc.cluster.local:4318
+# One replica: it requests a whole CPU, so two plus a rolling-update surge do not fit this one node.
+chartInspector:
+  replicaCount: 1
 cdc:
   env:
     HOME: /tmp
