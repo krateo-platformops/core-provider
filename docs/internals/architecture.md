@@ -156,7 +156,7 @@ The controller is thin; the work is in these packages:
   Service coords from the cdc-configmap template so it can be projected onto
   spokes), `restactionrbac.go` (turns snowplow's `GET /rbac` read-set into
   ClusterRole/Binding for the per-composition group; propagates `ErrIncomplete` →
-  the `ApiRefRBACIncomplete` condition, never partial RBAC), `authnmapping.go`
+  the `ApiRefRBACComplete=False` condition, never partial RBAC), `authnmapping.go`
   (auto-provisions the `serviceaccount.authn.krateo.io/ServiceAccount` allowlist
   mapping named `cdc-<namespace>-<sa>`, hashed into the digest, removed on
   `Undeploy`), `remoteseed.go` (`SeedRemoteTarget` — projects the embedded

@@ -170,7 +170,7 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
    `GET /rbac` enumerates the (group,version,resource,namespace,verb) rows the
    RESTAction's in-cluster calls touch; `restactionrbac.go` turns them into a
    ClusterRole/Binding for the per-composition group. A snowplow 422 (unresolvable
-   stage) surfaces as the `ApiRefRBACIncomplete` condition — **partial RBAC is
+   stage) surfaces as the `ApiRefRBACComplete=False` condition — **partial RBAC is
    never written**.
 
 In non-dry-run mode it waits for the Deployment to be Ready, restarts it so it picks

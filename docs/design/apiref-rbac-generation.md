@@ -11,7 +11,7 @@ timestamp: 2026-08-07T00:00:00Z
 > **Status (re-verified 2026-08-07): implemented.** The engine consumes snowplow's
 > `GET /rbac` via `go/core-provider/internal/tools/restactionrbac/` and writes the
 > read-set RBAC in `internal/tools/deploy/restactionrbac.go` (422 → the
-> `ApiRefRBACIncomplete` condition, never partial RBAC); the chart gates it with
+> `ApiRefRBACComplete=False` condition, never partial RBAC); the chart gates it with
 > `apiRefRBAC.enabled` (default on) and provisions the engine's own identity
 > (`templates/apiref-selfrbac.yaml`, runtime self allowlist mapping).
 
@@ -191,7 +191,7 @@ type Resource struct {
 **Fail-loud = `422`.** If **any** stage can't be enumerated (residual `${…}`, upstream/`dependsOn`,
 non-kube path), snowplow returns **`422` + an error string naming every unresolvable stage** and
 **no** `readSet` — it refuses to return a partial read-set that would silently under-grant. core-
-provider maps that `422` to the `ApiRefRBACIncomplete` condition. (`400` missing params, `500`
+provider maps that `422` to the `ApiRefRBACComplete=False` condition. (`400` missing params, `500`
 structural failure.) An empty `readSet` (every stage external/discovery) is a legitimate `200` `[]`.
 
 **Request:** `GET /rbac?apiRefName=…&apiRefNamespace=…&extras=<url-encoded JSON>` with
@@ -272,11 +272,11 @@ RBAC we're trying to derive from resolution."
 
 - **`dependsOn` chains**: a later stage's path can interpolate an earlier stage's *result*, which
   isn't available without dispatching. → derive what is statically resolvable; for the rest, emit a
-  **condition** on the CompositionDefinition (`ApiRefRBACIncomplete`) listing the unresolved stages,
+  **condition** on the CompositionDefinition (`ApiRefRBACComplete=False`) listing the unresolved stages,
   rather than silently under-permissioning.
 - **GVR templated from per-instance data**: not resolvable at deploy time. → either **constrain**
   (recommended scope §3.3: require GVR-determining segments to come from literals / static
-  `apiRef.extras`) and emit `ApiRefRBACIncomplete` if violated, or **defer to reconcile-time union**
+  `apiRef.extras`) and emit `ApiRefRBACComplete=False` if violated, or **defer to reconcile-time union**
   (open Q §8.6): the CDC merges each instance's resolved GVR into the per-type group Role.
 - **Unparseable / non-kube path**: skip + record (likely an external call missing its `endpointRef`).
 - **Discovery miss** (GVR not served): record; do not invent a grant.
@@ -330,7 +330,7 @@ deferred (open Q §8.6). Either way the inspection is dispatch-free and the subj
 
 1. In `Deploy` (`deploy.go`), **when `apiRef` is set** and after the authn mapping:
    `GET snowplow /rbac?apiRefName=…&apiRefNamespace=…&extras=…` (static `apiRef.extras` context).
-   On `200`, decode the `{restaction, readSet}` body; on `422`, set the `ApiRefRBACIncomplete`
+   On `200`, decode the `{restaction, readSet}` body; on `422`, set the `ApiRefRBACComplete=False`
    condition and stop (don't write partial RBAC).
 2. Turn `readSet` into RBAC: **group the rows by `verb`** into `PolicyRule`s (resources sharing a
    verb → one rule), cluster-scoped (`ClusterRole`) when `Namespace==""` else a namespaced `Role`,
@@ -383,11 +383,11 @@ promptly — otherwise the grant drifts from the calls.
    unresolvable. **Pre-merge fix:** the in-cluster verb is hardcoded `get` — must be `list` for
    collection paths (§3.2 ⚠️).
 2. **Phase 1 — core-provider generation.** Adapt `rbacgen` to consume the `readSet` (group rows by
-   `verb` → `PolicyRule`s; **Group** subject) and handle the `422` → `ApiRefRBACIncomplete`. Wire into
+   `verb` → `PolicyRule`s; **Group** subject) and handle the `422` → `ApiRefRBACComplete=False`. Wire into
    `Deploy`/`Undeploy` alongside `authnmapping`; group-bound Role/ClusterRole; digest-hash;
    create-if-absent.
 3. **Phase 2 — RESTAction watch + condition.** Watch the referenced RESTAction; surface
-   `ApiRefRBACIncomplete` for unresolved (`dependsOn`) stages.
+   `ApiRefRBACComplete=False` for unresolved (`dependsOn`) stages.
 4. **Phase 3 — least-privilege hardening + bounding policy.** Narrow verbs; optional grantable
    allowlist; metrics on generated grants.
 

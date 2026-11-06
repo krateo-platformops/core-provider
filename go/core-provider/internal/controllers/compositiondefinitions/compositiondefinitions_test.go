@@ -227,6 +227,11 @@ func TestController(t *testing.T) {
 		}
 	}()
 
+	// Read on every reconcile. Set before the controller starts, and definitions without an apiRef
+	// never reach it.
+	fakeRBAC := newFakeSnowplowRBAC(t)
+	SnowplowURL = fakeRBAC.server.URL
+
 	setupController := func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
 		// stdlib slog text handler for test output (replaces plumbing/slogs/pretty, removed on the
 		// plumbing 1.10.x baseline).
@@ -525,6 +530,9 @@ func TestController(t *testing.T) {
 		return ctx
 	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeFollower(ctx, t, cfg, r)
+	}).Assess("Test ApiRef RBAC condition", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		assessApiRefRBACCondition(ctx, t, r, fakeRBAC)
+		return ctx
 	}).Assess("Test Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// r, err := resources.New(cfg.Client().RESTConfig())
 		// if err != nil {

@@ -466,8 +466,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 
 	// ...and grant the per-composition group exactly the in-cluster reads the referenced
-	// RESTAction performs (snowplow GET /rbac). Returns restactionrbac.ErrIncomplete on a 422 —
-	// the caller maps that to the ApiRefRBACIncomplete condition instead of writing partial RBAC.
+	// RESTAction performs (snowplow GET /rbac). A read-set that cannot be fetched returns before
+	// anything is written, and the controller reports its cause as ApiRefRBACComplete=False.
 	err = applyRestActionRBAC(ctx, opts.DynClient, opts, sa.Name, &hsh, applyOpts)
 	if err != nil {
 		return "", err
