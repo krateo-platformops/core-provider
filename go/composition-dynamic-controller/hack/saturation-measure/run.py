@@ -6,8 +6,13 @@ until every sentinel ConfigMap carries it, so completion is read from what lande
 not from a condition the controller under test writes.
 
     python3 run.py setup --objects 64
-    python3 run.py one --limit 250m --threshold off
+    python3 run.py one --limit 250m --threshold off [--mode restart]
     python3 run.py sweep --runs 3
+
+Two modes, reported separately so a ramp cost cannot blur into the steady-state figures:
+  steady   the backlog arrives after the ramp, comparable to provider-runtime's window
+  restart  the backlog is waiting when the controller starts; drain is timed from pod ready, because
+           this is the case the startup ramp exists for
 
 KUBECONFIG must point at the disposable cluster. The script refuses any other context.
 """
@@ -143,11 +148,12 @@ def gauge(text, name):
 
 
 def deferred(text):
+    """Deferrals by cause, summed over keys."""
     out = {}
     for line in text.splitlines():
-        m = re.match(r'unstructured_runtime_ratelimit_deferred_total\{.*reason="(\w+)".*\} (\S+)', line)
+        m = re.match(r'unstructured_runtime_ratelimit_deferrals_total\{.*cause="(\w+)".*\} (\S+)', line)
         if m:
-            out[m.group(1)] = float(m.group(2))
+            out[m.group(1)] = out.get(m.group(1), 0) + float(m.group(2))
     return out
 
 
@@ -177,18 +183,52 @@ def delta(a, b, k):
     return None if a[k] is None or b[k] is None else b[k] - a[k]
 
 
-def one(n, limit, threshold, run, count, payload):
+def wait_no_pods():
+    """The backlog must arrive with no controller alive, or the old pod starts working it."""
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        pods = json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"]
+        if not [p for p in pods if p["metadata"]["name"].startswith(CDC)]:
+            return
+        time.sleep(1)
+    sys.exit("the old controller never went away")
+
+
+def wait_ready_pod():
+    """The new controller, once Ready. Polls rather than waits on a name that does not exist yet."""
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        pods = json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"]
+        for p in pods:
+            if not p["metadata"]["name"].startswith(CDC) or "deletionTimestamp" in p["metadata"]:
+                continue
+            if any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", [])):
+                return p
+        time.sleep(1)
+    sys.exit("the controller never became Ready")
+
+
+def one(n, limit, threshold, run, count, payload, mode="steady"):
     set_arm(limit, threshold)
-    pod = cdc_pod()
+    marker = f"{int(time.time())}"
+    if mode == "restart":
+        # Stop the controller, queue the backlog, then start it into the backlog.
+        kubectl("-n", NS, "scale", f"deploy/{CDC}", "--replicas=0")
+        wait_no_pods()
+        apply_all(n, marker, count, payload)
+        kubectl("-n", NS, "scale", f"deploy/{CDC}", "--replicas=1")
+        pod = wait_ready_pod()
+    else:
+        pod = cdc_pod()
+        time.sleep(STEADY_WAIT)
     name = pod["metadata"]["name"]
     node = pod["spec"]["nodeName"]
     container = pod["spec"]["containers"][0]["name"]
-    time.sleep(STEADY_WAIT)
 
-    marker = f"{int(time.time())}"
     start = sample(node, name, container)
     t0 = time.time()
-    apply_all(n, marker, count, payload)
+    if mode == "steady":
+        apply_all(n, marker, count, payload)
     samples = [start]
     done, total = 0, 0
     while time.time() - t0 < DRAIN_TIMEOUT:
@@ -211,7 +251,8 @@ def one(n, limit, threshold, run, count, payload):
     unhealthy = json.loads(kubectl("-n", NS, "get", "events", "--field-selector",
                                    f"involvedObject.name={name},reason=Unhealthy", "-o", "json"))["items"]
     result = {
-        "limit": limit, "threshold": threshold, "run": run, "objects": n, "count": count, "payloadKB": payload,
+        "mode": mode, "limit": limit, "threshold": threshold, "run": run,
+        "objects": n, "count": count, "payloadKB": payload,
         "chart": os.environ["CHART_VERSION"], "drained": done, "sentinels": total, "complete": done == n,
         "drain_s": round(t1 - t0, 1),
         "reconciles": delta(start, end, "reconciled"),
@@ -244,6 +285,7 @@ def main():
     ap.add_argument("--limit", default="250m")
     ap.add_argument("--threshold", default="off")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--mode", default="steady", choices=["steady", "restart"])
     a = ap.parse_args()
     guard_context()
 
@@ -258,7 +300,7 @@ def main():
             time.sleep(15)
         sys.exit("setup did not converge")
     if a.cmd == "one":
-        one(a.objects, a.limit, a.threshold, 0, a.count, a.payload)
+        one(a.objects, a.limit, a.threshold, 0, a.count, a.payload, a.mode)
         return
 
     # Alternated within each repetition, so drift over the morning cannot sit in one arm.
@@ -266,6 +308,9 @@ def main():
         for limit in ("250m", "1000m"):
             for threshold in ("off", "50", "off", "25", "off", "75"):
                 one(a.objects, limit, threshold, run, a.count, a.payload)
+            # The ramp's own case: threshold 50 against off, kept apart from the steady figures.
+            for threshold in ("off", "50"):
+                one(a.objects, limit, threshold, run, a.count, a.payload, "restart")
 
 
 if __name__ == "__main__":
