@@ -532,6 +532,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Test Reclaim a leaked per-version controller (#327)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessReclaimLeaked(ctx, t, cfg, r)
 	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeFollower(ctx, t, cfg, r)
 	}).Assess("Test ApiRef RBAC condition", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
