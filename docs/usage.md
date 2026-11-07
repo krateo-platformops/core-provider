@@ -86,6 +86,25 @@ helm template core-provider ./helm/core-provider \
 substitutes at release; when rendering from a source checkout, pass an explicit
 `image.tag` or substitute the placeholders first, as the lint workflow does.)
 
+## Pausing a composition
+
+Two annotations on a composition, with different meanings. Measured on 2.13.72 (one composition,
+GKE), except the pending condition, which is new in this release:
+
+| | `krateo.io/paused: "true"` | `krateo.io/gracefully-paused: "true"` |
+|---|---|---|
+| takes effect | at once, before the controller acts | after the **next change is applied** (#381) |
+| until it takes effect | n/a | every change goes through: a deleted workload is recreated, a manual `kubectl scale` is reverted |
+| while pending | n/a | `Synced=False/GracefulPausePending` |
+| once in effect | `Ready=True/ReconcilePaused`, `Synced=False/ReconcilePaused` | `Ready=True/ReconcileGracefullyPaused`, `Synced=False/ReconcileGracefullyPaused` |
+| holds a manual scale to 0 | yes (sampled for 150 s, across two resyncs) | not while pending |
+| keeps a deleted workload deleted | yes (watched for 150 s) | not while pending |
+
+**To stop reconciliation for maintenance, use `krateo.io/paused`.** `krateo.io/gracefully-paused` lets
+the change in flight finish first; on a composition with nothing in flight it waits for the next change
+and applies it. Removing either annotation resumes reconciliation; the controller then restores what
+the chart renders.
+
 ## Consuming the docs at the right version
 
 Image tag == chart version == repo tag (one version line). Read this bundle at the
