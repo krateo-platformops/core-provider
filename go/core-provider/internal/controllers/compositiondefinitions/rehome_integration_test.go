@@ -92,13 +92,17 @@ func rehomeBindingNamespace(ctx context.Context, t *testing.T, r *resources.Reso
 
 func rehomeEventually(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out after %s waiting for: %s", timeout, what)
 		}
 		time.Sleep(5 * time.Second)
 	}
+	// How long each wait took, so a pass says WHY it passed: #387's condition clearing at once is the
+	// fix working, clearing near the 3-minute poll interval would be a watch event that happened to fire.
+	t.Logf("waited %s for: %s", time.Since(start).Round(time.Second), what)
 }
 
 func assessRehomeFollower(ctx context.Context, t *testing.T, cfg *envconf.Config, r *resources.Resources) context.Context {
