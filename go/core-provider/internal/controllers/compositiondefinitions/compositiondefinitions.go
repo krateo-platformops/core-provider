@@ -1000,6 +1000,10 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
 		}
+		// #387: the owner now, so a follower's Ready message no longer describes this definition.
+		if c, ok := readyOnBecomingOwner(cr.GetCondition(rtv1.TypeReady), gvr); ok {
+			cr.SetConditions(c)
+		}
 	}
 
 	generated, err := crdutils.GenerateCRDWithWarnings(specSchemaBytes, chartGVK)
