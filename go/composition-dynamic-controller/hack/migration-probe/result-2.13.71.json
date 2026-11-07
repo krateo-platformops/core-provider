@@ -1,0 +1,374 @@
+{
+ "before": {
+  "at": "14:49:11Z",
+  "versions": {
+   "v0-1-0": {
+    "served": true,
+    "storage": true
+   }
+  },
+  "versionInfo": [
+   {
+    "chart": {
+     "url": "http://chartrepo.chartrepo.svc.cluster.local/migprobe-0.1.0.tgz"
+    },
+    "served": true,
+    "stored": true,
+    "version": "v0-1-0"
+   }
+  ],
+  "instances": {
+   "one": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      },
+      "removedField": "SHOULD-IT-SURVIVE-MIGRATION"
+     },
+     "label": "v0-1-0",
+     "uid": "567c2e29-c2f3-4cfc-9129-4a3e5b6bf061",
+     "generation": 1,
+     "resourceVersion": "1793976544246943014",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:03Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:04Z"
+     }
+    },
+    "v0-2-0": null
+   },
+   "two": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      },
+      "removedField": "SHOULD-IT-SURVIVE-MIGRATION"
+     },
+     "label": "v0-1-0",
+     "uid": "27f7765d-32f8-40b9-9568-8cd525fb53c0",
+     "generation": 1,
+     "resourceVersion": "1793976545974639022",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:05Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:05Z"
+     }
+    },
+    "v0-2-0": null
+   },
+   "hold": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "held",
+      "opt": {
+       "flag": false
+      },
+      "removedField": "SHOULD-IT-SURVIVE-MIGRATION"
+     },
+     "label": "v0-1-0",
+     "uid": "c9c967a0-d6bd-4717-92e5-28b426f08631",
+     "generation": 1,
+     "resourceVersion": "1793976550995935000",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:10Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:10Z"
+     }
+    },
+    "v0-2-0": null
+   }
+  },
+  "controllers": [
+   "migprobes-v0-1-0-controller   1"
+  ],
+  "pruned_events": []
+ },
+ "witness": {
+  "label_moved_after_s": 24,
+  "instances": [
+   "one",
+   "two",
+   "hold"
+  ]
+ },
+ "after": {
+  "at": "14:49:53Z",
+  "versions": {
+   "v0-1-0": {
+    "served": true,
+    "storage": false
+   },
+   "v0-2-0": {
+    "served": true,
+    "storage": false
+   },
+   "vacuum": {
+    "served": false,
+    "storage": true
+   }
+  },
+  "versionInfo": [
+   {
+    "chart": {
+     "url": "http://chartrepo.chartrepo.svc.cluster.local/migprobe-0.1.0.tgz"
+    },
+    "served": true,
+    "stored": false,
+    "version": "v0-1-0"
+   },
+   {
+    "chart": {
+     "url": "http://chartrepo.chartrepo.svc.cluster.local/migprobe-0.2.0.tgz"
+    },
+    "served": true,
+    "stored": false,
+    "version": "v0-2-0"
+   },
+   {
+    "served": false,
+    "stored": true,
+    "version": "vacuum"
+   }
+  ],
+  "instances": {
+   "one": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "567c2e29-c2f3-4cfc-9129-4a3e5b6bf061",
+     "generation": 2,
+     "resourceVersion": "1793976594771919014",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:03Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:04Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    },
+    "v0-2-0": {
+     "apiVersion": "composition.krateo.io/v0-2-0",
+     "spec": {
+      "addedField": "added-by-default",
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "567c2e29-c2f3-4cfc-9129-4a3e5b6bf061",
+     "generation": 2,
+     "resourceVersion": "1793976594771919014",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:03Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:04Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    }
+   },
+   "two": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "27f7765d-32f8-40b9-9568-8cd525fb53c0",
+     "generation": 2,
+     "resourceVersion": "1793976594768047022",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:05Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:05Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    },
+    "v0-2-0": {
+     "apiVersion": "composition.krateo.io/v0-2-0",
+     "spec": {
+      "addedField": "added-by-default",
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "27f7765d-32f8-40b9-9568-8cd525fb53c0",
+     "generation": 2,
+     "resourceVersion": "1793976594768047022",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:05Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:05Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    }
+   },
+   "hold": {
+    "v0-1-0": {
+     "apiVersion": "composition.krateo.io/v0-1-0",
+     "spec": {
+      "keptField": "held",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "c9c967a0-d6bd-4717-92e5-28b426f08631",
+     "generation": 2,
+     "resourceVersion": "1793976594659519000",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:10Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:10Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    },
+    "v0-2-0": {
+     "apiVersion": "composition.krateo.io/v0-2-0",
+     "spec": {
+      "addedField": "added-by-default",
+      "keptField": "held",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "c9c967a0-d6bd-4717-92e5-28b426f08631",
+     "generation": 2,
+     "resourceVersion": "1793976594659519000",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:10Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:10Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    }
+   }
+  },
+  "controllers": [
+   "migprobes-v0-2-0-controller   1"
+  ],
+  "pruned_events": [
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation",
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation",
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation"
+  ]
+ },
+ "vacuum": {
+  "present": true,
+  "served": false,
+  "storage": true,
+  "spec_schema": {
+   "type": "object",
+   "x-kubernetes-preserve-unknown-fields": true
+  },
+  "conversion": "None"
+ },
+ "held_open": true,
+ "old_version_pruned_after_s": 20,
+ "end": {
+  "at": "14:50:35Z",
+  "versions": {
+   "v0-2-0": {
+    "served": true,
+    "storage": false
+   },
+   "vacuum": {
+    "served": false,
+    "storage": true
+   }
+  },
+  "versionInfo": [
+   {
+    "chart": {
+     "url": "http://chartrepo.chartrepo.svc.cluster.local/migprobe-0.2.0.tgz"
+    },
+    "served": true,
+    "stored": false,
+    "version": "v0-2-0"
+   },
+   {
+    "served": false,
+    "stored": true,
+    "version": "vacuum"
+   }
+  ],
+  "instances": {
+   "one": {
+    "v0-1-0": null,
+    "v0-2-0": {
+     "apiVersion": "composition.krateo.io/v0-2-0",
+     "spec": {
+      "addedField": "added-by-default",
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "567c2e29-c2f3-4cfc-9129-4a3e5b6bf061",
+     "generation": 2,
+     "resourceVersion": "1793976636714735014",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:03Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:04Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    }
+   },
+   "two": {
+    "v0-1-0": null,
+    "v0-2-0": {
+     "apiVersion": "composition.krateo.io/v0-2-0",
+     "spec": {
+      "addedField": "added-by-default",
+      "keptField": "kept",
+      "opt": {
+       "flag": false
+      }
+     },
+     "label": "v0-2-0",
+     "uid": "27f7765d-32f8-40b9-9568-8cd525fb53c0",
+     "generation": 2,
+     "resourceVersion": "1793976636679199022",
+     "annotations": {
+      "krateo.io/composition-origin-version": "v0-1-0",
+      "krateo.io/external-create-pending": "2026-11-06T14:49:05Z",
+      "krateo.io/external-create-succeeded": "2026-11-06T14:49:05Z",
+      "krateo.io/pruned-fields": "{\"spec\":{\"removedField\":\"SHOULD-IT-SURVIVE-MIGRATION\"}}"
+     }
+    }
+   },
+   "hold": {
+    "v0-1-0": null,
+    "v0-2-0": null
+   }
+  },
+  "controllers": [
+   "migprobes-v0-2-0-controller   1"
+  ],
+  "pruned_events": [
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation",
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation",
+   "Migration to v0-2-0 discarded spec fields the target version does not declare: spec.removedField \u2014 the dropped values are recorded in the krateo.io/pruned-fields annotation"
+  ]
+ }
+}

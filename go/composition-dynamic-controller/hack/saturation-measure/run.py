@@ -311,9 +311,11 @@ def main():
     ap.add_argument("--limit", default="250m")
     ap.add_argument("--threshold", default="off")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--drain-timeout", type=int, default=DRAIN_TIMEOUT)
     ap.add_argument("--mode", default="steady", choices=["steady", "restart"])
     a = ap.parse_args()
     guard_context()
+    globals()["DRAIN_TIMEOUT"] = a.drain_timeout
 
     if a.cmd == "setup":
         apply_all(a.objects, "setup", a.count, a.payload)
