@@ -1,0 +1,277 @@
+[
+ {
+  "arm": "control #1: published chart, saturation -> true",
+  "t0": "2026-11-07T14:14:19Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-66dd4cdccb-54zv4": false,
+   "core-provider-565bb7644b-w5hsn": true
+  },
+  "old_pods": [
+   "core-provider-66dd4cdccb-54zv4"
+  ],
+  "updates_by_pod": {
+   "core-provider-66dd4cdccb-54zv4": {
+    "readable": true,
+    "lines": 15,
+    "updates": 0
+   },
+   "core-provider-565bb7644b-w5hsn": {
+    "readable": true,
+    "lines": 23,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-b5pmq_4ecf8ef6-0d7d-44e3-9fe7-ee6638a5a7dd"
+ },
+ {
+  "arm": "control #2: published chart, saturation -> false",
+  "t0": "2026-11-07T14:18:42Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-565bb7644b-w5hsn": false,
+   "core-provider-66dd4cdccb-nx45g": true
+  },
+  "old_pods": [
+   "core-provider-565bb7644b-w5hsn"
+  ],
+  "updates_by_pod": {
+   "core-provider-565bb7644b-w5hsn": {
+    "readable": true,
+    "lines": 17,
+    "updates": 0
+   },
+   "core-provider-66dd4cdccb-nx45g": {
+    "readable": true,
+    "lines": 23,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-b5pmq_4ecf8ef6-0d7d-44e3-9fe7-ee6638a5a7dd"
+ },
+ {
+  "arm": "control #3: published chart, saturation -> true",
+  "t0": "2026-11-07T14:23:01Z",
+  "new_cdc_replicasets": 5,
+  "core_provider_pods": {
+   "core-provider-66dd4cdccb-nx45g": true,
+   "core-provider-565bb7644b-49zlc": true
+  },
+  "old_pods": [
+   "core-provider-66dd4cdccb-nx45g"
+  ],
+  "updates_by_pod": {
+   "core-provider-66dd4cdccb-nx45g": {
+    "readable": true,
+    "lines": 23,
+    "updates": 2
+   },
+   "core-provider-565bb7644b-49zlc": {
+    "readable": true,
+    "lines": 32,
+    "updates": 3
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-b5pmq_4ecf8ef6-0d7d-44e3-9fe7-ee6638a5a7dd"
+ },
+ {
+  "arm": "control #4: published chart, saturation -> false",
+  "t0": "2026-11-07T14:27:19Z",
+  "new_cdc_replicasets": 5,
+  "core_provider_pods": {
+   "core-provider-565bb7644b-49zlc": false,
+   "core-provider-66dd4cdccb-clhls": true
+  },
+  "old_pods": [
+   "core-provider-565bb7644b-49zlc"
+  ],
+  "updates_by_pod": {
+   "core-provider-565bb7644b-49zlc": {
+    "readable": true,
+    "lines": 23,
+    "updates": 2
+   },
+   "core-provider-66dd4cdccb-clhls": {
+    "readable": true,
+    "lines": 32,
+    "updates": 3
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-b5pmq_4ecf8ef6-0d7d-44e3-9fe7-ee6638a5a7dd"
+ },
+ {
+  "arm": "control #5: published chart, saturation -> true",
+  "t0": "2026-11-07T14:31:35Z",
+  "new_cdc_replicasets": 5,
+  "core_provider_pods": {
+   "core-provider-66dd4cdccb-clhls": true,
+   "core-provider-565bb7644b-qctrb": true
+  },
+  "old_pods": [
+   "core-provider-66dd4cdccb-clhls"
+  ],
+  "updates_by_pod": {
+   "core-provider-66dd4cdccb-clhls": {
+    "readable": true,
+    "lines": 23,
+    "updates": 2
+   },
+   "core-provider-565bb7644b-qctrb": {
+    "readable": true,
+    "lines": 32,
+    "updates": 3
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-b5pmq_4ecf8ef6-0d7d-44e3-9fe7-ee6638a5a7dd"
+ },
+ {
+  "arm": "transition: to the #383 chart",
+  "t0": "2026-11-07T14:35:54Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-565bb7644b-qctrb": true,
+   "core-provider-6bdff4bfcc-mxl7m": true
+  },
+  "old_pods": [
+   "core-provider-565bb7644b-qctrb"
+  ],
+  "updates_by_pod": {
+   "core-provider-565bb7644b-qctrb": {
+    "readable": true,
+    "lines": 15,
+    "updates": 0
+   },
+   "core-provider-6bdff4bfcc-mxl7m": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-6bdff4bfcc-mxl7m_1037918f-68dc-4885-9322-312f5e12fade"
+ },
+ {
+  "arm": "subject #1: #383 chart, saturation -> true",
+  "t0": "2026-11-07T14:40:21Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-6bdff4bfcc-mxl7m": true,
+   "core-provider-5d8b7c8bdf-p5nhc": true
+  },
+  "old_pods": [
+   "core-provider-6bdff4bfcc-mxl7m"
+  ],
+  "updates_by_pod": {
+   "core-provider-6bdff4bfcc-mxl7m": {
+    "readable": true,
+    "lines": 16,
+    "updates": 0
+   },
+   "core-provider-5d8b7c8bdf-p5nhc": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-p5nhc_cdf0eccf-2a55-449a-8a6b-cd9f1b487bf2"
+ },
+ {
+  "arm": "subject #2: #383 chart, saturation -> false",
+  "t0": "2026-11-07T14:44:46Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-5d8b7c8bdf-p5nhc": false,
+   "core-provider-6bdff4bfcc-p2pmp": true
+  },
+  "old_pods": [
+   "core-provider-5d8b7c8bdf-p5nhc"
+  ],
+  "updates_by_pod": {
+   "core-provider-5d8b7c8bdf-p5nhc": {
+    "readable": true,
+    "lines": 16,
+    "updates": 0
+   },
+   "core-provider-6bdff4bfcc-p2pmp": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-6bdff4bfcc-p2pmp_edc65965-0846-402a-85ee-fcdf4fcd4004"
+ },
+ {
+  "arm": "subject #3: #383 chart, saturation -> true",
+  "t0": "2026-11-07T14:49:13Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-6bdff4bfcc-p2pmp": false,
+   "core-provider-5d8b7c8bdf-pvpqc": true
+  },
+  "old_pods": [
+   "core-provider-6bdff4bfcc-p2pmp"
+  ],
+  "updates_by_pod": {
+   "core-provider-6bdff4bfcc-p2pmp": {
+    "readable": true,
+    "lines": 16,
+    "updates": 0
+   },
+   "core-provider-5d8b7c8bdf-pvpqc": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-pvpqc_7599cbd4-e68c-43c8-a790-e2fc6632eddd"
+ },
+ {
+  "arm": "subject #4: #383 chart, saturation -> false",
+  "t0": "2026-11-07T14:53:35Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-5d8b7c8bdf-pvpqc": true,
+   "core-provider-6bdff4bfcc-csssq": true
+  },
+  "old_pods": [
+   "core-provider-5d8b7c8bdf-pvpqc"
+  ],
+  "updates_by_pod": {
+   "core-provider-5d8b7c8bdf-pvpqc": {
+    "readable": true,
+    "lines": 16,
+    "updates": 0
+   },
+   "core-provider-6bdff4bfcc-csssq": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-6bdff4bfcc-csssq_1398a528-0eb9-4fe1-bcfd-91c5813359a0"
+ },
+ {
+  "arm": "subject #5: #383 chart, saturation -> true",
+  "t0": "2026-11-07T14:58:07Z",
+  "new_cdc_replicasets": 1,
+  "core_provider_pods": {
+   "core-provider-6bdff4bfcc-csssq": false,
+   "core-provider-5d8b7c8bdf-cdmgg": true
+  },
+  "old_pods": [
+   "core-provider-6bdff4bfcc-csssq"
+  ],
+  "updates_by_pod": {
+   "core-provider-6bdff4bfcc-csssq": {
+    "readable": true,
+    "lines": 16,
+    "updates": 0
+   },
+   "core-provider-5d8b7c8bdf-cdmgg": {
+    "readable": true,
+    "lines": 25,
+    "updates": 1
+   }
+  },
+  "lease_holder": "core-provider-5d8b7c8bdf-cdmgg_8d9e826a-6832-4656-add1-6241cde4deda"
+ }
+]
