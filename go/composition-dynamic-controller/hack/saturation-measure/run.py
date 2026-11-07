@@ -97,6 +97,9 @@ def set_arm(limit, threshold):
        "--set-string", f"cdc.env.COMPOSITION_CONTROLLER_SATURATION_ENABLED={'true' if on else 'false'}",
        "--set-string", f"cdc.env.COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD={threshold if on else '0'}",
        "--wait", "--timeout", "5m")
+    # The old core-provider replica must be GONE, not merely superseded: until it exits it keeps
+    # reconciling and restarting the cdc (two replicas, no leader election, during every upgrade).
+    settle("one core-provider pod", one_core_provider)
 
     # core-provider applies this on its own reconcile, so wait for what the cdc will actually read.
     # Ready stays True while a bad value blocks every rollout, so Synced and the ConfigMap are the
@@ -121,6 +124,35 @@ def set_arm(limit, threshold):
     # The env arrives by ConfigMap, which a running pod does not re-read.
     kubectl("-n", NS, "rollout", "restart", f"deploy/{CDC}")
     kubectl("-n", NS, "rollout", "status", f"deploy/{CDC}", "--timeout=300s")
+    settle("the cdc Deployment, one pod, no rollout", cdc_stable)
+
+
+def settle(what, ok, quiet=20, secs=300):
+    """Wait until ok() has held for `quiet` seconds without a break."""
+    deadline, since = time.time() + secs, None
+    while time.time() < deadline:
+        if ok():
+            since = since or time.time()
+            if time.time() - since >= quiet:
+                return
+        else:
+            since = None
+        time.sleep(2)
+    sys.exit(f"never settled: {what}")
+
+
+def one_core_provider():
+    pods = json.loads(kubectl("-n", "krateo-system", "get", "pods", "-l", "app.kubernetes.io/name=core-provider,app.kubernetes.io/instance=core-provider", "-o", "json"))["items"]
+    # Any pod, terminating or not: a terminating replica still drains its in-flight reconciles.
+    return len(pods) == 1 and pods[0]["status"].get("phase") == "Running"
+
+
+def cdc_stable():
+    d = json.loads(kubectl("-n", NS, "get", "deploy", CDC, "-o", "json"))
+    st, want = d.get("status", {}), d["spec"].get("replicas", 1)
+    pods = [p for p in json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"] if p["metadata"]["name"].startswith(CDC)]
+    return (st.get("observedGeneration") == d["metadata"]["generation"] and st.get("updatedReplicas") == want
+            and st.get("readyReplicas") == want and st.get("replicas") == want and len(pods) == want)
 
 
 def normal_cpu(v):
@@ -293,7 +325,9 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
         "node_cores": round(delta(start, end, "node") / wall, 2) if delta(start, end, "node") is not None else None,
         "samples": len(samples),
         "max_sample_gap_s": round(max_gap, 1),
-        "discard": f"driver suspended: {max_gap:.0f}s between samples" if max_gap > MAX_SAMPLE_GAP else None,
+        "discard": (f"driver suspended: {max_gap:.0f}s between samples" if max_gap > MAX_SAMPLE_GAP
+                    else f"pod changed during the run: sampled {name}, ended on {live['metadata']['name']}"
+                    if live["metadata"]["name"] != name else None),
     }
     os.makedirs(os.path.dirname(RESULTS), exist_ok=True)
     with open(RESULTS, "a") as f:
@@ -335,7 +369,8 @@ def main():
     if os.path.exists(RESULTS):
         for line in open(RESULTS):
             r = json.loads(line)
-            if r.get("chart") == os.environ["CHART_VERSION"]:
+            # same_pod False is a discard even on records written before the harness recorded it as one.
+            if r.get("chart") == os.environ["CHART_VERSION"] and not r.get("discard") and r.get("same_pod") is not False:
                 key = (r["mode"], r["limit"], r["threshold"], r["run"])
                 done[key] = done.get(key, 0) + 1
 
