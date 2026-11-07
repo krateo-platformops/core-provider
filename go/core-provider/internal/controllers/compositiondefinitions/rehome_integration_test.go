@@ -184,13 +184,16 @@ func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config
 	if _, err := dyn.Resource(rehomeGVR).Namespace(namespace).Get(ctx, rehomeInstance, metav1.GetOptions{}); err != nil {
 		t.Fatalf("instance after the hand-over: %v", err)
 	}
+	// POLLED, like the two waits above. The moved definition writes this condition at the END of the
+	// reconcile that deploys its controller, so the controller can be observed first: a single read
+	// here failed on #383's run with the hand-over itself complete.
 	var moved v1alpha1.CompositionDefinition
-	if err := r.Get(ctx, rehomeCDName, rehomeNamespace, &moved); err != nil {
-		t.Fatal(err)
-	}
-	if c := moved.GetCondition(rtv1.TypeReady); strings.Contains(c.Message, "run by CompositionDefinition") {
-		t.Fatalf("moved definition still reports itself a follower after the owner went: %q", c.Message)
-	}
+	rehomeEventually(t, time.Minute, "the moved definition to stop reporting itself a follower", func() bool {
+		if err := r.Get(ctx, rehomeCDName, rehomeNamespace, &moved); err != nil {
+			return false
+		}
+		return !strings.Contains(moved.GetCondition(rtv1.TypeReady).Message, "run by CompositionDefinition")
+	})
 	// The instance named the deleted original; the definition that took the Kind over adopts it
 	// (#215). Without this the next version bump of that definition leaves it behind.
 	rehomeEventually(t, 3*time.Minute, "the instance to be adopted by "+rehomeNamespace, func() bool {
