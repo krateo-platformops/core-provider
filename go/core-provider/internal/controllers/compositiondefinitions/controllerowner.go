@@ -3,6 +3,7 @@ package compositiondefinitions
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
@@ -509,9 +510,36 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 	return definitionGone(false, successor != nil, sharesNS, kindHeld, own), nil
 }
 
+// followerMarker is the part of a follower's Ready message that names its role. followerCondition
+// writes it and isFollowerCondition reads it, so the two cannot drift apart (#387).
+const followerMarker = " is run by CompositionDefinition "
+
 func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
-	return rtv1.Available().WithMessage(fmt.Sprintf(
-		"composition controller for %s is run by CompositionDefinition %s/%s", gvr.String(), owner.Namespace, owner.Name))
+	return rtv1.Available().WithMessage("composition controller for " + gvr.String() + followerMarker + owner.Namespace + "/" + owner.Name)
+}
+
+// isFollowerCondition reports whether c is the Ready condition observeFollower wrote.
+func isFollowerCondition(c rtv1.Condition) bool {
+	return c.Type == rtv1.TypeReady && c.Reason == rtv1.ReasonAvailable && strings.Contains(c.Message, followerMarker)
+}
+
+// readyOnBecomingOwner is what Ready must say when Observe finds this definition owns the controller
+// but Ready still carries the follower message from when it did not (#387).
+//
+// Nothing else replaces that message soon. Observe's owner path reaches Available only once the
+// controller runs here, so the pass that discovers the new role returns "not up to date" first.
+// Update then deploys and writes no Ready, and provider-runtime requeues after the poll interval
+// (3 min by default). Until then the definition reported Ready=True naming a definition that no
+// longer exists. Creating is what is true in that window: this definition owns the controller and
+// is deploying it. The owner path's own Available supersedes it once that is done.
+//
+// Any other condition is left alone: this is a correction of one stale role, not a new opinion on
+// readiness, so an owner that is merely correcting drift keeps the Ready it had.
+func readyOnBecomingOwner(current rtv1.Condition, gvr schema.GroupVersionResource) (rtv1.Condition, bool) {
+	if !isFollowerCondition(current) {
+		return rtv1.Condition{}, false
+	}
+	return rtv1.Creating().WithMessage("this definition now runs the composition controller for " + gvr.String() + "; deploying it"), true
 }
 
 // observeFollower is Observe for a definition that does not own its Kind+version's controller.
