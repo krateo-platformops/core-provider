@@ -122,11 +122,14 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
-# HA is opt-in: raising replicaCount>=2 REQUIRES leaderElection.enabled=true, or the replicas
-# double-reconcile (the binary defaults leader-election off). Enabling it also needs the
-# coordination.k8s.io/leases RBAC, which the chart grants when this is on.
+# ON by default, even at replicaCount 1 (#382). Every rolling update runs the old and the new pod
+# side by side until the new one is Ready, and the old one then drains its in-flight reconciles.
+# Without a Lease both reconcile every CompositionDefinition, and when they disagree (any upgrade
+# that changes the cdc) each restarts every cdc after the other: 5-9 restarts in seconds, measured.
+# With it the new pod waits for the Lease, which the old one releases once it has drained.
+# Required at replicaCount>=2. The chart grants the coordination.k8s.io/leases RBAC when on.
 leaderElection:
-  enabled: false
+  enabled: true
 # PodDisruptionBudget — only rendered when enabled AND replicaCount>1 (a PDB on a single replica
 # would block node drains).
 podDisruptionBudget:

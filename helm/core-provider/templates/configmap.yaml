@@ -18,8 +18,8 @@ data:
   {{ $key }}: {{ $value | quote }}
   {{- end }}
   {{- if .Values.leaderElection.enabled }}
-  # Required for replicaCount>=2: active-passive HA via a coordination.k8s.io Lease. Without it,
-  # multiple replicas double-reconcile. The Lease RBAC is granted in clusterrole.yaml when on.
+  # One reconciling replica via a coordination.k8s.io Lease: across a rolling update (old and new pod
+  # overlap, #382) and at replicaCount>=2. The Lease RBAC is granted in clusterrole.yaml when on.
   CORE_PROVIDER_LEADER_ELECTION: "true"
   {{- end }}
   {{- if .Values.apiRefRBAC.enabled }}

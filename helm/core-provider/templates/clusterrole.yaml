@@ -128,8 +128,8 @@ rules:
   - patch
   - delete
 {{- if .Values.leaderElection.enabled }}
-# Leader election (replicaCount>=2): the controller-runtime manager holds a coordination.k8s.io
-# Lease so only one replica reconciles at a time.
+# Leader election (on by default, #382): the controller-runtime manager holds a coordination.k8s.io
+# Lease so only one replica reconciles at a time, including the old and new pod of a rolling update.
 - apiGroups:
   - coordination.k8s.io
   resources:

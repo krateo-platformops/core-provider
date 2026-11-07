@@ -203,6 +203,10 @@ func main() {
 		HealthProbeBindAddress: healthProbeBindAddress,
 		LeaderElection:         *leaderElection,
 		LeaderElectionID:       fmt.Sprintf("leader-election-%s-provider", strcase.KebabCase(providerName)),
+		// Hand the Lease over on shutdown, after the in-flight reconciles drain, instead of making the
+		// next pod of a rolling update wait out the lease duration (#382). Safe because main returns
+		// as soon as mgr.Start does: nothing runs after the Lease is released.
+		LeaderElectionReleaseOnCancel: true,
 		Cache: cache.Options{
 			SyncPeriod: syncPeriod,
 		},
