@@ -1,0 +1,4 @@
+apiVersion: v2
+name: hookprobe
+description: When do helm hooks run under the cdc, and what does an immutable refusal do
+version: 0.1.0

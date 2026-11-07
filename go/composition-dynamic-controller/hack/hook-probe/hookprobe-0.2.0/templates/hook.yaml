@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-pre-{{ .Values.marker }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: hookprobe
+      containers:
+      - name: see
+        image: registry.k8s.io/kubectl:v1.34.0
+        args: ["-n", "{{ .Release.Namespace }}", "get", "cm", "{{ .Release.Name }}-first", "-o", "jsonpath=SAW {.data.marker}"]
