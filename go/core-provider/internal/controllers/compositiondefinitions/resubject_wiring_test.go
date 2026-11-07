@@ -92,9 +92,17 @@ func innermostBlockContaining(fn *ast.FuncDecl, match func(ast.Node) bool) (*ast
 
 func parseController(t *testing.T) *ast.File {
 	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), controllerSrc, nil, parser.SkipObjectResolution)
+	return parseSource(t, controllerSrc)
+}
+
+// retireSrc holds retireController, the one retirement sequence (#327).
+const retireSrc = "retire.go"
+
+func parseSource(t *testing.T, src string) *ast.File {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), src, nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("parsing %s: %v", controllerSrc, err)
+		t.Fatalf("parsing %s: %v", src, err)
 	}
 	return file
 }
@@ -112,17 +120,21 @@ func findMethod(t *testing.T, file *ast.File, name string) *ast.FuncDecl {
 }
 
 func TestResubjectRunsInTheRetirementBranch(t *testing.T) {
-	fn := findMethod(t, parseController(t), "Update")
+	// The sequence lives in ONE routine, retireController, which both the version change and the
+	// leaked-controller reclaim (#327) call. So the ordering is pinned there, and Update is pinned to
+	// retire only through it: a direct deploy.Undeploy in Update would be a retirement without the
+	// re-subject.
+	fn := findMethod(t, parseSource(t, retireSrc), "retireController")
 
 	undeployBlock, undeployAt := innermostBlockContaining(fn, deployCallTo("Undeploy"))
 	if undeployAt == token.NoPos {
-		t.Fatal("Update no longer calls deploy.Undeploy; if the old controller's retirement moved, " +
+		t.Fatal("retireController no longer calls deploy.Undeploy; if the old controller's retirement moved, " +
 			"this guard must move with it rather than be deleted")
 	}
 
 	resubjectBlock, resubjectAt := innermostBlockContaining(fn, deployCallTo("ResubjectDerivedRBAC"))
 	if resubjectAt == token.NoPos {
-		t.Fatal("Update no longer calls deploy.ResubjectDerivedRBAC (#166). The derived " +
+		t.Fatal("retireController no longer calls deploy.ResubjectDerivedRBAC (#166). The derived " +
 			"`<release>-krateo-rbac` bindings are release-scoped and survive a version bump; the " +
 			"ServiceAccount they name is version-scoped and does not. Without this call nothing " +
 			"repoints them at retirement, and a composition whose CR is absent — withdrawn by an " +
@@ -130,11 +142,8 @@ func TestResubjectRunsInTheRetirementBranch(t *testing.T) {
 	}
 
 	if resubjectBlock != undeployBlock {
-		t.Error("deploy.ResubjectDerivedRBAC is no longer in the same branch as deploy.Undeploy (#166). " +
-			"It must run exactly where the old controller is retired: on a reconcile that leaves the " +
-			"old version served — migration deferred by UpgradePolicy, or another CompositionDefinition " +
-			"still referencing it — the old ServiceAccount is a live identity, and re-subjecting its " +
-			"bindings takes permissions from a controller that is still using them.")
+		t.Error("deploy.ResubjectDerivedRBAC is no longer in the same block as deploy.Undeploy (#166). " +
+			"It must run exactly where the old controller is retired, unconditionally after it.")
 	}
 
 	if resubjectAt < undeployAt {
@@ -142,5 +151,26 @@ func TestResubjectRunsInTheRetirementBranch(t *testing.T) {
 			"version's own baseline bindings; re-subjecting first rewrites objects that are about to " +
 			"be removed, and leaves the repair unordered with respect to the deletion that makes it " +
 			"necessary.")
+	}
+
+	update := findMethod(t, parseController(t), "Update")
+	for _, name := range []string{"Undeploy", "ResubjectDerivedRBAC"} {
+		if _, at := innermostBlockContaining(update, deployCallTo(name)); at != token.NoPos {
+			t.Errorf("Update calls deploy.%s directly. Retirement must go through retireController, "+
+				"or it can delete an identity without moving the bindings that name it (#166).", name)
+		}
+	}
+	retires := 0
+	ast.Inspect(update, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "retireController" {
+				retires++
+			}
+		}
+		return true
+	})
+	if retires != 2 {
+		t.Errorf("Update calls retireController %d times, want 2: the version change and the leaked-controller "+
+			"reclaim (#327). A third is a new retirement path this guard has not been told about.", retires)
 	}
 }
