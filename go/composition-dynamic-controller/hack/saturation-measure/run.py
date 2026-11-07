@@ -304,7 +304,7 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["setup", "one", "sweep"])
+    ap.add_argument("cmd", choices=["setup", "one", "sweep", "remeasure"])
     ap.add_argument("--objects", type=int, default=64)
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--payload", type=int, default=4)
@@ -345,6 +345,14 @@ def main():
             done[key] -= 1
             return
         one(a.objects, limit, threshold, run, a.count, a.payload, mode)
+
+    if a.cmd == "remeasure":
+        # #72: the same arms that carried the 3.3x, on the fixed build, nothing else.
+        for run in range(1, a.runs + 1):
+            for mode in ("steady", "restart"):
+                for threshold in ("off", "50"):
+                    planned(mode, "250m", threshold, run)
+        return
 
     # Alternated within each repetition, so drift over the morning cannot sit in one arm.
     for run in range(1, a.runs + 1):
