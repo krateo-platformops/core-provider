@@ -854,8 +854,8 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "title": "Enable leader election (required for replicaCount>=2)",
-          "default": false
+          "title": "Enable leader election (keeps the old and new pod of a rolling update from both reconciling; required for replicaCount>=2)",
+          "default": true
         }
       }
     },

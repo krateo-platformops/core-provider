@@ -24,7 +24,7 @@ from.
 | `global.imageRegistry` | `""` | Replaces the registry **host** of every image in the chart (engine, chart-inspector, CDC) — one value for mirrored / air-gapped installs; repository paths are preserved. |
 | `resources` | requests `500m`/`512Mi`, limit mem `2Gi`, **no CPU limit** | Cold start reconciles every `CompositionDefinition` at once; <2Gi OOM-kills on a real umbrella, and a CPU limit throttles the reconcile loop to zero progress (measured — see the values.yaml comment). |
 | `livenessProbe` / `readinessProbe` | TCP `:8080` | The binary has no `/healthz` yet; the always-bound metrics port is probed. |
-| `leaderElection.enabled` | `false` | REQUIRED at `replicaCount>=2` or replicas double-reconcile; grants Lease RBAC when on. |
+| `leaderElection.enabled` | `true` | One reconciling replica. A rolling update overlaps the old and new pod even at `replicaCount: 1`, and without the Lease both reconcile and restart every cdc after each other (#382). Required at `replicaCount>=2`; grants Lease RBAC when on. |
 | `podDisruptionBudget` / `topologySpreadConstraints` | off / `[]` | Rendered only when meaningful (`replicaCount>1`). |
 | `terminationGracePeriodSeconds` | `45` | Must exceed the manager's ~30s graceful drain. |
 | `env` | `CORE_PROVIDER_DEBUG: "false"` | Extra engine env, rendered into the env ConfigMap. |
