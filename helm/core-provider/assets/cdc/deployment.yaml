@@ -24,6 +24,13 @@ spec:
       labels:
         app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
         app.kubernetes.io/part-of: krateo
+      {{ "{{" }}- if .config_checksum {{ "}}" }}
+      # The env ConfigMap's checksum (#391): a change to it changes this template, so the pod rolls
+      # in the same apply instead of in a second write. Absent where no checksum is passed (Lookup,
+      # Undeploy), which only use the Deployment's name.
+      annotations:
+        krateo.io/config-checksum: {{ "{{" }} .config_checksum {{ "}}" }}
+      {{ "{{" }}- end {{ "}}" }}
     spec:
       serviceAccountName: {{ "{{" }} .serviceAccountName {{ "}}" }}
       {{- with .Values.cdc.terminationGracePeriodSeconds }}
