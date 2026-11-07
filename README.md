@@ -22,9 +22,14 @@ Normally installed by the **Krateo installer**, which pins the chart. Standalone
 (requires Kubernetes >= 1.36 — see [docs/usage.md](docs/usage.md)):
 
 ```sh
+# VERSION: the latest release, https://github.com/krateo-platformops/core-provider/releases/latest
 helm install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
-  --version 2.12.4 --namespace krateo-system --create-namespace
+  --version "$VERSION" --namespace krateo-system --create-namespace
 ```
+
+**Install from the OCI registry above, not from `https://charts.krateo.io`.** That HTTP index carries
+an unrelated, older `core-provider` lineage (newest `1.0.1-rc1` when checked on 2026-11-07) and none
+of the 2.x releases, so pinning from it silently installs a different composition engine.
 
 ## Configure
 
