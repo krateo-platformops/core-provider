@@ -80,20 +80,21 @@ Per-definition override: `CompositionDefinition.spec.controller`
 ### CPU-saturation gating (opt-in, off by default)
 
 Two `cdc.env` variables let a composition controller slow ITSELF down when its own CPU is saturated
-(unstructured-runtime v1.10.0, #66). Nothing changes unless the first is set:
+(unstructured-runtime v1.12.0, #66). Nothing changes unless the first is set:
 
 | Env var | Default | Meaning |
 |---|---|---|
 | `COMPOSITION_CONTROLLER_SATURATION_ENABLED` | `false` | Bound reconciles by the container's cgroup v2 `cpu.pressure` ("some avg10"). Local capacity starts at 1, ramps +1 per 2s to `workers` until the first cut, halves while pressure is over the threshold, and then recovers +1 per clean 30s. |
 | `COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD` | `0` (runtime default 50, provisional) | Percentage over which the controller counts as saturated. Out of range (outside 0-100) fails startup. |
 
-A deferred reconcile shows `Synced=False/ReconcileDeferred` with "the controller's own local
-capacity" in the message, except during the startup ramp, which writes nothing. With the default
+Low capacity behaves like fewer workers: a worker takes a slot before it takes work, so the queue's
+order is the order work runs in, and a spec change goes ahead of a resync. Nothing is written on the
+object, because the controller's own saturation is not a state of the object. With the default
 `cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota. The
 threshold is being measured on the cdc at sub-core and 1-core limits before it is relied on.
 
-With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity`, `.saturation.input` and
-`.deferrals` show what the rule is doing (unstructured-runtime v1.11.1). See the
+With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity` and `.saturation.input`
+show what the rule is doing. See the
 [metrics reference](../go/composition-dynamic-controller/telemetry/metrics-reference.md).
 
 ## The env ConfigMap contract

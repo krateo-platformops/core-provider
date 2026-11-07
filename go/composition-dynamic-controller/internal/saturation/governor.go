@@ -1,4 +1,4 @@
-// Package saturation wires the cdc's opt-in CPU-saturation gating (unstructured-runtime v1.10.0, #66).
+// Package saturation wires the cdc's opt-in CPU-saturation gating (unstructured-runtime v1.12.0, #66).
 //
 // It lives here, not in package main, because the image builds `go build ./main.go` from main.go,
 // internal/ and pkg/ only (Dockerfile). A second file in package main compiles with `go build ./...`
@@ -13,7 +13,7 @@ import (
 )
 
 // NewGovernor returns the governor that bounds this controller's reconciles by its own CPU
-// saturation (unstructured-runtime v1.10.0, #66), or nil when the opt-in is off.
+// saturation (unstructured-runtime v1.12.0, #66), or nil when the opt-in is off.
 //
 // OFF BY DEFAULT, and nil rather than a governor with saturation disabled: the cdc implements no
 // RateLimitKeyer, so a governor without saturation would gate nothing, and passing none keeps the
