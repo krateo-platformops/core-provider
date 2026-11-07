@@ -1669,52 +1669,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					log.Debug("Skipping controller retirement: version still referenced by another CompositionDefinition", "version", vi.Version)
 					continue
 				}
-				err = deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
-					DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
-					RBACFolderPath:         CDCrbacConfigFolder,
-					DeploymentTemplatePath: CDCtemplateDeploymentPath,
-					ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
-					JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
-					ServiceTemplatePath:    ServiceTemplatePath,
-					DynamicClient:          e.dynamic,
-					Spec:                   (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
-					GVR:                    oldGVR,
-					KubeClient:             e.kube,
-					Namespace:              cr.Namespace,
-					SkipCRD:                true,
-					AuthnNamespace:         AuthnNamespace,
-				})
-				if err != nil {
-					return fmt.Errorf("error undeploying older version of dynamic controller: %w", err)
-				}
-				log.Debug("Undeployed older versions of dynamic controller", "gvr", oldGVR.String())
-
-				// The ServiceAccount the retired controller ran as has just been deleted, and every
-				// derived `<release>-krateo-rbac` binding for this Kind still names it. Those
-				// bindings are release-scoped and survive the bump; the identity is version-scoped
-				// and does not. Repoint them in the same operation that retires the identity —
-				// leaving it to each composition's next Observe cannot repair a composition whose
-				// CR is not currently present to be observed (#166).
-				// The current version's controller runs in the owner's namespace when this
-				// definition follows (controllerowner.go).
-				newControllerNamespace := cr.Namespace
-				if owner != nil {
-					newControllerNamespace = owner.Namespace
-				}
-				repaired, rerr := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
-					DynamicClient: e.dynamic,
-					Namespace:     cr.Namespace,
-					NewNamespace:  newControllerNamespace,
-					OldGVR:        oldGVR,
-					NewGVR:        gvr,
-				})
-				if rerr != nil {
-					return fmt.Errorf("error re-subjecting derived RBAC from %s to %s: %w",
-						oldGVR.Version, gvr.Version, rerr)
-				}
-				if repaired > 0 {
-					log.Debug("Re-subjected derived RBAC onto the current controller ServiceAccount",
-						"count", repaired, "from", oldGVR.String(), "to", gvr.String())
+				if err := e.retireController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
+					oldGVR, gvr, currentControllerNamespace(cr, owner), log); err != nil {
+					return err
 				}
 			}
 		}
@@ -1754,32 +1711,37 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 
-	// #270. Report per-version controllers that LEAKED — created by core-provider and never
+	// #270 / #327. Retire per-version controllers that LEAKED: created by core-provider and never
 	// retired, because a retirement that ran while 2.13.45's drain wedge was live aborted Undeploy
-	// partway. On 057 that left installers-v0-3-480-controller running two installer versions late,
-	// invisible to the rewrite because the rewrite only touches controllers still in the desired set.
+	// partway. On 057 that left installers-v0-3-480-controller running eight days and twelve cdc
+	// versions late, invisible to the rewrite because the rewrite only touches controllers still in
+	// the desired set. 2.13.46 to 2.13.73 detected it and only logged it (#279); nothing removed it.
 	//
-	// REPORT ONLY, deliberately: nothing deletes them here. Identifying a leak is recoverable if
-	// the predicate is wrong; deleting a CLAIMED controller is not, and this is the same function
-	// whose last change wedged every migration on 2.13.45. The deletion is a separate decision.
+	// WHAT IS RETIRED is exactly what findLeakedControllers reports, with its refusals unchanged: any
+	// unaccounted instance blocks everything, a version still in the CRD is never a candidate, and a
+	// version another definition references is kept. Retirement is the SAME routine the version
+	// change uses, so the bindings naming the leaked identity are moved onto the current one (#166).
+	//
+	// A FAILED RECLAIM NEVER FAILS THE UPDATE. It is logged and tried again on the next Update. A
+	// retirement able to wedge the definition is how these leaks were made in the first place.
 	//
 	// Called from Update rather than Observe because Update runs only when something changed, so
-	// the Deployment LIST this costs is not paid per reconcile across 68 controllers. And this is
-	// the topical place: a leak is created by the retirement a few lines above.
-	//
-	// SILENT WHEN THERE IS NOTHING TO SAY, including when the predicate refuses — the kept reasons
-	// go to Debug, so an operator sees a leak named and not the arithmetic behind not finding one.
-	if leaked, kept, lerr := e.findLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace); lerr != nil {
+	// the Deployment LIST this costs is not paid per reconcile across 68 controllers.
+	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace,
+		func(ctx context.Context, retired schema.GroupVersionResource) error {
+			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, currentControllerNamespace(cr, owner), log)
+		})
+	switch {
+	case lerr != nil:
 		log.Debug("could not check for leaked controllers", "error", lerr.Error())
-	} else {
-		if len(leaked) > 0 {
-			names := make([]string, 0, len(leaked))
-			for i := range leaked {
-				names = append(names, leaked[i].Name)
-			}
-			log.Info("per-version controllers appear to have leaked and are not being deleted; "+
-				"they are retired versions nothing claims, safe to remove by hand (#270)",
-				"deployments", names, "namespace", cr.Namespace)
+	default:
+		if len(reclaimed) > 0 {
+			log.Info("retired leaked per-version controllers nothing claims (#327)",
+				"deployments", reclaimed, "namespace", cr.Namespace)
+		}
+		for name, ferr := range failed {
+			log.Info("could not retire a leaked per-version controller; will retry on the next update (#327)",
+				"deployment", name, "namespace", cr.Namespace, "error", ferr.Error())
 		}
 		if len(kept) > 0 {
 			log.Debug("leaked-controller check kept candidates", "reasons", kept)
