@@ -1,7 +1,9 @@
 package saturation
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/ratelimit"
@@ -28,12 +30,19 @@ func TestNewGovernor(t *testing.T) {
 	if !ok || lc.LocalCapacity() != 1 {
 		t.Errorf("with saturation on, local capacity must start at 1 (the ramp), got ok=%v", ok)
 	}
-	// A keyless pass (the cdc's case) is gated: the first takes the single slot, the second waits.
-	if _, d := g.TryAcquire(""); d != nil {
-		t.Fatalf("the first keyless pass must get the local slot, got %+v", d)
+	// A worker takes the single slot before it pops; the next one waits. The controller finds the gate
+	// by this interface, so a governor without it would leave the cdc unbounded with the rule on.
+	gate, ok := g.(ratelimit.LocalGate)
+	if !ok {
+		t.Fatal("the governor does not implement ratelimit.LocalGate, so nothing would bound the workers")
 	}
-	if _, d := g.TryAcquire(""); d == nil || !d.Local {
-		t.Errorf("a second keyless pass at capacity 1 must be a LOCAL deferral, got %+v", d)
+	if _, ok := gate.AcquireLocal(context.Background()); !ok {
+		t.Fatal("the first worker must get the local slot")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, ok := gate.AcquireLocal(ctx); ok {
+		t.Error("a second worker at capacity 1 must wait for the slot")
 	}
 
 	// An out-of-range threshold fails at startup instead of capping silently.

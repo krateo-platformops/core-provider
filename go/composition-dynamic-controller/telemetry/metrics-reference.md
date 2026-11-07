@@ -19,7 +19,7 @@ For average duration, use `_sum` divided by `_count` instead of `_bucket`.
 | `unstructured_runtime.ratelimit.local.capacity` | Gauge | count | Process-wide capacity the controller's own CPU saturation allows. Not reported when saturation gating is off: absence means off, never 0. | `min(unstructured_runtime_ratelimit_local_capacity)` |
 | `unstructured_runtime.ratelimit.saturation.input` | Gauge | % | Last `cpu.pressure` "some avg10", attribute `input`. Not reported while the input is disabled. | `max(unstructured_runtime_ratelimit_saturation_input)` |
 | `unstructured_runtime.ratelimit.saturation.input.enabled` | Gauge | 0/1 | 1 when the saturation input is read, 0 when disabled (no cgroup v2, no PSI). | `min(unstructured_runtime_ratelimit_saturation_input_enabled)` |
-| `unstructured_runtime.ratelimit.deferrals` | Counter | count | Reconcile passes deferred by the governor, attributes `key` and `cause` (`throttled`, `capacity`, `saturated`, `ramping`), matching provider-runtime. Counts the quiet startup ramp, which writes nothing on the object. | `sum by (cause) (rate(unstructured_runtime_ratelimit_deferrals_total[5m]))` |
+| `unstructured_runtime.ratelimit.deferrals` | Counter | count | Reconcile passes deferred by the governor, attributes `key` and `cause` (`throttled`, `capacity`). The CPU rule defers nothing: it bounds workers, so read `local.capacity` for it. | `sum by (cause) (rate(unstructured_runtime_ratelimit_deferrals_total[5m]))` |
 
 ## Queue Metrics
 
