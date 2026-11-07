@@ -1,0 +1,4 @@
+apiVersion: v2
+name: seqparent
+description: Renders one composition, as an umbrella does
+version: 0.1.0

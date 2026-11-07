@@ -1,0 +1,6 @@
+apiVersion: composition.krateo.io/v0-1-0
+kind: Seqprobe
+metadata:
+  name: c
+spec:
+  marker: {{ .Values.marker | quote }}
