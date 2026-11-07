@@ -7,7 +7,30 @@ import (
 
 const (
 	ReasonReconcileGracefullyPaused = "ReconcileGracefullyPaused"
+
+	// ReasonGracefulPausePending: krateo.io/gracefully-paused is set but has not taken effect (#381).
+	ReasonGracefulPausePending = "GracefulPausePending"
 )
+
+// SyncedGracefulPausePending reports a graceful pause that is requested and not yet in effect (#381).
+//
+// The pause engages only at the end of the next Update, i.e. after the next change is APPLIED. On a
+// converged composition that can be never, and until then every change goes through: a deleted
+// workload is recreated, a manual scale is reverted. Nothing on the object used to say so, and two
+// sessions read Ready=True/Available plus Synced=True as "paused". Synced is the liveness axis
+// (#241): False says "do not read this as settled", and the message says what will happen and what
+// to use instead. Ready is left alone, as it is for the pause itself.
+func SyncedGracefulPausePending() metav1.Condition {
+	return metav1.Condition{
+		Type:               condition.TypeSynced,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonGracefulPausePending,
+		Message: "krateo.io/gracefully-paused is set but not yet in effect: it takes effect after the next " +
+			"change to this composition is applied, and that change IS applied. Use krateo.io/paused to " +
+			"stop reconciliation now.",
+	}
+}
 
 // ReconcileGracefullyPaused is the READINESS half of a graceful pause: Ready stays TRUE.
 //

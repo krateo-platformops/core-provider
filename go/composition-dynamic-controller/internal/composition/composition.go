@@ -217,7 +217,10 @@ func (h *handler) helmCacheOpts() []helm.ClientOption {
 	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients)}
 }
 
-func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (controller.ExternalObservation, error) {
+func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (observation controller.ExternalObservation, rerr error) {
+	// #381: on every return, say so when a graceful pause is requested but not yet in effect. Deferred,
+	// so the body (and every guard test that reads it) stays where it was.
+	defer func() { observation, rerr = withGracefulPausePending(mg, observation, rerr) }()
 	mg = mg.DeepCopy()
 
 	log := xcontext.Logger(ctx)
@@ -1682,4 +1685,20 @@ func (h *handler) getHelmLogger(verbose bool) func(format string, v ...interface
 		}
 	}
 	return func(format string, v ...interface{}) {}
+}
+
+// withGracefulPausePending adds Synced=False/GracefulPausePending when krateo.io/gracefully-paused is
+// "true" and the pause has not engaged (no valid gracefully-paused-time yet) (#381). Not on an error,
+// which the runtime reports itself; not on a deleting object, which Delete owns; and not once engaged,
+// where Observe returns the paused conditions. The runtime keeps a handler-returned Synced on every
+// path, including up-to-date, so this survives the converged case it exists for.
+func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.ExternalObservation, err error) (controller.ExternalObservation, error) {
+	if err != nil || mg.GetDeletionTimestamp() != nil || !compositionMeta.IsGracefullyPaused(mg) {
+		return obs, err
+	}
+	if _, engaged := compositionMeta.GetGracefullyPausedTime(mg); engaged {
+		return obs, err
+	}
+	obs.Conditions = append(obs.Conditions, compositionCondition.SyncedGracefulPausePending())
+	return obs, err
 }
