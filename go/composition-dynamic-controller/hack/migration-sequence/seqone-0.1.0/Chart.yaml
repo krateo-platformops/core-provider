@@ -1,0 +1,4 @@
+apiVersion: v2
+name: seqone
+description: A StatefulSet moved onto volumeClaimTemplates by a script outside the upgrade
+version: 0.1.0

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-marker
+data:
+  marker: {{ .Values.marker | quote }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-db
+spec:
+  serviceName: {{ .Release.Name }}-db
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ .Release.Name }}-db}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}-db}
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
