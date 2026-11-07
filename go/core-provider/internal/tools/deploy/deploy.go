@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -513,27 +512,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("Configmap successfully installed", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace, "digest", hsh.GetHash())
 
 	dep := appsv1.Deployment{}
-	// Per-Kind CDC tuning: pass spec.controller values only when set, so the Deployment template's
-	// chart-global defaults (workers=1, resync=3m) apply for definitions that omit them. Rendering
-	// here (Deploy) is what gets applied + hashed; the Lookup render is overwritten by a live Get,
-	// so it needs no change — a spec.controller edit re-renders, re-applies, and re-hashes here,
-	// which is exactly what triggers the CDC restart.
-	depValues := []any{"serviceAccountName", sa.Name, "api_ref_name", opts.ApiRefName}
-	if c := opts.Controller; c != nil {
-		if c.Workers != nil {
-			depValues = append(depValues, "workers", *c.Workers)
-		}
-		if c.ResyncInterval != nil {
-			depValues = append(depValues, "resyncInterval", *c.ResyncInterval)
-		}
-		if c.Resources != nil {
-			// Marshal to JSON (valid YAML) and inline it into the template as `resources: {...}`.
-			rj, err := json.Marshal(c.Resources)
-			if err != nil {
-				return "", fmt.Errorf("marshaling spec.controller.resources: %w", err)
-			}
-			depValues = append(depValues, "resources", string(rj))
-		}
+	depValues, err := cdcDeploymentValues(sa.Name, opts, cm.Data)
+	if err != nil {
+		return "", err
 	}
 	err = objects.CreateK8sObject(
 		&dep,
@@ -590,22 +571,11 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", fmt.Errorf("error waiting for deployment to be ready: %w", err)
 		}
 
-		// Deployment needs to be restarted if the hash changes to get the new configmap
-		err = deployment.RestartDeployment(ctx, opts.KubeClient, &dep)
-		if err != nil {
-			log.Error(err, "restarting deployment")
-			return "", err
-		}
-
-		// Wait for deployment to be ready after restart
-		err = watcher.NewWatcher(opts.DynClient,
-			appsv1.SchemeGroupVersion.WithResource("deployments"),
-			1*time.Minute,
-			deployment.IsReady).WatchResource(ctx, dep.GetNamespace(), dep.GetName())
-		if err != nil {
-			log.Error(err, "waiting for deployment to be ready")
-			return "", fmt.Errorf("waiting for deployment to be ready: %w", err)
-		}
+		// NO RESTART HERE (#391). This used to patch kubectl.kubernetes.io/restartedAt after the apply
+		// so the controller re-read its env ConfigMap. That was a SECOND template write: when the
+		// deployment controller synced between the two, every Update rolled the cdc twice (43 of 68
+		// cdcs on 2.13.75's roll on krateo-057). The env ConfigMap's checksum is now in the pod
+		// template (cdcDeploymentValues), so a ConfigMap change rolls the pod in the same write.
 	}
 
 	return hsh.GetHash(), nil
