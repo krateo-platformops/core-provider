@@ -43,6 +43,18 @@ def comp(version, marker):
                        "metadata": {"name": "p", "namespace": NS}, "spec": {"marker": marker}})
 
 
+def set_marker(version, marker):
+    """A write in the moment after a prune can fail conversion, so the bump's own settling is retried."""
+    end = time.time() + 120
+    while True:
+        r = k("apply", "--server-side", "--force-conflicts", "--field-manager=probe", "-f", "-", stdin=comp(version, marker), check=False)
+        if r.returncode == 0:
+            return
+        if time.time() > end:
+            sys.exit(r.stderr[-300:])
+        time.sleep(5)
+
+
 def get():
     r = k("-n", NS, "get", f"hookprobes.{GROUP}", "p", "-o", "json", check=False)
     return json.loads(r.stdout) if r.returncode == 0 else None
@@ -83,7 +95,7 @@ def main():
     # A: a real change with a pre-upgrade hook, on a chart bump.
     k("apply", "-f", "-", stdin=cd(f"{BASE}/hookprobe-0.2.0.tgz"))
     wait("v0-2-0", lambda: (get() or {}).get("metadata", {}).get("labels", {}).get("krateo.io/composition-version") == "v0-2-0", 600)
-    k("apply", "--server-side", "--force-conflicts", "--field-manager=probe", "-f", "-", stdin=comp("v0-2-0", "two"))
+    set_marker("v0-2-0", "two")
     job = f"{rel}-pre-two"
 
     def done():
@@ -99,7 +111,7 @@ def main():
     before = secrets()
     k("apply", "-f", "-", stdin=cd(f"{BASE}/hookprobe-0.3.0.tgz"))
     wait("v0-3-0", lambda: (get() or {}).get("metadata", {}).get("labels", {}).get("krateo.io/composition-version") == "v0-3-0", 600)
-    k("apply", "--server-side", "--force-conflicts", "--field-manager=probe", "-f", "-", stdin=comp("v0-3-0", "three"))
+    set_marker("v0-3-0", "three")
     t0 = time.time()
     samples = []
     while time.time() - t0 < 300:
