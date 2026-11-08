@@ -93,6 +93,14 @@ type UndeployOptions struct {
 	// Namespace are removed. Set it whenever the version is still referenced by another definition:
 	// deleting the shared objects would strip the surviving controller of its permissions.
 	KeepShared bool
+
+	// Relocating removes ONE PLACEMENT of a controller that is moving, not the controller (#313):
+	// the objects that live with the controller in ControllerNamespace (Deployment, after it has
+	// drained; ConfigMaps; Service; ServiceAccount) and its authn mapping. It keeps everything the
+	// new placement shares with the old one: everything KeepShared keeps, AND the namespaced grant
+	// Role/RoleBinding in Namespace, which the new placement uses under the same name. Deleting
+	// those would strip the new controller of its grant until the next apply.
+	Relocating bool
 }
 
 // (UndeployOptions needs no SnowplowURL: the apiRef ClusterRole + binding are deleted by name.)
@@ -340,7 +348,7 @@ func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole
 	return nil
 }
 
-func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, keepClusterScoped bool) error {
+func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, keepClusterScoped bool, keepGrant bool) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
 	if keepClusterScoped {
@@ -362,19 +370,22 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 		log.Debug("ClusterRoleBinding successfully uninstalled", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 	}
 
-	err := kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
-		return err
-	}
-	log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
+	var err error
+	if !keepGrant {
+		err = kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
+			return err
+		}
+		log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
 
-	err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
-		return err
+		err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
+			return err
+		}
+		log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 	}
-	log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 
 	err = kubecli.Uninstall(ctx, dyn, serviceAccountGVR, &sa, kubecli.UninstallOptions{})
 	if err != nil {
@@ -714,7 +725,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 	log.Debug("Configmap successfully uninstalled", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace)
 
-	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.KeepShared)
+	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.keepShared(), opts.Relocating)
 	if err != nil {
 		return err
 	}
@@ -728,7 +739,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 
 	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
 	// no namespace in it, so it is shared with any other definition on this Kind+version.
-	if !opts.KeepShared {
+	if !opts.keepShared() {
 		err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
 		if err != nil {
 			return err
@@ -755,7 +766,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	// The credentials Role/RoleBinding live in the Secret's namespace under the shared
 	// {resource}-{apiVersion} name; outside this definition's namespace another definition on the
 	// same version may be using them.
-	keepCredentialsRBAC := opts.KeepShared && opts.Spec != nil && opts.Spec.Credentials != nil &&
+	keepCredentialsRBAC := opts.keepShared() && opts.Spec != nil && opts.Spec.Credentials != nil &&
 		opts.Spec.Credentials.PasswordRef.Namespace != opts.Namespace
 	if opts.Spec != nil && opts.Spec.Credentials != nil && !keepCredentialsRBAC {
 		role := rbacv1.Role{}
@@ -1137,3 +1148,7 @@ func controllerObjectName(controllerNamespace string, gvr schema.GroupVersionRes
 	}
 	return types.NamespacedName{Namespace: controllerNamespace, Name: resourceNamer(gvr.Resource, gvr.Version)}, nil
 }
+
+// keepShared reports whether Undeploy must leave the objects shared with another placement or
+// definition. Relocating implies it: a moving controller keeps every shared object.
+func (o UndeployOptions) keepShared() bool { return o.KeepShared || o.Relocating }
