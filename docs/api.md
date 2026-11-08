@@ -34,6 +34,7 @@ The input: "serve this chart as a Kubernetes API".
 | `statusDataTemplate[]` | `{forPath, expression, type?, schema?, preserveUnknownFields?}` | Projected status fields: `${ jq }` over `self`/`spec`/`status`/`helm`/`api`, written under `.status` at `forPath`. `type` XOR `schema` XOR `preserveUnknownFields`; validated at reconcile (reserved baseline keys rejected). |
 | `upgradePolicy` | `Automatic` \| `Manual` \| `Paused` | Instance migration on a chart-version bump. `Automatic` (default) migrates eagerly; `Manual` waits for the `krateo.io/upgrade-to-version: <version>` annotation; `Paused` freezes migration. |
 | `controller.{workers,resyncInterval}` | int / duration | Per-Kind CDC tuning; overrides the chart-global `cdc.workers`/`cdc.resyncInterval` without restarting other controllers. |
+| `controller.pool` | string (DNS-1123 label) | **Inert in this release: accepted, validated, and ignored.** Reserves the name of a shared controller pool this Kind's controller will run in; set or absent, the Kind keeps its dedicated controller, unchanged. See [the pool design](design/cdc-pooling.md). |
 
 ### `status`
 

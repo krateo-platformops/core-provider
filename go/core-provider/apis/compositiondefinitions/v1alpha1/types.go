@@ -219,6 +219,17 @@ type ControllerConfig struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
 	ResyncInterval *string `json:"resyncInterval,omitempty"`
 
+	// Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
+	// INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
+	// render the same dedicated controller, byte for byte. It exists first so the API is settled before
+	// the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
+	// the union of its members' permissions, and names let Kinds with similar permissions share one.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Pool *string `json:"pool,omitempty"`
+
 	// Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
 	// template ships resources:{} (no requests), which is bad practice and makes the CDC
 	// unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs
