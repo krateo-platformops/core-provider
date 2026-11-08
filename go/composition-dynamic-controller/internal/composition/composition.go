@@ -597,6 +597,19 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// selfHealed defers the drift return until after the status write below. See #337 at the end of
 	// this block.
 	selfHealed := false
+	// The render dropped objects that the merge did NOT delete. That is the #304 shape ("removed from
+	// the spec, child still alive"), and it reads Changed == false: plumbing's changed counts
+	// created/deleted/patched, and an intended deletion that didn't happen is none of those. So it
+	// must be logged OUTSIDE the Changed branch, or the one case the intendedDeletions field exists
+	// for (#346) is never printed. That is exactly how krateo-autopilot on krateo-057 reported "up to
+	// date" 62 times with objects its spec no longer renders.
+	if n := undeletedIntendedDeletions(reconcileRes); n > 0 {
+		log.Warn("Composition render dropped objects that were not deleted (kept by helm.sh/resource-policy, or their deletion failed)", "package", pkg.URL,
+			"intendedDeletions", reconcileRes.IntendedDeletions,
+			"intendedDeletionsCount", len(reconcileRes.IntendedDeletions),
+			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
+			"deleted", reconcileRes.Deleted, "changed", reconcileRes.Changed)
+	}
 	if reconcileRes.Changed {
 		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
 		// was done about it, and at Debug it was invisible on every cluster that runs at Info —
@@ -1701,4 +1714,18 @@ func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.Exte
 	}
 	obs.Conditions = append(obs.Conditions, compositionCondition.SyncedGracefulPausePending())
 	return obs, err
+}
+
+// undeletedIntendedDeletions is how many objects the render asked to delete beyond what the merge
+// actually deleted. Positive means a child that should be gone is still alive (#304). It counts the
+// omitted tail too, so a truncated list cannot hide a shortfall.
+func undeletedIntendedDeletions(res *helmconfig.ReconcileResult) int {
+	if res == nil {
+		return 0
+	}
+	intended := len(res.IntendedDeletions) + res.IntendedDeletionsOmitted
+	if short := intended - res.Deleted; short > 0 {
+		return short
+	}
+	return 0
 }
