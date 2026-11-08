@@ -4,13 +4,13 @@ title: "Design: composition controllers live in the management namespace, not th
 description: Fixes #313's namespace-deletion deadlock by deploying every per-version cdc into core-provider's own namespace (and a KubernetesTarget's controllerNamespace on a spoke), with a stop-before-start migration.
 resource: ghcr.io/krateo-platformops/composition-dynamic-controller
 tags: [design, cdc, namespace, finalizer, migration, multicluster]
-status: proposed
+status: approved
 timestamp: 2026-11-08T00:00:00Z
 ---
 
 # Design: composition controllers live in the management namespace
 
-**Status:** proposed. The direction, the migration order and the spoke field were decided by Diego
+**Status:** approved (Diego, 2026-11-08). The direction, the migration order and the spoke field were decided by Diego
 on 2026-11-08 (#313). This document records them in one place and settles the rest from the code.
 
 ## 1. The defect
