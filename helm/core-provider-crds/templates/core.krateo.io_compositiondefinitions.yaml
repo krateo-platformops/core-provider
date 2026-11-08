@@ -275,6 +275,24 @@ spec:
                     - message: resyncInterval must be a positive Go duration such
                         as 30m or 1h
                       rule: duration(self) > duration('0s')
+                  scaleToZero:
+                    description: |-
+                      ScaleToZero runs this Kind's controller at zero replicas while no instance of it exists, and
+                      wakes it when the first one appears (#393). Off when unset: the controller runs at the chart's
+                      replica count, as before. Opting in costs one metadata watch on this Kind's instances, which is
+                      what wakes it, so it is per definition rather than global. While idle the definition reports
+                      Ready=True with reason Idle.
+                    type: boolean
+                  scaleToZeroHoldDown:
+                    description: |-
+                      ScaleToZeroHoldDown is how long the Kind must have no instances before its controller is scaled
+                      to zero, so a delete followed by a re-create does not bounce it. Defaults to 10m. A Go duration
+                      string, typed as a string for the same reason as ResyncInterval.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scaleToZeroHoldDown must be a positive Go duration
+                      rule: duration(self) > duration('0s')
                   workers:
                     description: |-
                       Workers is the number of concurrent reconcile workers inside the CDC process (the CDC's
