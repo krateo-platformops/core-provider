@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/e2e-framework/klient/decoder"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -87,10 +90,21 @@ func assessNamespaceDeleteFinishes(ctx context.Context, t *testing.T, cfg *envco
 	})
 
 	// 3. The precondition that makes the result mean something: a running controller took the probe.
-	rehomeEventually(t, 3*time.Minute, "the controller to put its finalizer on the probe", func() bool {
+	// On timeout, say WHY: a missing finalizer means no running controller took the probe, and the
+	// next reader needs the pod's own account (pulled? crash-looping? running but not reconciling?)
+	// rather than a guess. #404's fourth run timed out here with no explanation.
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
 		u, err := dyn.Resource(rehomeGVR).Namespace(nsdeleteNamespace).Get(ctx, probe, metav1.GetOptions{})
-		return err == nil && slices.Contains(u.GetFinalizers(), cdcFinalizer)
-	})
+		if err == nil && slices.Contains(u.GetFinalizers(), cdcFinalizer) {
+			break
+		}
+		if time.Now().After(deadline) {
+			dumpControllerPods(ctx, t, cfg, mgmtNamespace)
+			t.Fatalf("timed out after 3m waiting for the controller to put %s on %s/%s (dump above)", cdcFinalizer, nsdeleteNamespace, probe)
+		}
+		time.Sleep(5 * time.Second)
+	}
 
 	// 4. The incident: delete the namespace holding the definition and its composition.
 	if err := r.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsdeleteNamespace}}); err != nil {
@@ -110,4 +124,42 @@ func assessNamespaceDeleteFinishes(ctx context.Context, t *testing.T, cfg *envco
 	// (compositions first, then the controller: ErrCompositionStillExist). What #313 guarantees, and
 	// what main cannot do, is that the namespace FINISHES.
 	return ctx
+}
+
+// dumpControllerPods logs every pod of the rehome Kind's controller in ns: its phase, each
+// container's state and restarts, and the tail of its log. Diagnostics only.
+func dumpControllerPods(ctx context.Context, t *testing.T, cfg *envconf.Config, ns string) {
+	t.Helper()
+	cs, err := kubernetes.NewForConfig(cfg.Client().RESTConfig())
+	if err != nil {
+		t.Logf("dump: clientset: %v", err)
+		return
+	}
+	var dep appsv1.Deployment
+	if err := cfg.Client().Resources().Get(ctx, rehomeShared+"-controller", ns, &dep); err != nil {
+		t.Logf("dump: controller deployment %s/%s-controller: %v", ns, rehomeShared, err)
+		return
+	}
+	t.Logf("dump: deployment image %s, ready %d/%d", dep.Spec.Template.Spec.Containers[0].Image, dep.Status.ReadyReplicas, dep.Status.Replicas)
+	sel := labels.SelectorFromSet(dep.Spec.Selector.MatchLabels).String()
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		t.Logf("dump: list pods: %v", err)
+		return
+	}
+	t.Logf("dump: %d controller pod(s) in %s", len(pods.Items), ns)
+	for _, p := range pods.Items {
+		t.Logf("dump: pod %s phase=%s", p.Name, p.Status.Phase)
+		for _, c := range p.Status.ContainerStatuses {
+			t.Logf("dump:   container %s ready=%v restarts=%d waiting=%+v terminated=%+v lastTerminated=%+v",
+				c.Name, c.Ready, c.RestartCount, c.State.Waiting, c.State.Terminated, c.LastTerminationState.Terminated)
+		}
+		tail := int64(40)
+		raw, err := cs.CoreV1().Pods(ns).GetLogs(p.Name, &corev1.PodLogOptions{TailLines: &tail}).DoRaw(ctx)
+		if err != nil {
+			t.Logf("dump:   logs: %v", err)
+			continue
+		}
+		t.Logf("dump:   last log lines:\n%s", raw)
+	}
 }
