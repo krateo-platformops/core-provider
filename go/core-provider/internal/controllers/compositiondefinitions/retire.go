@@ -47,15 +47,27 @@ func (e *external) retireController(ctx context.Context, cr *compositiondefiniti
 	}
 	log.Debug("Undeployed older versions of dynamic controller", "gvr", retired.String(), "placements", controllerPlacements(cr))
 
+	// The retired controller's ServiceAccount lived in its placement (#313), so that is where the
+	// bindings to repoint name it: the controller namespace here, and a legacy placement below.
 	repaired, err := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
 		DynamicClient: e.dynamic,
-		Namespace:     cr.Namespace,
+		Namespace:     controllerNamespace(cr),
 		NewNamespace:  currentNamespace,
 		OldGVR:        retired,
 		NewGVR:        current,
 	})
 	if err != nil {
 		return fmt.Errorf("error re-subjecting derived RBAC from %s to %s: %w", retired.Version, current.Version, err)
+	}
+	if legacy := legacyControllerNamespace(cr); legacy != "" {
+		n, err := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
+			DynamicClient: e.dynamic, Namespace: legacy, NewNamespace: currentNamespace,
+			OldGVR: retired, NewGVR: current,
+		})
+		if err != nil {
+			return fmt.Errorf("error re-subjecting derived RBAC from %s in %s: %w", retired.Version, legacy, err)
+		}
+		repaired += n
 	}
 	if repaired > 0 {
 		log.Debug("Re-subjected derived RBAC onto the current controller ServiceAccount",

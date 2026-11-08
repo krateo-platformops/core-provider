@@ -71,3 +71,37 @@ func TestControllerPlacements(t *testing.T) {
 		}
 	}
 }
+
+// #313: the hand-over decisions. #404's first integration run showed what comparing definition
+// NAMESPACES does after the move: a follower in another namespace "handed over" by undeploying the
+// shared management-namespace controller, the owner's live one. They must compare PLACEMENTS.
+func TestHandoverDecisionsComparePlacements(t *testing.T) {
+	prev := ManagementNamespace
+	ManagementNamespace = "krateo-mgmt"
+	t.Cleanup(func() { ManagementNamespace = prev })
+
+	cd := func(name, ns string) *compositiondefinitionsv1alpha1.CompositionDefinition {
+		return &compositiondefinitionsv1alpha1.CompositionDefinition{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	}
+	ownerApps, followerTeam, siblingApps, inMgmt := cd("a", "apps"), cd("b", "team"), cd("c", "apps"), cd("d", "krateo-mgmt")
+
+	if !sharePlacement(followerTeam, ownerApps) {
+		t.Error("two local definitions in different namespaces must share the management-namespace placement")
+	}
+	if sharePlacement(followerTeam, nil) {
+		t.Error("nothing shares a placement with no definition")
+	}
+	for name, tc := range map[string]struct {
+		cr, other *compositiondefinitionsv1alpha1.CompositionDefinition
+		want      string
+	}{
+		"legacy copy, successor elsewhere: cr's own":          {ownerApps, followerTeam, "apps"},
+		"legacy copy, sibling in the SAME namespace: shared":  {ownerApps, siblingApps, ""},
+		"no other definition: cr's own":                       {ownerApps, nil, "apps"},
+		"cr in the management namespace: no legacy placement": {inMgmt, ownerApps, ""},
+	} {
+		if got := ownLegacyPlacement(tc.cr, tc.other); got != tc.want {
+			t.Errorf("%s: ownLegacyPlacement = %q, want %q", name, got, tc.want)
+		}
+	}
+}
