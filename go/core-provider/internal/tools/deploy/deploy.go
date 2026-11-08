@@ -141,6 +141,10 @@ type DeployOptions struct {
 	// nil fields within, are omitted from the Deployment template render so the template's
 	// chart-global defaults apply — existing definitions render byte-identically.
 	Controller *definitionsv1alpha1.ControllerConfig
+	// Replicas, when set, is rendered as the controller Deployment's spec.replicas instead of the chart
+	// value. Set only for a definition that opted into scale-to-zero (#393), from the replicas the
+	// scaletozero helper last decided, so that this full apply and the helper never disagree.
+	Replicas *int32
 }
 
 func resourceNamer(resourceName string, chartVersion string) string {

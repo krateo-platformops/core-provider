@@ -219,6 +219,22 @@ type ControllerConfig struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
 	ResyncInterval *string `json:"resyncInterval,omitempty"`
 
+	// ScaleToZero runs this Kind's controller at zero replicas while no instance of it exists, and
+	// wakes it when the first one appears (#393). Off when unset: the controller runs at the chart's
+	// replica count, as before. Opting in costs one metadata watch on this Kind's instances, which is
+	// what wakes it, so it is per definition rather than global. While idle the definition reports
+	// Ready=True with reason Idle.
+	// +optional
+	ScaleToZero *bool `json:"scaleToZero,omitempty"`
+
+	// ScaleToZeroHoldDown is how long the Kind must have no instances before its controller is scaled
+	// to zero, so a delete followed by a re-create does not bounce it. Defaults to 10m. A Go duration
+	// string, typed as a string for the same reason as ResyncInterval.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="scaleToZeroHoldDown must be a positive Go duration"
+	ScaleToZeroHoldDown *string `json:"scaleToZeroHoldDown,omitempty"`
+
 	// Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
 	// template ships resources:{} (no requests), which is bad practice and makes the CDC
 	// unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs

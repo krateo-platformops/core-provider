@@ -13,7 +13,10 @@ metadata:
 spec:
   # CDC is a per-composition controller: always a fixed replica count, never autoscaled (its
   # dead autoscaling.* values were removed to defuse the strip-replicas trap).
-  replicas: {{ .Values.cdc.replicaCount }}
+  # A definition that opted into scale-to-zero (#393) renders the replicas the scaletozero helper last
+  # decided, passed as a STRING so that "0" is truthy here; core-provider is then the only writer of
+  # spec.replicas, which the helper requires. Otherwise the chart value, as before.
+  replicas: {{ "{{" }} if .replicas {{ "}}" }}{{ "{{" }} .replicas {{ "}}" }}{{ "{{" }} else {{ "}}" }}{{ .Values.cdc.replicaCount }}{{ "{{" }} end {{ "}}" }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}

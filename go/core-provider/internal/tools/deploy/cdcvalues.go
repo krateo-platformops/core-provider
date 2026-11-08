@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 )
 
 // cdcDeploymentValues are the stage-2 values the per-version controller Deployment is rendered with.
@@ -23,6 +24,10 @@ func cdcDeploymentValues(saName string, opts DeployOptions, envConfig map[string
 		"serviceAccountName", saName,
 		"api_ref_name", opts.ApiRefName,
 		"config_checksum", configChecksum(envConfig),
+	}
+	if opts.Replicas != nil {
+		// A string, because the template tests it with `if` and an int 0 would be false there.
+		values = append(values, "replicas", strconv.Itoa(int(*opts.Replicas)))
 	}
 	if c := opts.Controller; c != nil {
 		if c.Workers != nil {
