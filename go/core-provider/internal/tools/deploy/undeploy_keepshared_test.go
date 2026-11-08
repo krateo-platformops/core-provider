@@ -48,6 +48,7 @@ func keepSharedUndeploy(t *testing.T, dyn *fake.FakeDynamicClient, keepShared bo
 		DynamicClient:          dyn,
 		GVR:                    guardGVR,
 		Namespace:              keepSharedOldNS,
+		ControllerNamespace:    keepSharedOldNS,
 		SkipCRD:                true,
 		KeepShared:             keepShared,
 		RBACFolderPath:         "testdata",

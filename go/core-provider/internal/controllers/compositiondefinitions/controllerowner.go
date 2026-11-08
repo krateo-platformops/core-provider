@@ -388,6 +388,7 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 		KubeClient:             e.kube,
 		GVR:                    gvr,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		SkipCRD:                true,
 		KeepShared:             true,
 		DynamicClient:          e.dynamic,

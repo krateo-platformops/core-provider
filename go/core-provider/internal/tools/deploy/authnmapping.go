@@ -66,7 +66,7 @@ func cdcGroup(saName string) string {
 // owned by authn) targeting the authn namespace and referencing the CDC SA.
 func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace string) (*unstructured.Unstructured, error) {
 	authnNS := authnNamespaceOrDefault(opts.AuthnNamespace)
-	name := authnMappingName(opts.Namespace, saName)
+	name := authnMappingName(saNamespace, saName)
 
 	obj := &unstructured.Unstructured{}
 	err := objects.CreateK8sObject(obj, opts.GVR,
@@ -90,7 +90,7 @@ func hashAuthnServiceAccountMapping(opts DeployOptions, saName string, hsh *hash
 		return nil
 	}
 	authnNS := authnNamespaceOrDefault(opts.AuthnNamespace)
-	name := authnMappingName(opts.Namespace, saName)
+	name := authnMappingName(opts.ControllerNamespace, saName)
 	return hsh.SumHash(name, authnNS, cdcGroup(saName))
 }
 

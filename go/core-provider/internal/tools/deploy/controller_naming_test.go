@@ -32,6 +32,7 @@ func TestControllerObjectNamesCarryNoDefinitionIdentity(t *testing.T) {
 	}
 
 	sa, clusterrole, clusterrolebinding, _, _, err := createRBACResources(gvr,
+		getCDCrbacNN(types.NamespacedName{Namespace: ns, Name: resourceNamer(gvr.Resource, gvr.Version)}),
 		getCDCrbacNN(types.NamespacedName{Namespace: ns, Name: resourceNamer(gvr.Resource, gvr.Version)}), "testdata")
 	if err != nil {
 		t.Fatalf("createRBACResources: %v", err)
