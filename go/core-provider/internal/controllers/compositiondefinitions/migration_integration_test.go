@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +43,32 @@ func assessMigrationIsStopBeforeStart(ctx context.Context, t *testing.T, cfg *en
 	if len(sel) == 0 {
 		t.Fatalf("setup: %s/%s has no selector labels", mgmtNamespace, name)
 	}
+
+	// 0. PAUSE the owning definition first, and wait until the reconciler has acknowledged it. A
+	// reconcile already in flight (the previous step restores spec.controller, which is an Update)
+	// would otherwise relocate the planted controller before it ever runs: the feature working, and
+	// the test racing it. That happened on #404's first CI run (21:20:06Z). Unpausing is then the
+	// one deliberate trigger.
+	var cd v1alpha1.CompositionDefinition
+	if err := r.Get(ctx, rehomeCDName, namespace, &cd); err != nil {
+		t.Fatal(err)
+	}
+	ann := cd.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann["krateo.io/paused"] = "true"
+	cd.SetAnnotations(ann)
+	if err := r.Update(ctx, &cd); err != nil {
+		t.Fatalf("pause %s/%s: %v", namespace, rehomeCDName, err)
+	}
+	rehomeEventually(t, 2*time.Minute, "the reconciler to acknowledge the pause (Synced="+string(rtv1.ReasonReconcilePaused)+")", func() bool {
+		var got v1alpha1.CompositionDefinition
+		if err := r.Get(ctx, rehomeCDName, namespace, &got); err != nil {
+			return false
+		}
+		return got.GetCondition(rtv1.TypeSynced).Reason == rtv1.ReasonReconcilePaused
+	})
 
 	// 1. Plant the pre-#313 placement: same name, same selector, a pod that actually runs.
 	one := int32(1)
@@ -127,12 +154,14 @@ func assessMigrationIsStopBeforeStart(ctx context.Context, t *testing.T, cfg *en
 		}
 	}()
 
-	// 4. Trigger an Update: one more worker, which is also what a roll does to every definition.
-	var cd v1alpha1.CompositionDefinition
+	// 4. The one trigger: unpause, and one more worker, in a single Update.
 	if err := r.Get(ctx, rehomeCDName, namespace, &cd); err != nil {
 		t.Fatal(err)
 	}
 	before := cd.Spec.Controller.DeepCopy()
+	ann = cd.GetAnnotations()
+	delete(ann, "krateo.io/paused")
+	cd.SetAnnotations(ann)
 	if cd.Spec.Controller == nil {
 		cd.Spec.Controller = &v1alpha1.ControllerConfig{}
 	}
