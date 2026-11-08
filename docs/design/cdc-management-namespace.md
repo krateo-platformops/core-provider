@@ -16,10 +16,11 @@ on 2026-11-08 (#313). This document records them in one place and settles the re
 ## 1. The defect
 
 A per-version composition-dynamic-controller (cdc) is deployed into its CompositionDefinition's own
-namespace. On main, `DeployOptions{Namespace: cr.Namespace}` is built at four sites
-(`compositiondefinitions.go:1065` and `:1445`, `retire.go:43` and `:54`), plus
-`currentControllerNamespace` (`retire.go:71`). The implementation replaces all of them with one
-function that chooses the controller's namespace, so no site can keep the old rule. That
+namespace. On main, seven `DeployOptions`/`UndeployOptions` literals pass `Namespace: cr.Namespace`
+(five in `compositiondefinitions.go`, one each in `retire.go` and `controllerowner.go`), plus
+`currentControllerNamespace` (`retire.go:71`). An earlier count of four was a grep that missed three
+and counted `ResubjectOptions`, a different struct. The implementation gives all of them one function
+that chooses the controller's namespace, so no site can keep the old rule. That
 cdc is the only thing that removes `composition.krateo.io/finalizer` from its compositions. Deleting
 the namespace deletes the cdc with everything else, so the compositions' finalizers are left with
 nobody to clear them. Their CompositionDefinitions wait for them forever, reporting

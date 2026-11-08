@@ -23,7 +23,8 @@ func TestPoolFieldIsInert(t *testing.T) {
 
 	render := func(c *definitionsv1alpha1.ControllerConfig) appsv1.Deployment {
 		t.Helper()
-		values, err := cdcDeploymentValues("sa", DeployOptions{Controller: c}, envConfig)
+		values, err := cdcDeploymentValues("sa", DeployOptions{
+			ControllerNamespace: "test-ns", Controller: c}, envConfig)
 		if err != nil {
 			t.Fatal(err)
 		}

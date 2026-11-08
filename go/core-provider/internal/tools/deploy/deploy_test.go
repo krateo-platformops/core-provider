@@ -94,6 +94,7 @@ func TestDeploy(t *testing.T) {
 			KubeClient:             cli,
 			DynClient:              dyn,
 			Namespace:              namespace,
+			ControllerNamespace:    namespace,
 			GVR: schema.GroupVersionResource{
 				Group:    "compositions.krateo.io",
 				Version:  "v1alpha1",
@@ -128,6 +129,7 @@ func TestDeploy(t *testing.T) {
 			JsonSchemaBytes:        []byte(`{"type": "object", "properties": {"key": {"type": "string"}}}`),
 			KubeClient:             cli,
 			Namespace:              namespace,
+			ControllerNamespace:    namespace,
 			Spec: &v1alpha1.ChartInfo{
 				InsecureSkipVerifyTLS: true,
 				Version:               "1.1.10",
@@ -187,6 +189,7 @@ func TestLookup(t *testing.T) {
 			KubeClient:             cli,
 			DynClient:              dyn,
 			Namespace:              namespace,
+			ControllerNamespace:    namespace,
 			GVR: schema.GroupVersionResource{
 				Group:    "compositions.krateo.io",
 				Version:  "v1alpha1",

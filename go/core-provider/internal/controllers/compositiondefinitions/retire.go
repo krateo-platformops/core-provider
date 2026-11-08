@@ -41,6 +41,7 @@ func (e *external) retireController(ctx context.Context, cr *compositiondefiniti
 		GVR:                    retired,
 		KubeClient:             e.kube,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		SkipCRD:                true,
 		AuthnNamespace:         AuthnNamespace,
 	})
@@ -99,4 +100,12 @@ func (e *external) reclaimLeakedControllers(ctx context.Context, gvk schema.Grou
 	}
 	sort.Strings(reclaimed)
 	return reclaimed, failed, kept, nil
+}
+
+// controllerNamespace is where cr's version controllers live (#313). Every DeployOptions and
+// UndeployOptions in this package takes its ControllerNamespace from here, so the move to the
+// management namespace is a change to this function (plus the migration), not to each call site.
+// It returns cr.Namespace today: this step only separates the decision from Namespace's other job.
+func controllerNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	return cr.Namespace
 }
