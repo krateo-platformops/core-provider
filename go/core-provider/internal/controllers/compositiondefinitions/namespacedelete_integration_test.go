@@ -5,15 +5,19 @@ package compositiondefinitions
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+	"sigs.k8s.io/e2e-framework/klient/decoder"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 )
@@ -22,61 +26,87 @@ import (
 // which only a running composition controller removes.
 const cdcFinalizer = "composition.krateo.io/finalizer"
 
-// assessNamespaceDeleteFinishes is #313's incident as a test: on krateo-057 (2026-11-05) deleting a
+// nsdeleteNamespace holds the incident: a definition, ITS composition, and (before #313) its
+// controller, all in one namespace that is then deleted.
+const nsdeleteNamespace = "nsdelete-system"
+
+// assessNamespaceDeleteFinishes is #313's incident as a test. On krateo-057 (2026-11-05) deleting a
 // namespace that held a definition, its compositions AND their controller wedged until the finalizers
 // were cleared by hand, because the controller died with the namespace.
 //
-// It deletes rehome2Namespace, which by now holds the OWNING definition. That is what makes the test
-// able to fail: on main the owner's controller lives in that same namespace and is deleted with it, so
-// the composition below keeps its finalizer and the namespace never finishes. With #313 the controller
-// lives in the management namespace, outlives the deletion, and finalizes the composition.
+// SELF-CONTAINED, because the step before it ends by deleting the Kind's last definition and with it
+// the CRD (#404's third run). It creates its own namespace, a definition there (the Kind's ONLY
+// definition, so its owner), and a composition there.
+//
+// That is what makes the test able to fail: on main the owner's controller is deployed into that same
+// namespace and is deleted with it, so the composition keeps its finalizer and the namespace never
+// finishes. With #313 the controller lives in the management namespace, outlives the deletion, and
+// finalizes the composition.
 //
 // THE TEST REMOVES NO FINALIZER. It also refuses to pass vacuously: before deleting anything it
 // waits for the composition to carry the controller's finalizer, which only a RUNNING controller
-// adds. If no controller runs in this cluster, that wait fails, rather than the namespace deleting
-// instantly and the test passing on main and branch alike.
+// adds.
 func assessNamespaceDeleteFinishes(ctx context.Context, t *testing.T, cfg *envconf.Config, r *resources.Resources) context.Context {
 	const probe = "nsdelete-probe"
 	dyn := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
 
+	// 1. The incident's namespace, with the Kind's only definition in it.
+	if err := r.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsdeleteNamespace}}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	var cd v1alpha1.CompositionDefinition
+	if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath)), "fireworksapp.yaml", &cd, decoder.MutateNamespace(nsdeleteNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	cd.Spec.Chart.Version = "2.0.4" // rehomeGVR's version
+	if err := r.Create(ctx, &cd); err != nil {
+		t.Fatalf("create the definition in %s: %v", nsdeleteNamespace, err)
+	}
+	rehomeEventually(t, 4*time.Minute, "the definition's controller to run in "+mgmtNamespace, func() bool {
+		return rehomeControllerIn(ctx, t, r, mgmtNamespace)
+	})
+	if rehomeControllerIn(ctx, t, r, nsdeleteNamespace) {
+		t.Fatalf("setup: a controller is in %s; #313 places it in %s", nsdeleteNamespace, mgmtNamespace)
+	}
+
+	// 2. A composition in the same namespace. Create is retried: the CRD may still be propagating.
 	inst := &unstructured.Unstructured{}
 	inst.SetAPIVersion(rehomeGVR.GroupVersion().String())
 	inst.SetKind("FireworksApp")
-	inst.SetNamespace(rehome2Namespace)
+	inst.SetNamespace(nsdeleteNamespace)
 	inst.SetName(probe)
 	inst.SetLabels(map[string]string{
 		"krateo.io/composition-version":              rehomeVersion,
-		"krateo.io/composition-definition-name":      rehomeCDName,
-		"krateo.io/composition-definition-namespace": rehome2Namespace,
+		"krateo.io/composition-definition-name":      cd.Name,
+		"krateo.io/composition-definition-namespace": nsdeleteNamespace,
 	})
 	_ = unstructured.SetNestedField(inst.Object, probe, "spec", "git", "toRepo", "name")
-	if _, err := dyn.Resource(rehomeGVR).Namespace(rehome2Namespace).Create(ctx, inst, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create the probe composition in %s: %v", rehome2Namespace, err)
-	}
+	rehomeEventually(t, 2*time.Minute, "the probe composition to be created in "+nsdeleteNamespace, func() bool {
+		_, err := dyn.Resource(rehomeGVR).Namespace(nsdeleteNamespace).Create(ctx, inst.DeepCopy(), metav1.CreateOptions{})
+		return err == nil || apierrors.IsAlreadyExists(err)
+	})
 
-	// The precondition that makes the result mean something: a running controller took the probe.
+	// 3. The precondition that makes the result mean something: a running controller took the probe.
 	rehomeEventually(t, 3*time.Minute, "the controller to put its finalizer on the probe", func() bool {
-		u, err := dyn.Resource(rehomeGVR).Namespace(rehome2Namespace).Get(ctx, probe, metav1.GetOptions{})
+		u, err := dyn.Resource(rehomeGVR).Namespace(nsdeleteNamespace).Get(ctx, probe, metav1.GetOptions{})
 		return err == nil && slices.Contains(u.GetFinalizers(), cdcFinalizer)
 	})
-	if !rehomeControllerIn(ctx, t, r, mgmtNamespace) || rehomeControllerIn(ctx, t, r, rehome2Namespace) {
-		t.Fatalf("setup: the controller must be in %s and not in %s before the deletion", mgmtNamespace, rehome2Namespace)
-	}
 
-	if err := r.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: rehome2Namespace}}); err != nil {
-		t.Fatalf("delete namespace %s: %v", rehome2Namespace, err)
+	// 4. The incident: delete the namespace holding the definition and its composition.
+	if err := r.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsdeleteNamespace}}); err != nil {
+		t.Fatalf("delete namespace %s: %v", nsdeleteNamespace, err)
 	}
 	// On 057 this never happened without a human. Bound it generously, but bound it.
-	rehomeEventually(t, 6*time.Minute, "namespace "+rehome2Namespace+" to finish deleting with no finalizer removed by hand", func() bool {
-		err := r.Get(ctx, rehome2Namespace, "", &corev1.Namespace{})
+	rehomeEventually(t, 6*time.Minute, "namespace "+nsdeleteNamespace+" to finish deleting with no finalizer removed by hand", func() bool {
+		err := r.Get(ctx, nsdeleteNamespace, "", &corev1.Namespace{})
 		if err != nil && !apierrors.IsNotFound(err) {
-			t.Fatalf("get namespace %s: %v", rehome2Namespace, err)
+			t.Fatalf("get namespace %s: %v", nsdeleteNamespace, err)
 		}
 		return apierrors.IsNotFound(err)
 	})
 
-	// Deliberately NOT asserted: that the controller still exists afterwards. If this was the Kind's
-	// last definition, its Delete correctly removes the controller AFTER the compositions are gone
+	// Deliberately NOT asserted: that the controller still exists afterwards. This was the Kind's only
+	// definition, so its Delete correctly removes the controller AFTER the composition is gone
 	// (compositions first, then the controller: ErrCompositionStillExist). What #313 guarantees, and
 	// what main cannot do, is that the namespace FINISHES.
 	return ctx
