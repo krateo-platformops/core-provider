@@ -737,6 +737,13 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
+	// The identity's stored session credential goes too: every Undeploy deletes the ServiceAccount, so
+	// it is orphaned otherwise, and authn never deletes it (#313). After the drain and the mapping.
+	err = deleteAuthnClientConfigSecret(ctx, opts.KubeClient, opts.AuthnNamespace, sa.Namespace, sa.Name)
+	if err != nil {
+		return err
+	}
+
 	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
 	// no namespace in it, so it is shared with any other definition on this Kind+version.
 	if !opts.keepShared() {
