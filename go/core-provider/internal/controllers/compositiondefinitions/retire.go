@@ -2,10 +2,12 @@ package compositiondefinitions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -71,9 +73,9 @@ func (e *external) retireController(ctx context.Context, cr *compositiondefiniti
 // owner's namespace when this definition follows another (controllerowner.go), its own otherwise.
 func currentControllerNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition, owner *compositiondefinitionsv1alpha1.CompositionDefinition) string {
 	if owner != nil {
-		return owner.Namespace
+		return controllerNamespace(owner)
 	}
-	return cr.Namespace
+	return controllerNamespace(cr)
 }
 
 // reclaimLeakedControllers retires, through retire, every controller findLeakedControllers reports
@@ -105,7 +107,17 @@ func (e *external) reclaimLeakedControllers(ctx context.Context, gvk schema.Grou
 // controllerNamespace is where cr's version controllers live (#313). Every DeployOptions and
 // UndeployOptions in this package takes its ControllerNamespace from here, so the move to the
 // management namespace is a change to this function (plus the migration), not to each call site.
-// It returns cr.Namespace today: this step only separates the decision from Namespace's other job.
+//
+// LOCAL definitions: the management namespace, core-provider's own, so the controller outlives
+// every namespace whose compositions it finalizes. REMOTE definitions: unchanged here, the
+// definition's namespace on the spoke. KubernetesTarget.spec.controllerNamespace is step 3.
 func controllerNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
-	return cr.Namespace
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		return cr.Namespace
+	}
+	return ManagementNamespace
 }
+
+// errNoManagementNamespace stops core-provider at startup when CDC_NAMESPACE is unset (see
+// ManagementNamespace).
+var errNoManagementNamespace = errors.New("CDC_NAMESPACE is not set: core-provider needs its own namespace to place composition controllers (#313)")

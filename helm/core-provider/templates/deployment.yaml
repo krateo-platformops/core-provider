@@ -41,6 +41,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "core-provider.fullname" . }}
+          env:
+            # #313: every local composition controller lives in THIS pod's namespace, so it outlives
+            # any namespace it finalizes. From the downward API, so it cannot disagree with where
+            # core-provider actually runs.
+            - name: CDC_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
