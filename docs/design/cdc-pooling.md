@@ -1,6 +1,16 @@
+---
+type: Decision
+title: "Design: an opt-in controller pool for the CDC, to reduce pod count"
+description: Reopens #181's design with pod count as the goal - a named, opt-in pool for composition controllers, built in #181's step order with steps 5-6 unfunded.
+resource: ghcr.io/krateo-platformops/composition-dynamic-controller
+tags: [design, scaling, cdc, pool]
+status: approved
+timestamp: 2026-11-08T00:00:00Z
+---
+
 # Design: an opt-in controller pool for the CDC, to reduce pod count
 
-**Status:** decided to reopen (Diego, 2026-11-07); steps 1–3 cut, step 4 next, steps 5–6 **unfunded**.
+**Status:** design approved (Diego, 2026-11-08); steps 1–3 cut, step 4 next, steps 5–6 **unfunded**.
 **Supersedes:** the closed design in PR #181, whose text argued from memory. This document keeps its
 design and its step numbering and replaces its premise.
 
