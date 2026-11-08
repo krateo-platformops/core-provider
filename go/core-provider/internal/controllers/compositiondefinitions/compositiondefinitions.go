@@ -1449,6 +1449,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return err
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -1810,6 +1814,10 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		return gvr, err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return gvr, err
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),

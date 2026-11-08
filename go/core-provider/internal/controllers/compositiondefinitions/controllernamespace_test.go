@@ -36,3 +36,38 @@ func TestControllerNamespace(t *testing.T) {
 		}
 	}
 }
+
+// #313: where retirement and relocation look. With the management namespace different from the
+// definition's, a local definition has two placements; a remote one, or one already in the
+// management namespace, has one, so relocation is a no-op for it.
+func TestControllerPlacements(t *testing.T) {
+	prev := ManagementNamespace
+	ManagementNamespace = "krateo-mgmt"
+	t.Cleanup(func() { ManagementNamespace = prev })
+
+	inApps := &compositiondefinitionsv1alpha1.CompositionDefinition{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "apps"}}
+	inMgmt := &compositiondefinitionsv1alpha1.CompositionDefinition{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "krateo-mgmt"}}
+	remote := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "apps"},
+		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{
+			TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "spoke"},
+		}},
+	}
+	for name, tc := range map[string]struct {
+		cr     *compositiondefinitionsv1alpha1.CompositionDefinition
+		want   []string
+		legacy string
+	}{
+		"local, outside the management namespace":    {inApps, []string{"krateo-mgmt", "apps"}, "apps"},
+		"local, already in the management namespace": {inMgmt, []string{"krateo-mgmt"}, ""},
+		"remote (not moved until step 3)":            {remote, []string{"apps"}, ""},
+	} {
+		got := controllerPlacements(tc.cr)
+		if len(got) != len(tc.want) || got[0] != tc.want[0] || (len(got) == 2 && got[1] != tc.want[1]) {
+			t.Errorf("%s: placements %v, want %v", name, got, tc.want)
+		}
+		if l := legacyControllerNamespace(tc.cr); l != tc.legacy {
+			t.Errorf("%s: legacy namespace %q, want %q", name, l, tc.legacy)
+		}
+	}
+}
