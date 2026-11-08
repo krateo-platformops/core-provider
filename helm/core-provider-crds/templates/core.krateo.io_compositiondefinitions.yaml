@@ -193,6 +193,17 @@ spec:
                   touching — or restarting — any other controller. Omitted fields fall back to the chart-global
                   defaults, so existing definitions render byte-identically.
                 properties:
+                  pool:
+                    description: |-
+                      Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
+                      INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
+                      render the same dedicated controller, byte for byte. It exists first so the API is settled before
+                      the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
+                      the union of its members' permissions, and names let Kinds with similar permissions share one.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
                   resources:
                     description: |-
                       Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
