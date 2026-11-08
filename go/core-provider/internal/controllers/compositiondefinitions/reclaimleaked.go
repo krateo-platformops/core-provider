@@ -53,7 +53,7 @@ type leakedController struct {
 //     same condition. A surviving mutant proved the separate check unreachable and it was removed.
 //   - a version another CompositionDefinition references is kept, via the same predicate the
 //     retirement path uses.
-func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) (leaked []leakedController, kept []string, err error) {
+func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string, placements []string) (leaked []leakedController, kept []string, err error) {
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching CRD: %w", err)
@@ -82,23 +82,36 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 		return nil, []string{fmt.Sprintf("ALL:unaccounted-instances=%d", len(unaccounted.Items))}, nil
 	}
 
-	var deps appsv1.DeploymentList
-	if err := e.kube.List(ctx, &deps, client.InNamespace(selfNamespace)); err != nil {
-		// A failed LIST is not evidence of absence, and here the destructive reading would be to
-		// treat an unreadable namespace as having nothing to keep. Refuse.
-		return nil, nil, fmt.Errorf("listing deployments in %s: %w", selfNamespace, err)
+	// #313: a controller may live in more than one placement (the controller namespace, and the
+	// definition's own while the migration has not reached it; old versions retire in place). Every
+	// placement is listed, and each VERSION is decided once: retire() removes it from every placement.
+	if len(placements) == 0 {
+		return nil, nil, fmt.Errorf("no placements to look for leaked controllers in")
+	}
+	var names []string
+	for _, ns := range placements {
+		var deps appsv1.DeploymentList
+		if err := e.kube.List(ctx, &deps, client.InNamespace(ns)); err != nil {
+			// A failed LIST is not evidence of absence, and here the destructive reading would be to
+			// treat an unreadable namespace as having nothing to keep. Refuse.
+			return nil, nil, fmt.Errorf("listing deployments in %s: %w", ns, err)
+		}
+		for i := range deps.Items {
+			names = append(names, deps.Items[i].Name)
+		}
 	}
 
 	prefix := gvr.Resource + "-"
-	for i := range deps.Items {
-		name := deps.Items[i].Name
+	seen := map[string]bool{}
+	for _, name := range names {
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, leakedControllerSuffix) {
 			continue
 		}
 		version := strings.TrimSuffix(strings.TrimPrefix(name, prefix), leakedControllerSuffix)
-		if version == "" {
+		if version == "" || seen[version] {
 			continue
 		}
+		seen[version] = true
 		if version == gvk.Version {
 			kept = append(kept, version+":is-current")
 			continue

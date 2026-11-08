@@ -2,6 +2,7 @@ package compositiondefinitions
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -130,7 +131,7 @@ func TestFindLeakedControllers(t *testing.T) {
 			leakComposition("installer", "v0-3-484"),
 		)
 
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -147,7 +148,7 @@ func TestFindLeakedControllers(t *testing.T) {
 		e := leakExternal(t, leakCRD("v0-3-484"),
 			[]*appsv1.Deployment{leakDeploy("installers-v0-3-484-controller")},
 			leakComposition("installer", "v0-3-484"))
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil || len(leaked) != 0 {
 			t.Fatalf("leaked = %+v (err %v), want none; kept=%v", leaked, err, kept)
 		}
@@ -162,7 +163,7 @@ func TestFindLeakedControllers(t *testing.T) {
 		e := leakExternal(t, leakCRD("v0-3-484", "vacuum"),
 			[]*appsv1.Deployment{leakDeploy("installers-vacuum-controller")},
 			leakComposition("installer", "v0-3-484"))
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil || len(leaked) != 0 {
 			t.Fatalf("leaked = %+v (err %v), want none — a non-served version is still stored data; kept=%v", leaked, err, kept)
 		}
@@ -178,7 +179,7 @@ func TestFindLeakedControllers(t *testing.T) {
 			[]*appsv1.Deployment{leakDeploy("installers-v0-3-480-controller")},
 			leakComposition("installer", "v0-3-484"),
 			leakComposition("legacy", "v0-3-480"))
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -199,7 +200,7 @@ func TestFindLeakedControllers(t *testing.T) {
 			[]*appsv1.Deployment{leakDeploy("installers-v0-3-480-controller")},
 			leakComposition("installer", "v0-3-484"),
 			leakComposition("mystery", ""))
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -217,7 +218,7 @@ func TestFindLeakedControllers(t *testing.T) {
 	t.Run("a missing CRD reclaims NOTHING", func(t *testing.T) {
 		e := leakExternal(t, nil,
 			[]*appsv1.Deployment{leakDeploy("installers-v0-3-480-controller")})
-		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -235,7 +236,7 @@ func TestFindLeakedControllers(t *testing.T) {
 				leakDeploy("installers-v0-3-484-controller"),
 			},
 			leakComposition("installer", "v0-3-484"))
-		leaked, _, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS)
+		leaked, _, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -244,4 +245,48 @@ func TestFindLeakedControllers(t *testing.T) {
 				"never be candidates", leaked)
 		}
 	})
+}
+
+// #313. After the move, old-version debris may sit in the definition's OWN namespace while the
+// controller namespace holds the current one. The reclaim must list every placement (one placement
+// alone would never see the debris again), and decide each version once even if it appears in both.
+func TestFindLeakedControllersListsEveryPlacement(t *testing.T) {
+	const legacyNS = "apps"
+	inLegacy := leakDeploy("installers-v0-3-480-controller")
+	inLegacy.Namespace = legacyNS
+	dupInLegacy := leakDeploy("installers-v0-3-470-controller")
+	dupInLegacy.Namespace = legacyNS
+	e := leakExternal(t, leakCRD("v0-3-484"),
+		[]*appsv1.Deployment{
+			leakDeploy("installers-v0-3-484-controller"), // current, in the controller namespace
+			inLegacy, // leaked, ONLY in the legacy namespace
+			leakDeploy("installers-v0-3-470-controller"), // leaked, in BOTH placements
+			dupInLegacy,
+		},
+		leakComposition("installer", "v0-3-484"),
+	)
+
+	one, _, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, _, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS, legacyNS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := func(ls []leakedController) []string {
+		var v []string
+		for _, l := range ls {
+			v = append(v, l.Version)
+		}
+		return v
+	}
+	// The control: one placement cannot see the legacy-only debris.
+	if got := versions(one); len(got) != 1 || got[0] != "v0-3-470" {
+		t.Fatalf("one placement: leaked versions %v, want [v0-3-470] (v0-3-480 lives only in %s)", got, legacyNS)
+	}
+	got := versions(both)
+	if len(got) != 2 || !slices.Contains(got, "v0-3-470") || !slices.Contains(got, "v0-3-480") {
+		t.Fatalf("every placement: leaked versions %v, want v0-3-470 and v0-3-480 exactly once each", got)
+	}
 }

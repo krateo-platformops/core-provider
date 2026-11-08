@@ -80,9 +80,9 @@ func currentControllerNamespace(cr *compositiondefinitionsv1alpha1.CompositionDe
 // One failed retirement does not stop the others. Each leaked controller is independent debris,
 // and stopping at the first would leave the rest behind the one that cannot go.
 func (e *external) reclaimLeakedControllers(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource,
-	selfName, selfNamespace string, retire func(context.Context, schema.GroupVersionResource) error,
+	selfName, selfNamespace string, placements []string, retire func(context.Context, schema.GroupVersionResource) error,
 ) (reclaimed []string, failed map[string]error, kept []string, err error) {
-	leaked, kept, err := e.findLeakedControllers(ctx, gvk, gvr, selfName, selfNamespace)
+	leaked, kept, err := e.findLeakedControllers(ctx, gvk, gvr, selfName, selfNamespace, placements)
 	if err != nil {
 		return nil, nil, nil, err
 	}

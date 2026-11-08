@@ -1743,7 +1743,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	//
 	// Called from Update rather than Observe because Update runs only when something changed, so
 	// the Deployment LIST this costs is not paid per reconcile across 68 controllers.
-	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace,
+	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace, controllerPlacements(cr),
 		func(ctx context.Context, retired schema.GroupVersionResource) error {
 			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, currentControllerNamespace(cr, owner), log)
 		})
