@@ -75,6 +75,13 @@ var (
 	// via COMPOSITION_AUTHN_NAMESPACE; defaults to "krateo-system".
 	AuthnNamespace = envOr("COMPOSITION_AUTHN_NAMESPACE", "krateo-system")
 
+	// ManagementNamespace is where every LOCAL composition controller lives (#313): core-provider's
+	// own namespace, from the downward API (CDC_NAMESPACE, set by the chart). There is no default.
+	// Falling back to the definition's namespace would silently keep the deadlock #313 removes, and
+	// assuming "krateo-system" would be wrong for any install elsewhere. Setup refuses to start
+	// without it.
+	ManagementNamespace = envOr("CDC_NAMESPACE", "")
+
 	// SnowplowURL is snowplow's base URL. When a CompositionDefinition declares an apiRef,
 	// core-provider calls snowplow's dispatch-free GET /rbac to enumerate the RESTAction's
 	// read-set and grant it to the per-composition group. Override via CORE_PROVIDER_SNOWPLOW_URL;
@@ -111,6 +118,9 @@ type Options struct {
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
+	if ManagementNamespace == "" {
+		return errNoManagementNamespace
+	}
 	name := reconciler.ControllerName(compositiondefinitionsv1alpha1.CompositionDefinitionGroupKind)
 
 	l := o.ControllerOptions.Logger.WithValues("controller", name)
