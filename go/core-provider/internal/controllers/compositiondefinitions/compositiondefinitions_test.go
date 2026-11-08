@@ -70,6 +70,10 @@ const (
 	manifestsPath = "./testdata/manifests"
 
 	namespace = "test-system"
+
+	// mgmtNamespace is where every local composition controller lives (#313). Deliberately NOT
+	// namespace: with the two equal, every placement bug would be invisible.
+	mgmtNamespace = "krateo-mgmt-test"
 )
 
 func TestMain(m *testing.M) {
@@ -82,6 +86,8 @@ func TestMain(m *testing.M) {
 	restore := e2e.PinKubeconfig("cp-compositiondefinitions")
 
 	clusterName = "krateo-core-provider-controller"
+	// Setup refuses to start without it (#313); the chart passes it as CDC_NAMESPACE.
+	ManagementNamespace = mgmtNamespace
 	testenv = env.New()
 	kindCluster := kind.NewCluster(clusterName)
 
@@ -106,6 +112,7 @@ func TestMain(m *testing.M) {
 		cleanAssetFolder,
 		createCluster,
 		e2e.CreateNamespace(namespace),
+		e2e.CreateNamespace(mgmtNamespace),
 
 		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
 			r, err := resources.New(cfg.Client().RESTConfig())
@@ -571,6 +578,12 @@ func TestController(t *testing.T) {
 		return ctx
 	}).Assess("Test Re-home: deleting the original hands the controller over", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeHandover(ctx, t, cfg, r)
+	}).Assess("Test #313: deleting the owner's namespace finishes with no manual finalizer removal", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		r, err := resources.New(cfg.Client().RESTConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return assessNamespaceDeleteFinishes(ctx, t, cfg, r)
 	}).Feature()
 
 	testenv.Test(t, f)

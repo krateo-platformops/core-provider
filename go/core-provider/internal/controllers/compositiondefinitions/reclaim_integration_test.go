@@ -102,11 +102,13 @@ func assessReclaimLeaked(ctx context.Context, t *testing.T, _ *envconf.Config, r
 
 	// The current controller is what a wrong predicate would destroy: it must still be there, and
 	// so must its identity.
-	if !rehomeControllerIn(ctx, t, r, namespace) {
-		t.Fatalf("the CURRENT %s controller in %s was removed by the reclaim", rehomeVersion, namespace)
+	// #313: the current controller lives in the management namespace; the planted leak above sits in
+	// the DEFINITION's namespace, which is exactly the legacy-placement debris the reclaim must find.
+	if !rehomeControllerIn(ctx, t, r, mgmtNamespace) {
+		t.Fatalf("the CURRENT %s controller in %s was removed by the reclaim", rehomeVersion, mgmtNamespace)
 	}
 	var sa corev1.ServiceAccount
-	if err := r.Get(ctx, rehomeShared, namespace, &sa); err != nil {
+	if err := r.Get(ctx, rehomeShared, mgmtNamespace, &sa); err != nil {
 		t.Fatalf("the current controller's ServiceAccount %s: %v", rehomeShared, err)
 	}
 	if vs := servedVersionNames(&crd); !slices.Contains(vs, rehomeVersion) {
