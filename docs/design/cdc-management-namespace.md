@@ -115,12 +115,24 @@ can't race.
 
 A spoke migrates the same way, against its target's `controllerNamespace`.
 
+**Only the CURRENT version moves** (Diego, 2026-11-08). A controller kept for an older version, one
+whose instances haven't migrated yet, is never redeployed by anything: all three `deploy.Deploy` calls
+are for the current version, and a retired version's chart isn't always recorded. So it stays where it
+is and retires in place. `retireController` and the leaked-controller reclaim look in **both**
+placements, so it can't leak when it does retire.
+
+**Residual, stated:** while a version migration is unfinished (which can be long under
+`upgradePolicy: Manual` or `Paused`), that old-version controller still lives in the definition's
+namespace, and deleting that namespace can still deadlock on its compositions. Every current-version
+controller, and every definition not mid-upgrade, is fully covered.
+
 ## 5. Input states the implementation must cover
 
 | state | expected |
 |---|---|
 | fresh install | cdc created in the management namespace; never in the definition's namespace |
 | existing cdc in the definition's namespace | migrated by §4; exactly one cdc for the Kind × version at every instant |
+| existing OLD-version cdc in the definition's namespace (mid-upgrade) | stays; retired in place when its version retires; found by reclaim in either placement |
 | core-provider restarted between §4 steps 1 and 2 | resumes; no second copy, no permanent zero |
 | ownership handover (owner deleted, a sibling in another namespace takes over) | no controller change at all |
 | definition's namespace deleted, compositions present | cdc survives, finalizes the compositions, namespace finishes deleting with **no manual finalizer removal** |

@@ -541,6 +541,12 @@ func TestController(t *testing.T) {
 		return ctx
 	}).Assess("Test Reclaim a leaked per-version controller (#327)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessReclaimLeaked(ctx, t, cfg, r)
+	}).Assess("Test #313: the migration is stop-before-start", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		r, err := resources.New(cfg.Client().RESTConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return assessMigrationIsStopBeforeStart(ctx, t, cfg, r)
 	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeFollower(ctx, t, cfg, r)
 	}).Assess("Test ApiRef RBAC condition", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
