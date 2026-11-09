@@ -115,6 +115,10 @@ type Options struct {
 	// Metrics records reconcile telemetry for the CompositionDefinition controller.
 	Metrics    reconciler.MetricsRecorder
 	Pluralizer pluralizerlib.PluralizerInterface
+	// RemoveDanglingRBAC lets a definition's Update DELETE the bindings that name only a retired
+	// controller's absent ServiceAccount (#414). False (the default) is a dry run: they are found and
+	// logged, and nothing is deleted.
+	RemoveDanglingRBAC bool
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -161,6 +165,8 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			log:        l,
 			recorder:   recorder,
 			pluralizer: o.Pluralizer,
+
+			removeDanglingRBAC: o.RemoveDanglingRBAC,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -332,6 +338,8 @@ type connector struct {
 	log        logging.Logger
 	recorder   record.EventRecorder
 	pluralizer pluralizerlib.PluralizerInterface
+
+	removeDanglingRBAC bool
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -352,6 +360,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		log:         log,
 		rec:         c.recorder,
 		pluralizer:  c.pluralizer,
+
+		removeDanglingRBAC: c.removeDanglingRBAC,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -403,6 +413,9 @@ type external struct {
 	// resourceVersion of the kubeconfig Secret used to reach it.
 	remote                bool
 	secretResourceVersion string
+
+	// removeDanglingRBAC: see Options.RemoveDanglingRBAC.
+	removeDanglingRBAC bool
 }
 
 // setTargetStatus records where the controller is deployed and whether that cluster is
@@ -1783,6 +1796,27 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		}
 		if len(kept) > 0 {
 			log.Debug("leaked-controller check kept candidates", "reasons", kept)
+		}
+	}
+
+	// #414. Bindings that name ONLY a retired controller version's ServiceAccount, which is absent,
+	// for a version no longer on the CRD. Derived RBAC was renamed twice and ResubjectDerivedRBAC
+	// repoints only the current name, so the older-named bindings kept their era's identity after
+	// retirement deleted it (128 on 057, 2026-11-09). After the reclaim, so whatever it just retired
+	// has been repointed first. Like the reclaim, a failure never fails the Update: it is logged and
+	// tried again on the next one.
+	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr))
+	switch {
+	case serr != nil && len(sweep.Removed) == 0:
+		log.Info("could not check for dangling controller bindings; will retry on the next update (#414)", "error", serr.Error())
+	case sweep.DryRun && len(sweep.Found) > 0:
+		log.Info("DRY RUN: would remove bindings that name only a retired controller's absent ServiceAccount (#414)",
+			"bindings", danglingNames(sweep.Found), "kept", sweep.Kept)
+	case len(sweep.Removed) > 0:
+		log.Info("removed bindings that named only a retired controller's absent ServiceAccount (#414)",
+			"removed", sweep.Removed, "kept", sweep.Kept)
+		if serr != nil {
+			log.Info("some dangling controller bindings or roles could not be removed; will retry on the next update (#414)", "error", serr.Error())
 		}
 	}
 
