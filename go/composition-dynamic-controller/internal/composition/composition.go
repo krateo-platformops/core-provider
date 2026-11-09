@@ -603,12 +603,21 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// must be logged OUTSIDE the Changed branch, or the one case the intendedDeletions field exists
 	// for (#346) is never printed. That is exactly how krateo-autopilot on krateo-057 reported "up to
 	// date" 62 times with objects its spec no longer renders.
-	if n := undeletedIntendedDeletions(reconcileRes); n > 0 {
-		log.Warn("Composition render dropped objects that were not deleted (kept by helm.sh/resource-policy, or their deletion failed)", "package", pkg.URL,
+	// Since plumbing v1.35.0 a deletion helm skipped because the object is helm.sh/resource-policy:
+	// keep is reported apart (KeptDeletions) and correctly re-records the release, so only what is
+	// left, intended and neither deleted nor kept (a deletion that FAILED), is a defect worth a Warn.
+	if n := failedIntendedDeletions(reconcileRes); n > 0 {
+		log.Warn("Composition render dropped objects whose deletion failed: they are still alive and still in the release", "package", pkg.URL,
+			"failedCount", n,
 			"intendedDeletions", reconcileRes.IntendedDeletions,
-			"intendedDeletionsCount", len(reconcileRes.IntendedDeletions),
 			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
+			"keptDeletions", reconcileRes.KeptDeletions,
 			"deleted", reconcileRes.Deleted, "changed", reconcileRes.Changed)
+	}
+	if kept := len(reconcileRes.KeptDeletions) + reconcileRes.KeptDeletionsOmitted; kept > 0 {
+		log.Info("Composition render dropped objects kept by helm.sh/resource-policy: keep; the release now records the change", "package", pkg.URL,
+			"keptDeletions", reconcileRes.KeptDeletions,
+			"keptDeletionsOmitted", reconcileRes.KeptDeletionsOmitted, "changed", reconcileRes.Changed)
 	}
 	if reconcileRes.Changed {
 		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
@@ -1716,15 +1725,17 @@ func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.Exte
 	return obs, err
 }
 
-// undeletedIntendedDeletions is how many objects the render asked to delete beyond what the merge
-// actually deleted. Positive means a child that should be gone is still alive (#304). It counts the
-// omitted tail too, so a truncated list cannot hide a shortfall.
-func undeletedIntendedDeletions(res *helmconfig.ReconcileResult) int {
+// failedIntendedDeletions is how many objects the render asked to delete that were neither deleted
+// nor kept (helm.sh/resource-policy: keep, reported by plumbing v1.35.0 as KeptDeletions): deletions
+// that FAILED, so a child that should be gone is still alive (#304). It counts the omitted tails too,
+// so a truncated list cannot hide a shortfall.
+func failedIntendedDeletions(res *helmconfig.ReconcileResult) int {
 	if res == nil {
 		return 0
 	}
 	intended := len(res.IntendedDeletions) + res.IntendedDeletionsOmitted
-	if short := intended - res.Deleted; short > 0 {
+	kept := len(res.KeptDeletions) + res.KeptDeletionsOmitted
+	if short := intended - res.Deleted - kept; short > 0 {
 		return short
 	}
 	return 0
