@@ -65,6 +65,9 @@ func main() {
 	syncPeriod := flag.Duration("sync", env.Duration(fmt.Sprintf("%s_SYNC", envVarPrefix), time.Minute*10), "Controller manager cache re-list period such as 300ms, 1.5h, or 2h45m")
 	pollInterval := flag.Duration("poll", env.Duration(fmt.Sprintf("%s_POLL_INTERVAL", envVarPrefix), time.Minute*3), "Poll interval controls how often an individual resource should be checked for drift.")
 	maxReconcileRate := flag.Int("max-reconcile-rate", env.Int(fmt.Sprintf("%s_MAX_RECONCILE_RATE", envVarPrefix), 5), "The global maximum rate per second at which resources may checked for drift from the desired state.")
+	// #414: off = dry run (dangling controller bindings are logged, not deleted).
+	removeDanglingRBAC := flag.Bool("remove-dangling-controller-rbac", env.Bool(fmt.Sprintf("%s_REMOVE_DANGLING_CONTROLLER_RBAC", envVarPrefix), false),
+		"Delete RoleBindings/ClusterRoleBindings whose only subject is a retired composition controller's absent ServiceAccount (#414). Off: log them only.")
 	leaderElection := flag.Bool("leader-election", env.Bool(fmt.Sprintf("%s_LEADER_ELECTION", envVarPrefix), false), "Use leader election for the controller manager.")
 	metricsEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
 	tracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
@@ -246,9 +249,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
-		ControllerOptions: o,
-		Metrics:           telemetryMetrics,
-		Pluralizer:        pluralizer.New(false),
+		ControllerOptions:  o,
+		Metrics:            telemetryMetrics,
+		Pluralizer:         pluralizer.New(false),
+		RemoveDanglingRBAC: *removeDanglingRBAC,
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
 		os.Exit(1)

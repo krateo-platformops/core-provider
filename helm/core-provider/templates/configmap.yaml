@@ -17,6 +17,8 @@ data:
   OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.otel.protocol | default "http/protobuf" | quote }}
   SERVICE_VERSION: {{ .Chart.AppVersion | quote }}
   {{- end }}
+  # #414: false is a dry run; core-provider logs the bindings it would remove.
+  CORE_PROVIDER_REMOVE_DANGLING_CONTROLLER_RBAC: "{{ .Values.danglingControllerRBAC.remove }}"
   {{- range $key, $value := .Values.env }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

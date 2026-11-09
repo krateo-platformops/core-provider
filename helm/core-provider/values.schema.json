@@ -859,6 +859,18 @@
         }
       }
     },
+    "danglingControllerRBAC": {
+      "type": "object",
+      "title": "Bindings left by retired composition controllers (#414)",
+      "additionalProperties": false,
+      "properties": {
+        "remove": {
+          "type": "boolean",
+          "title": "Delete RoleBindings/ClusterRoleBindings whose only subject is a retired controller's absent ServiceAccount (false: log them only, a dry run)",
+          "default": false
+        }
+      }
+    },
     "podDisruptionBudget": {
       "type": "object",
       "title": "PodDisruptionBudget",

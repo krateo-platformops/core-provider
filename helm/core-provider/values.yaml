@@ -165,6 +165,14 @@ tolerations: []
 affinity: {}
 env:
   CORE_PROVIDER_DEBUG: "false"
+# danglingControllerRBAC (#414): RoleBindings and ClusterRoleBindings whose ONLY subject is a retired
+# composition controller version's ServiceAccount, which no longer exists, for a version no longer on
+# the Kind's CRD. Older derived-RBAC naming eras left them behind, still holding their roles' rules.
+# false (the default): a dry run. Each definition's Update logs "DRY RUN: would remove bindings ...".
+# true: those bindings are deleted, and each Role/ClusterRole they referenced that no other binding
+# references and helm does not own. A binding helm owns is never touched.
+danglingControllerRBAC:
+  remove: false
 # apiRefRBAC — auto-generate the RBAC that authorizes a CompositionDefinition's apiRef RESTAction
 # reads. When enabled, core-provider's pod gets a projected authn-audience token and an authn
 # allowlist mapping, and calls snowplow's /rbac (authenticated) to grant the per-composition group
