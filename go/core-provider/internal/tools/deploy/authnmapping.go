@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	definitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
 	"github.com/krateo-platformops/core-provider/internal/tools/objects"
@@ -14,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -66,10 +68,11 @@ func cdcGroup(saName string) string {
 
 // renderAuthnServiceAccountMapping builds the mapping object (unstructured, since the type is
 // owned by authn) targeting the authn namespace and referencing the CDC SA.
-func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace string) (*unstructured.Unstructured, error) {
+func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace, principal string) (*unstructured.Unstructured, error) {
 	authnNS := authnNamespaceOrDefault(opts.AuthnNamespace)
 	name := authnMappingName(saNamespace, saName)
 
+	delegation, allowed, maxDepth := delegationValues(opts.ApiRefDelegation)
 	obj := &unstructured.Unstructured{}
 	err := objects.CreateK8sObject(obj, opts.GVR,
 		types.NamespacedName{Namespace: authnNS, Name: name},
@@ -78,6 +81,10 @@ func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace st
 		"saNamespace", saNamespace,
 		"group", cdcGroup(saName),
 		"displayName", fmt.Sprintf("CDC (%s/%s)", saNamespace, saName),
+		"principal", principal,
+		"delegation", delegation,
+		"delegationAllowed", allowed,
+		"delegationMaxDepth", maxDepth,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rendering authn ServiceAccount mapping: %w", err)
@@ -113,13 +120,18 @@ func deleteAuthnClientConfigSecret(ctx context.Context, kube client.Client, auth
 
 // hashAuthnServiceAccountMapping contributes deterministic inputs to the digest so Deploy and
 // Lookup agree regardless of cluster state. No-op when no apiRef is declared.
-func hashAuthnServiceAccountMapping(opts DeployOptions, saName string, hsh *hasher.ObjectHash) error {
+func hashAuthnServiceAccountMapping(opts DeployOptions, saName, principal string, hsh *hasher.ObjectHash) error {
 	if opts.ApiRefName == "" {
 		return nil
 	}
 	authnNS := authnNamespaceOrDefault(opts.AuthnNamespace)
 	name := authnMappingName(opts.ControllerNamespace, saName)
-	return hsh.SumHash(name, authnNS, cdcGroup(saName))
+	// principal and delegation are inputs to what is rendered, so they are inputs to the digest:
+	// declaring delegation, or authn-crds starting to serve spec.principal, makes the definition read
+	// as not up to date, and the Update re-renders the mapping (#405). Without them here, either
+	// change would sit unapplied until something unrelated triggered an Update.
+	delegation, allowed, maxDepth := delegationValues(opts.ApiRefDelegation)
+	return hsh.SumHash(name, authnNS, cdcGroup(saName), principal, delegation, allowed, maxDepth)
 }
 
 // applyAuthnServiceAccountMapping renders, applies, and hashes the mapping. No-op without apiRef.
@@ -129,7 +141,11 @@ func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface,
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	obj, err := renderAuthnServiceAccountMapping(opts, saName, saNamespace)
+	principal, err := authnPrincipal(ctx, dyn)
+	if err != nil {
+		return err
+	}
+	obj, err := renderAuthnServiceAccountMapping(opts, saName, saNamespace, principal)
 	if err != nil {
 		return err
 	}
@@ -138,7 +154,7 @@ func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface,
 		return fmt.Errorf("installing authn ServiceAccount mapping: %w", err)
 	}
 	log.Debug("authn ServiceAccount mapping successfully installed", "name", obj.GetName(), "namespace", obj.GetNamespace())
-	return hashAuthnServiceAccountMapping(opts, saName, hsh)
+	return hashAuthnServiceAccountMapping(opts, saName, principal, hsh)
 }
 
 // ensureSelfAuthnMapping provisions core-provider's OWN authn allowlist mapping — the one that
@@ -209,4 +225,69 @@ func deleteAuthnServiceAccountMapping(ctx context.Context, kube client.Client, a
 	}
 	log.Debug("authn ServiceAccount mapping deleted", "name", obj.GetName(), "namespace", obj.GetNamespace())
 	return nil
+}
+
+// authnPrincipalController is the principal every composition controller's identity declares
+// (authn spec.principal, enum agent|controller|service; unset means service).
+const authnPrincipalController = "controller"
+
+// authnMappingCRDName is the CRD of authn's ServiceAccount mapping.
+const authnMappingCRDName = "serviceaccounts.serviceaccount.authn.krateo.io"
+
+// authnPrincipal is the spec.principal to render on a composition controller's mapping: "controller"
+// when the installed mapping CRD serves spec.principal at the version core-provider writes
+// (authn-crds >= 0.39.0), and "" otherwise (#405). Writing the field to an older CRD would be pruned or
+// refused, so it follows the cluster's SERVED schema, read on every call rather than cached at startup:
+// a core-provider started before the CRD gained the field renders it on its next reconcile, no
+// restart. It keys on the field itself, not on a chart version.
+//
+// A failed read is an error, not "unsupported": answering "" on a transient error would re-render
+// every mapping WITHOUT principal and flap it on the next good read. A CRD that does not exist is
+// "unsupported": there is then no field to write (and the mapping apply fails on its own).
+func authnPrincipal(ctx context.Context, dyn dynamic.Interface) (string, error) {
+	crd, err := dyn.Resource(crdGVR).Get(ctx, authnMappingCRDName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading %s to decide spec.principal: %w", authnMappingCRDName, err)
+	}
+	if servesSpecField(crd, authnServiceAccountGVK.Version, "principal") {
+		return authnPrincipalController, nil
+	}
+	return "", nil
+}
+
+// servesSpecField reports whether crd SERVES version with spec.properties.<field> in its schema.
+func servesSpecField(crd *unstructured.Unstructured, version, field string) bool {
+	versions, _, _ := unstructured.NestedSlice(crd.Object, "spec", "versions")
+	for _, v := range versions {
+		vm, ok := v.(map[string]interface{})
+		if !ok || vm["name"] != version {
+			continue
+		}
+		if served, _ := vm["served"].(bool); !served {
+			return false
+		}
+		_, found, _ := unstructured.NestedMap(vm, "schema", "openAPIV3Schema", "properties", "spec", "properties", field)
+		return found
+	}
+	return false
+}
+
+// delegationValues are the template inputs for spec.delegation: all "" when the definition declares
+// none (the mapping then has no delegation key at all, so existing mappings render exactly as before
+// #405), and maxDepth "" when unset (authn defaults it in code, not in its CRD, so it is not rendered).
+func delegationValues(d *definitionsv1alpha1.ApiRefDelegation) (delegation, allowed, maxDepth string) {
+	if d == nil {
+		return "", "", ""
+	}
+	allowed = "false"
+	if d.Allowed {
+		allowed = "true"
+	}
+	if d.MaxDepth != nil {
+		maxDepth = fmt.Sprintf("%d", *d.MaxDepth)
+	}
+	return "true", allowed, maxDepth
 }

@@ -80,6 +80,32 @@ spec:
                   under ".api" in the projection root. Shape copied from snowplow's spec.apiRef
                   (name/namespace + inline extras).
                 properties:
+                  delegation:
+                    description: |-
+                      Delegation lets this definition's composition controller act on behalf of a caller through
+                      authn's POST /delegate (#405). It is rendered onto the controller's authn ServiceAccount mapping
+                      (spec.delegation) on every apply; a value set by hand on the mapping is replaced. Absent means no
+                      delegation key on the mapping at all, which authn answers with 403 DelegationNotAllowed.
+
+                      The bounds are authn's own (serviceaccounts.serviceaccount.authn.krateo.io): if this field
+                      accepted more, the apiserver would reject the mapping's update instead, far from this object.
+                      Enabling it on a real definition is a platform decision, not a default.
+                    properties:
+                      allowed:
+                        description: Allowed enables delegation for the controller's
+                          identity. Required whenever delegation is set.
+                        type: boolean
+                      maxDepth:
+                        description: |-
+                          MaxDepth limits how deep a delegation chain may go. Unset leaves authn's own default (3, applied
+                          in authn's code, not by its CRD), so it is rendered only when set.
+                        format: int32
+                        maximum: 8
+                        minimum: 1
+                        type: integer
+                    required:
+                    - allowed
+                    type: object
                   extras:
                     description: |-
                       Extras are author-declared STATIC values merged into the RESTAction's jq root

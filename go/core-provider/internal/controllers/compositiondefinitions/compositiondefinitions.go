@@ -758,6 +758,14 @@ func apiRefName(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string
 	return cr.Spec.ApiRef.Name
 }
 
+// apiRefDelegation is the definition's declared spec.apiRef.delegation (#405), or nil.
+func apiRefDelegation(cr *compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.ApiRefDelegation {
+	if cr.Spec.ApiRef == nil {
+		return nil
+	}
+	return cr.Spec.ApiRef.Delegation
+}
+
 func apiRefNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
 	if cr.Spec.ApiRef == nil {
 		return ""
@@ -1085,6 +1093,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1470,6 +1479,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1835,6 +1845,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
