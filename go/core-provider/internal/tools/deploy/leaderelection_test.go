@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
@@ -50,5 +51,29 @@ func TestShippedChart_ElectsALeaderByDefault(t *testing.T) {
 				t.Errorf("Lease get/create/update granted: %v, want %v", canLease, tc.want)
 			}
 		})
+	}
+}
+
+// #313. core-provider places every local composition controller in its OWN namespace, so the
+// shipped Deployment must tell it which one, from the downward API rather than a rendered value
+// that could disagree with where the pod actually runs.
+func TestShippedChart_PassesItsOwnNamespaceAsCDCNamespace(t *testing.T) {
+	m := renderShippedChart(t, nil)
+	var dep appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(m["core-provider/templates/deployment.yaml"]), &dep); err != nil || len(dep.Spec.Template.Spec.Containers) == 0 {
+		t.Fatalf("decoding core-provider's Deployment: %v (%d containers)", err, len(dep.Spec.Template.Spec.Containers))
+	}
+	found := 0
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		if e.Name != "CDC_NAMESPACE" {
+			continue
+		}
+		found++
+		if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "metadata.namespace" {
+			t.Errorf("CDC_NAMESPACE must come from fieldRef metadata.namespace, got %+v", e)
+		}
+	}
+	if found != 1 {
+		t.Errorf("CDC_NAMESPACE is set %d times on core-provider's container, want exactly 1", found)
 	}
 }

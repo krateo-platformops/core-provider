@@ -53,7 +53,7 @@ type leakedController struct {
 //     same condition. A surviving mutant proved the separate check unreachable and it was removed.
 //   - a version another CompositionDefinition references is kept, via the same predicate the
 //     retirement path uses.
-func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) (leaked []leakedController, kept []string, err error) {
+func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string, placements []string) (leaked []leakedController, kept []string, err error) {
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching CRD: %w", err)
@@ -82,16 +82,27 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 		return nil, []string{fmt.Sprintf("ALL:unaccounted-instances=%d", len(unaccounted.Items))}, nil
 	}
 
-	var deps appsv1.DeploymentList
-	if err := e.kube.List(ctx, &deps, client.InNamespace(selfNamespace)); err != nil {
-		// A failed LIST is not evidence of absence, and here the destructive reading would be to
-		// treat an unreadable namespace as having nothing to keep. Refuse.
-		return nil, nil, fmt.Errorf("listing deployments in %s: %w", selfNamespace, err)
+	// #313: a controller may live in more than one placement (the controller namespace, and the
+	// definition's own while the migration has not reached it; old versions retire in place). Every
+	// placement is listed, and each VERSION is decided once: retire() removes it from every placement.
+	if len(placements) == 0 {
+		return nil, nil, fmt.Errorf("no placements to look for leaked controllers in")
+	}
+	var candidates []appsv1.Deployment
+	for _, ns := range placements {
+		var deps appsv1.DeploymentList
+		if err := e.kube.List(ctx, &deps, client.InNamespace(ns)); err != nil {
+			// A failed LIST is not evidence of absence, and here the destructive reading would be to
+			// treat an unreadable namespace as having nothing to keep. Refuse.
+			return nil, nil, fmt.Errorf("listing deployments in %s: %w", ns, err)
+		}
+		candidates = append(candidates, deps.Items...)
 	}
 
 	prefix := gvr.Resource + "-"
-	for i := range deps.Items {
-		name := deps.Items[i].Name
+	seen := map[string]bool{}
+	for i := range candidates {
+		name := candidates[i].Name
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, leakedControllerSuffix) {
 			continue
 		}
@@ -99,6 +110,22 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 		if version == "" {
 			continue
 		}
+		// The NAME is a derived identity, and it is shared: oasgen-provider names its controllers
+		// <RestDefinition name>-controller with exactly this package's labels, so a RestDefinition
+		// called <plural>-<anything> in a placement matches the pattern above. #313 made the
+		// management namespace a placement, which is where such controllers can live. Before the
+		// version is even counted, the Deployment must SAY it is this Kind's controller at that
+		// version, in the args it runs with. A foreign or unreadable one is kept: on this path
+		// "cannot tell" must never mean "delete". Checked BEFORE seen[], so a foreign Deployment
+		// cannot mark a version seen and hide this Kind's real controller in another placement.
+		if why := notThisKindsController(&candidates[i], gvk.Group, gvr.Resource, version); why != "" {
+			kept = append(kept, fmt.Sprintf("%s/%s:%s", candidates[i].Namespace, name, why))
+			continue
+		}
+		if seen[version] {
+			continue
+		}
+		seen[version] = true
 		if version == gvk.Version {
 			kept = append(kept, version+":is-current")
 			continue
@@ -139,4 +166,33 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 	sort.Slice(leaked, func(i, j int) bool { return leaked[i].Name < leaked[j].Name })
 	sort.Strings(kept)
 	return leaked, kept, nil
+}
+
+// notThisKindsController returns "" when dep's own container args identify it as the controller for
+// group/resource at version (the -group=, -resource= and -version= flags every cdc template passes,
+// which are what the controller actually watches), and otherwise a keep reason: "foreign" when the
+// args name something else, "unidentified" when there are none to read.
+func notThisKindsController(dep *appsv1.Deployment, group, resource, version string) string {
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		var g, r, v string
+		var found bool
+		for _, a := range c.Args {
+			switch {
+			case strings.HasPrefix(a, "-group="):
+				g, found = strings.TrimPrefix(a, "-group="), true
+			case strings.HasPrefix(a, "-resource="):
+				r = strings.TrimPrefix(a, "-resource=")
+			case strings.HasPrefix(a, "-version="):
+				v = strings.TrimPrefix(a, "-version=")
+			}
+		}
+		if !found {
+			continue
+		}
+		if g == group && r == resource && v == version {
+			return ""
+		}
+		return "foreign"
+	}
+	return "unidentified"
 }
