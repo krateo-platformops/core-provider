@@ -75,6 +75,13 @@ var (
 	// via COMPOSITION_AUTHN_NAMESPACE; defaults to "krateo-system".
 	AuthnNamespace = envOr("COMPOSITION_AUTHN_NAMESPACE", "krateo-system")
 
+	// ManagementNamespace is where every LOCAL composition controller lives (#313): core-provider's
+	// own namespace, from the downward API (CDC_NAMESPACE, set by the chart). There is no default.
+	// Falling back to the definition's namespace would silently keep the deadlock #313 removes, and
+	// assuming "krateo-system" would be wrong for any install elsewhere. Setup refuses to start
+	// without it.
+	ManagementNamespace = envOr("CDC_NAMESPACE", "")
+
 	// SnowplowURL is snowplow's base URL. When a CompositionDefinition declares an apiRef,
 	// core-provider calls snowplow's dispatch-free GET /rbac to enumerate the RESTAction's
 	// read-set and grant it to the per-composition group. Override via CORE_PROVIDER_SNOWPLOW_URL;
@@ -111,6 +118,9 @@ type Options struct {
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
+	if ManagementNamespace == "" {
+		return errNoManagementNamespace
+	}
 	name := reconciler.ControllerName(compositiondefinitionsv1alpha1.CompositionDefinitionGroupKind)
 
 	l := o.ControllerOptions.Logger.WithValues("controller", name)
@@ -1439,6 +1449,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return err
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -1729,7 +1743,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	//
 	// Called from Update rather than Observe because Update runs only when something changed, so
 	// the Deployment LIST this costs is not paid per reconcile across 68 controllers.
-	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace,
+	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace, controllerPlacements(cr),
 		func(ctx context.Context, retired schema.GroupVersionResource) error {
 			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, currentControllerNamespace(cr, owner), log)
 		})
@@ -1800,6 +1814,10 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		return gvr, err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return gvr, err
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
