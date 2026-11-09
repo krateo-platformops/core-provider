@@ -1636,7 +1636,11 @@ func TestController(t *testing.T) {
 		} else {
 			t.Logf("#402: %d derived RBAC objects record the composition as owner before Delete", n)
 		}
-		restoreCD := setAbsentPasswordRef(ctx, t, dy, "focus-data-presentation-azure", namespace)
+		// As an administrator, not as the controller: dy authenticates as the cdc's test ServiceAccount,
+		// which rightly may not edit CompositionDefinitions. Removing a chart's credential is the
+		// operator's act this step simulates.
+		adminDy := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
+		restoreCD := setAbsentPasswordRef(ctx, t, adminDy, "focus-data-presentation-azure", namespace)
 		defer restoreCD()
 		probeGetter, err := archive.Dynamic(cfg.Client().RESTConfig(), FakePluralizer{})
 		if err != nil {
