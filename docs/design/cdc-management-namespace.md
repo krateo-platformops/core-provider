@@ -143,9 +143,24 @@ controllers live in the same namespace with the same labels (`app.kubernetes.io/
 krateo-057, 2026-11-09: 70 composition controllers and 34 oasgen ones, all in krateo-system). Print both
 counts before deleting anything.
 
-Two smaller leftovers of a rollback, both harmless: the authn mappings named `cdc-<management ns>-<sa>`
-stay behind next to the re-created `cdc-<definition ns>-<sa>` ones, and derived RBAC keeps its
-`owner.composition.krateo.io/<uid>` labels (#402), which the older release ignores.
+**Remove each relocated controller's whole set, not only its Deployment**, because 2.13.76 knows
+nothing in the management namespace and leaves it all behind. Find every object from the selected
+Deployment's OWN references, never by derived names or labels:
+
+1. the Deployment (selected by `-group=composition.krateo.io` above);
+2. its `spec.template.spec.serviceAccountName` ServiceAccount and the ConfigMap in its `envFrom`;
+3. the authn mapping `cdc-<management ns>-<that ServiceAccount>` and its clientconfig Secret
+   (`endpoints.SecretName(<mapping name>)`).
+
+Step 3 is not tidiness. authn confirmed (main 9493d6d) that a rolled-back controller still signs in
+normally: the leftover mapping references a different `namespace/name`, so there is no
+`ErrAmbiguousMapping`. But the leftover is a **live allowlist entry**. While its ServiceAccount survives,
+anything able to mint a projected token for it (pod-create rights in the management namespace) can
+exchange it at `/serviceaccount/login` for the `krateo:cdc:<sa>` identity. Low risk, but an orphan
+identity, so remove it.
+
+One leftover IS harmless: derived RBAC keeps its `owner.composition.krateo.io/<uid>` labels (#402),
+which the older release ignores.
 
 ## 5. Input states the implementation must cover
 
