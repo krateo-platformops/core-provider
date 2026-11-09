@@ -743,12 +743,13 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
-	// The identity's stored session credential goes too: every Undeploy deletes the ServiceAccount, so
-	// it is orphaned otherwise, and authn never deletes it (#313). After the drain and the mapping.
-	err = deleteAuthnClientConfigSecret(ctx, opts.KubeClient, opts.AuthnNamespace, sa.Namespace, sa.Name)
-	if err != nil {
-		return err
-	}
+	// NOT deleted here: authn's clientconfig Secret for this identity. core-provider never creates it
+	// (authn issues it at the identity's first login), and 2.13.77 deleting it on every Undeploy was a
+	// 403 (core-provider's ClusterRole grants secrets only get/list/watch). Because it ran LAST, after
+	// the real teardown, every Undeploy that was re-run (a re-triggered retirement, a definition
+	// delete) wedged on it (#416). Deleting another component's object would need delete on every
+	// Secret in that scope for one cleanup core-provider doesn't own, so the lifecycle belongs to
+	// authn (Diego, 2026-11-09). On krateo-057 only 1 such Secret existed across 70 definitions.
 
 	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
 	// no namespace in it, so it is shared with any other definition on this Kind+version.

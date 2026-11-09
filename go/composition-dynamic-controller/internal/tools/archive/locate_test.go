@@ -95,3 +95,63 @@ func TestLocateNeedsNoCredentials(t *testing.T) {
 		}
 	}
 }
+
+// #419: a definition deleted before core-provider's first status write has no status.apiVersion or
+// status.kind. A composition's Delete reads it through Locate and must still find it, from the
+// labels that name it exactly, or the namespace deadlocks (the definition waits for its compositions,
+// the composition's Delete waits for this status). Get (Create/Update) still requires the status: the
+// control. And a status that is PRESENT but malformed stays a hard error for Locate as well, so the
+// relaxation is "unset", not "anything wrong with status".
+func TestLocateFindsADefinitionWithNoStatusYet(t *testing.T) {
+	newCD := func(status map[string]interface{}) *unstructured.Unstructured {
+		cd := &unstructured.Unstructured{}
+		cd.SetAPIVersion("core.krateo.io/v1alpha1")
+		cd.SetKind("CompositionDefinition")
+		cd.SetName("fireworks-app")
+		cd.SetNamespace("demo-system")
+		_ = unstructured.SetNestedField(cd.Object, "oci://registry.example/charts/fireworks-app", "spec", "chart", "url")
+		_ = unstructured.SetNestedField(cd.Object, "2.0.4", "spec", "chart", "version")
+		if status != nil {
+			_ = unstructured.SetNestedMap(cd.Object, status, "status")
+		}
+		return cd
+	}
+	comp := &unstructured.Unstructured{}
+	comp.SetAPIVersion("composition.krateo.io/v2-0-4")
+	comp.SetKind("FireworksApp")
+	comp.SetName("probe")
+	comp.SetNamespace("demo-system")
+	comp.SetLabels(map[string]string{
+		compositionMeta.CompositionDefinitionGroupLabel:     cdGVR.Group,
+		compositionMeta.CompositionDefinitionVersionLabel:   cdGVR.Version,
+		compositionMeta.CompositionDefinitionResourceLabel:  cdGVR.Resource,
+		compositionMeta.CompositionDefinitionNameLabel:      "fireworks-app",
+		compositionMeta.CompositionDefinitionNamespaceLabel: "demo-system",
+		compositionMeta.CompositionVersionLabel:             "v2-0-4",
+	})
+	getter := func(cd *unstructured.Unstructured) *dynamicGetter {
+		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+			cdGVR: "CompositionDefinitionList",
+			{Group: "", Version: "v1", Resource: "secrets"}: "SecretList",
+		}, cd)
+		return &dynamicGetter{dynamicClient: dyn, logger: logging.NewNopLogger(), pluralizer: locatePluralizer{}}
+	}
+
+	// No status at all.
+	g := getter(newCD(nil))
+	if _, err := g.Get(comp); err == nil {
+		t.Fatal("control: Get succeeded on a definition with no status; Create/Update must still require it")
+	}
+	info, err := g.Locate(comp)
+	if err != nil {
+		t.Fatalf("Locate failed on a definition with no status yet, which deadlocks its compositions' deletion: %v", err)
+	}
+	if info.Version != "2.0.4" || info.CompositionDefinitionInfo == nil || info.CompositionDefinitionInfo.Name != "fireworks-app" {
+		t.Errorf("Locate = version %q, definition %+v; want 2.0.4 and demo-system/fireworks-app", info.Version, info.CompositionDefinitionInfo)
+	}
+
+	// Present but malformed: still a hard error, for Locate too.
+	if _, err := getter(newCD(map[string]interface{}{"apiVersion": "not-a-group-version", "kind": "FireworksApp"})).Locate(comp); err == nil {
+		t.Error("Locate accepted a definition whose status.apiVersion is malformed; only an UNSET status may be trusted")
+	}
+}
