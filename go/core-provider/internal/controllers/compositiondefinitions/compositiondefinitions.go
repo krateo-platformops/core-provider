@@ -758,6 +758,14 @@ func apiRefName(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string
 	return cr.Spec.ApiRef.Name
 }
 
+// apiRefDelegation is the definition's declared spec.apiRef.delegation (#405), or nil.
+func apiRefDelegation(cr *compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.ApiRefDelegation {
+	if cr.Spec.ApiRef == nil {
+		return nil
+	}
+	return cr.Spec.ApiRef.Delegation
+}
+
 func apiRefNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
 	if cr.Spec.ApiRef == nil {
 		return ""
@@ -1068,6 +1076,10 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error seeding remote target: %w", err)
 	}
 
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return reconciler.ExternalObservation{}, aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -1085,6 +1097,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1097,6 +1111,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error deploying dynamic controller in dry-run mode: %w", err)
 	}
@@ -1453,6 +1468,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
 		return err
 	}
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -1470,6 +1489,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1482,6 +1503,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return err
 	}
@@ -1818,6 +1840,10 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
 		return gvr, err
 	}
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return gvr, aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -1835,6 +1861,8 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1847,6 +1875,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}

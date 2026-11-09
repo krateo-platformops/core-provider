@@ -287,6 +287,30 @@ type ApiReference struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Extras *apiextensionsv1.JSON `json:"extras,omitempty"`
+
+	// Delegation lets this definition's composition controller act on behalf of a caller through
+	// authn's POST /delegate (#405). It is rendered onto the controller's authn ServiceAccount mapping
+	// (spec.delegation) on every apply; a value set by hand on the mapping is replaced. Absent means no
+	// delegation key on the mapping at all, which authn answers with 403 DelegationNotAllowed.
+	//
+	// The bounds are authn's own (serviceaccounts.serviceaccount.authn.krateo.io): if this field
+	// accepted more, the apiserver would reject the mapping's update instead, far from this object.
+	// Enabling it on a real definition is a platform decision, not a default.
+	// +optional
+	Delegation *ApiRefDelegation `json:"delegation,omitempty"`
+}
+
+// ApiRefDelegation mirrors authn's ServiceAccount mapping spec.delegation, with its bounds.
+type ApiRefDelegation struct {
+	// Allowed enables delegation for the controller's identity. Required whenever delegation is set.
+	Allowed bool `json:"allowed"`
+
+	// MaxDepth limits how deep a delegation chain may go. Unset leaves authn's own default (3, applied
+	// in authn's code, not by its CRD), so it is rendered only when set.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	MaxDepth *int32 `json:"maxDepth,omitempty"`
 }
 
 // StatusFieldMapping is one projected status field (snowplow widgetDataTemplate item).
