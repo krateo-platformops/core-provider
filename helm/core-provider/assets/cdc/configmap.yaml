@@ -28,7 +28,10 @@ data:
   {{- if .Values.otel.enabled }}
   OTEL_ENABLED: "true"
   OTEL_TRACING_ENABLED: "{{ .Values.otel.tracing }}"
-  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otel.endpoint | default (printf "http://otel-collector-daemonset-opentelemetry-collector.%s.svc:4318" .Release.Namespace) | quote }}
+  {{- /* An explicit endpoint only. Unset, the Deployment derives a node-local one from the node IP (core-provider.otlpNodeLocal); the old default here, the daemonset's HEADLESS Service, spread spans across node agents and lost their pod metadata. */}}
+  {{- with .Values.otel.endpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}
   OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.otel.protocol | default "http/protobuf" | quote }}
   SERVICE_VERSION: {{ .Values.cdc.image.tag | quote }}
   {{- end }}

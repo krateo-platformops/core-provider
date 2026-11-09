@@ -46,8 +46,20 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-configmap
-          {{- if .Values.cdc.goMemLimit }}
+          {{- if or .Values.cdc.goMemLimit (include "core-provider.otlpNodeLocal" .) }}
           env:
+            {{- if include "core-provider.otlpNodeLocal" . }}
+            # Node-local OTLP (core-provider.otlpNodeLocal): HOST_IP must come first, because $(VAR)
+            # expands only variables defined earlier in this list. Not in the ConfigMap: envFrom
+            # can't carry a downward-API value, and env wins over envFrom for the same key.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):{{ include "core-provider.otlpPort" . }}"
+            {{- end }}
+            {{- if .Values.cdc.goMemLimit }}
             # GOMEMLIMIT caps the Go runtime's total footprint. Without it a CDC's RSS tracks the
             # ARENA HIGH-WATER MARK rather than its live data: measured on krateo-057,
             # agentgatewaycontrollers held HeapSys 206.5 MiB against HeapAlloc of only 20.7 MiB —
@@ -74,6 +86,7 @@ spec:
               {{- else }}
               value: {{ .Values.cdc.goMemLimit | quote }}
               {{- end }}
+            {{- end }}
           {{- end }}
           securityContext:
             {{- toYaml .Values.cdc.securityContext | nindent 12 }}

@@ -16,14 +16,22 @@ image:
   tag: ""
 # OpenTelemetry export for the engine (core-provider) AND every spawned cdc. DEFAULT-OFF: with
 # enabled=false the deployments emit no OTEL_* env and are byte-identical (no churn). Flip
-# enabled=true to stream metrics+traces to the ClickHouse stack; when endpoint is left "" the chart
-# defaults it to the node-local daemonset OTLP agent in the release namespace
-# (http://otel-collector-daemonset-opentelemetry-collector.<.Release.Namespace>.svc:4318) — set
-# endpoint explicitly to override. The installer only needs enabled=true when observability is on.
+# enabled=true to stream metrics+traces to the ClickHouse stack; when endpoint is left "" each pod
+# sends to the daemonset agent on its own node via the node IP (see otel.endpoint below). The old
+# default here, the daemonset's headless Service, was NOT node-local: it spread spans across agents,
+# which attach pod metadata only for their own node. Set endpoint explicitly to override. The
+# installer only needs enabled=true when observability is on.
 # (Logs are always-on structured JSON regardless of this block.)
 otel:
   enabled: false
   tracing: true
+  # Empty (the default): core-provider and every composition controller send to the OpenTelemetry
+  # daemonset agent on THEIR OWN NODE, via the node IP and the daemonset's OTLP hostPort
+  # (http://$(HOST_IP):4318, or :4317 for protocol grpc). Node-local matters: the agent attaches pod
+  # metadata (k8s.deployment.name included) only for pods on its node. Set an explicit URL to override,
+  # e.g. the daemonset's node-local Service, http://otel-collector-daemonset-local.<ns>.svc:4318
+  # (otel-collector-daemonset >= 0.1.21). Never the daemonset's headless Service: it spreads spans
+  # across nodes and they lose their pod metadata.
   endpoint: ""
   protocol: http/protobuf
 imagePullSecrets: []

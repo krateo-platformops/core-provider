@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/krateo-platformops/core-provider/internal/tools/objects"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
@@ -16,6 +17,8 @@ import (
 	"helm.sh/helm/v3/pkg/releaseutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 )
 
@@ -73,6 +76,11 @@ func loadChartForTest(dir string) (*chart.Chart, error) {
 // rather than silently missing. It returns the files written, and fails if none were, if a mount
 // has no ConfigMap, or if the rendered cdc Deployment does not name image.
 func renderChartAssets(root, releaseNamespace, image string) ([]string, error) {
+	return renderChartAssetsWith(root, releaseNamespace, image, nil)
+}
+
+// renderChartAssetsWith is renderChartAssets with extra top-level chart values merged in.
+func renderChartAssetsWith(root, releaseNamespace, image string, extra map[string]any) ([]string, error) {
 	i := strings.LastIndex(image, ":")
 	if i <= 0 || strings.Contains(image[i:], "/") {
 		return nil, fmt.Errorf("%s=%q: want repository:tag", cdcImageEnv, image)
@@ -90,6 +98,9 @@ func renderChartAssets(root, releaseNamespace, image string) ([]string, error) {
 		// that file exists. Keep that path exercised.
 		"metrics": map[string]any{"enabled": true},
 	}}
+	for k, v := range extra {
+		vals[k] = v
+	}
 	rv, err := chartutil.ToRenderValues(chrt, vals, chartutil.ReleaseOptions{
 		Name: "core-provider", Namespace: releaseNamespace, IsInstall: true,
 	}, chartutil.DefaultCapabilities)
@@ -230,5 +241,64 @@ func TestRenderChartAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(dep2), `"other-cdc:tag"`) || strings.Contains(string(dep2), image) {
 		t.Fatalf("control: the render with other-cdc:tag does not name it alone")
+	}
+}
+
+// The OTLP endpoint default (Diego, 2026-11-09): with otel enabled and no explicit endpoint, the cdc
+// sends to the daemonset agent on its own node, through the node IP. Rendered end to end, the way it
+// ships: the chart into the asset, then the asset into the Deployment core-provider applies, so the
+// $(HOST_IP) ordering is checked on the object, not on a template. An explicit endpoint must win.
+func TestCdcOTLPEndpointIsNodeLocalByDefault(t *testing.T) {
+	render := func(otel map[string]any) appsv1.Deployment {
+		t.Helper()
+		root := t.TempDir()
+		if _, err := renderChartAssetsWith(root, "krateo-system", "composition-dynamic-controller:unit", map[string]any{"otel": otel}); err != nil {
+			t.Fatal(err)
+		}
+		var dep appsv1.Deployment
+		if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
+			types.NamespacedName{Namespace: "krateo-system", Name: "fireworksapps-v1-0-0-controller"},
+			filepath.Join(root, "cdc-deployment", filepath.Base(CDCtemplateDeploymentPath)),
+			"serviceAccountName", "fireworksapps-v1-0-0"); err != nil {
+			t.Fatal(err)
+		}
+		return dep
+	}
+	envOf := func(dep appsv1.Deployment) []corev1.EnvVar { return dep.Spec.Template.Spec.Containers[0].Env }
+	index := func(env []corev1.EnvVar, name string) int {
+		for i, e := range env {
+			if e.Name == name {
+				return i
+			}
+		}
+		return -1
+	}
+
+	env := envOf(render(map[string]any{"enabled": true}))
+	hip, ep, gml := index(env, "HOST_IP"), index(env, "OTEL_EXPORTER_OTLP_ENDPOINT"), index(env, "GOMEMLIMIT")
+	if hip < 0 || env[hip].ValueFrom == nil || env[hip].ValueFrom.FieldRef == nil || env[hip].ValueFrom.FieldRef.FieldPath != "status.hostIP" {
+		t.Fatalf("default: HOST_IP from status.hostIP missing: %+v", env)
+	}
+	if ep < 0 || env[ep].Value != "http://$(HOST_IP):4318" {
+		t.Fatalf("default: OTEL_EXPORTER_OTLP_ENDPOINT = %+v, want http://$(HOST_IP):4318", env)
+	}
+	if hip > ep {
+		t.Errorf("HOST_IP (index %d) must come before the endpoint (index %d): $(VAR) expands only earlier variables", hip, ep)
+	}
+	if gml < 0 {
+		t.Errorf("GOMEMLIMIT disappeared from the cdc env when the OTLP entries were added: %+v", env)
+	}
+
+	if env := envOf(render(map[string]any{"enabled": true, "protocol": "grpc"})); index(env, "OTEL_EXPORTER_OTLP_ENDPOINT") < 0 || env[index(env, "OTEL_EXPORTER_OTLP_ENDPOINT")].Value != "http://$(HOST_IP):4317" {
+		t.Errorf("grpc: want the 4317 hostPort, got %+v", env)
+	}
+
+	// An explicit endpoint wins: no env entry (env would beat the ConfigMap's value for the same key).
+	if env := envOf(render(map[string]any{"enabled": true, "endpoint": "http://otel-collector-daemonset-local.krateo-system.svc:4318"})); index(env, "OTEL_EXPORTER_OTLP_ENDPOINT") >= 0 || index(env, "HOST_IP") >= 0 {
+		t.Errorf("explicit endpoint: the node-local env entries must not be rendered, got %+v", env)
+	}
+	// Control: tracing off renders neither.
+	if env := envOf(render(map[string]any{"enabled": false})); index(env, "HOST_IP") >= 0 {
+		t.Errorf("otel disabled: HOST_IP must not be rendered, got %+v", env)
 	}
 }
