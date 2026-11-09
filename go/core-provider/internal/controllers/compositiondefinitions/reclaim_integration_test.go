@@ -33,6 +33,12 @@ const (
 	reclaimLeakSA      = "fireworksapps-" + reclaimLeakVersion
 	reclaimLeakDeploy  = reclaimLeakSA + "-controller"
 	reclaimLeakCM      = reclaimLeakSA + "-configmap"
+
+	// reclaimForeign is another provider's controller whose NAME matches this Kind's pattern
+	// (fireworksapps-<x>-controller), in the management namespace, where #313 puts every composition
+	// controller and where oasgen-provider's controllers also live. Its args name another group, so the
+	// reclaim must leave it alone.
+	reclaimForeign = "fireworksapps-v1-9-8-controller"
 )
 
 func assessReclaimLeaked(ctx context.Context, t *testing.T, _ *envconf.Config, r *resources.Resources) context.Context {
@@ -60,7 +66,23 @@ func assessReclaimLeaked(ctx context.Context, t *testing.T, _ *envconf.Config, r
 				Selector: &metav1.LabelSelector{MatchLabels: labels},
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: labels},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "registry.k8s.io/pause:3.10"}}},
+					// The args every cdc template passes. The reclaim retires only a Deployment whose own
+					// args say it is this Kind's controller at the version in its name (#404), so a leak
+					// planted without them would rightly be kept as "unidentified".
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "registry.k8s.io/pause:3.10",
+						Args: []string{"-group=" + rehomeGVR.Group, "-resource=" + rehomeGVR.Resource, "-version=" + reclaimLeakVersion}}}},
+				},
+			},
+		},
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: reclaimForeign, Namespace: mgmtNamespace, Labels: map[string]string{"app.kubernetes.io/name": reclaimForeign}},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &zero,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": reclaimForeign}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/name": reclaimForeign}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "registry.k8s.io/pause:3.10",
+						Args: []string{"-group=github.krateo.io", "-resource=repoes", "-version=v1alpha1"}}}},
 				},
 			},
 		},
@@ -99,6 +121,16 @@ func assessReclaimLeaked(ctx context.Context, t *testing.T, _ *envconf.Config, r
 			gone(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: reclaimLeakSA, Namespace: namespace}}) &&
 			gone(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: reclaimLeakCM, Namespace: namespace}})
 	})
+
+	// The foreign look-alike was in the same pass and must have survived it: the leak's retirement
+	// above proves the reclaim ran, so its survival is the guard's decision, not a skipped pass.
+	var foreign appsv1.Deployment
+	if err := r.Get(ctx, reclaimForeign, mgmtNamespace, &foreign); err != nil {
+		t.Fatalf("the reclaim removed another provider's controller %s/%s (name matches, args name github.krateo.io): %v", mgmtNamespace, reclaimForeign, err)
+	}
+	if err := r.Delete(ctx, &foreign); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup %s: %v", reclaimForeign, err)
+	}
 
 	// The current controller is what a wrong predicate would destroy: it must still be there, and
 	// so must its identity.
