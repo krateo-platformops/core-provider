@@ -62,6 +62,11 @@ func (i *Info) IsHTTP() bool {
 
 type Getter interface {
 	Get(un *unstructured.Unstructured) (*Info, error)
+	// Locate returns what Get does except the registry credentials, and reads no Secret: the
+	// composition's definition, its chart URL/version/repo, and the definition's identity. For callers
+	// that never fetch the chart. A composition's Delete is one (#402): it must finish even when the
+	// chart's passwordRef Secret is gone, and the uninstall needs none of the chart's content.
+	Locate(un *unstructured.Unstructured) (*Info, error)
 	WithLogger(logger logging.Logger) Getter
 }
 
@@ -94,6 +99,8 @@ func (pig staticGetter) WithLogger(logger logging.Logger) Getter {
 	}
 }
 
+func (pig staticGetter) Locate(un *unstructured.Unstructured) (*Info, error) { return pig.Get(un) }
+
 func (pig staticGetter) Get(_ *unstructured.Unstructured) (*Info, error) {
 	return &Info{
 		URL: pig.chartName,
@@ -119,7 +126,15 @@ func (g *dynamicGetter) WithLogger(logger logging.Logger) Getter {
 	}
 }
 
-func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
+func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) { return g.get(uns, true) }
+
+func (g *dynamicGetter) Locate(uns *unstructured.Unstructured) (*Info, error) {
+	return g.get(uns, false)
+}
+
+// get is Get, and with withCredentials false it is Locate: the passwordRef Secret is not read and
+// Info.Auth is nil.
+func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool) (*Info, error) {
 	if uns == nil {
 		return nil, fmt.Errorf("unstructured object is nil")
 	}
@@ -226,7 +241,7 @@ func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
 	}
 
 	var password string
-	if passwordRef != nil {
+	if passwordRef != nil && withCredentials {
 		password, err = GetSecret(context.Background(), g.dynamicClient, SecretKeySelector{
 			Name:      passwordRef["name"],
 			Namespace: passwordRef["namespace"],
@@ -250,13 +265,10 @@ func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
 	}
 
 	return &Info{
-		URL:     packageUrl,
-		Version: packageVersion,
-		Repo:    repo,
-		Auth: &Auth{
-			Username: username,
-			Password: password,
-		},
+		URL:                   packageUrl,
+		Version:               packageVersion,
+		Repo:                  repo,
+		Auth:                  authOrNil(withCredentials, username, password),
 		InsecureSkipTLSverify: insecureSkipTLSverify,
 		CompositionDefinitionInfo: &CompositionDefinitionInfo{
 			Name:      compositionDefinition.GetName(),
@@ -444,4 +456,12 @@ func getChartVersionKind(el *unstructured.Unstructured) (string, string, error) 
 
 	version := versionSplit[1]
 	return version, kind, nil
+}
+
+// authOrNil is the registry credentials, or nil for Locate, which reads none.
+func authOrNil(withCredentials bool, username, password string) *Auth {
+	if !withCredentials {
+		return nil
+	}
+	return &Auth{Username: username, Password: password}
 }

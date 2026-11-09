@@ -1331,7 +1331,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// and keeps the leak from reappearing if caching is ever enabled on this path.
 	defer hc.Close()
 
-	pkg, err := h.packageInfoGetter.WithLogger(log).Get(mg)
+	// Locate, not Get (#402): Delete never fetches the chart, so it must not need the chart's
+	// credentials. With Get, a composition whose passwordRef Secret was gone (a namespace teardown
+	// that removes it first, a rotation) could never finish deleting. The definition is still read:
+	// pkg.Version decides isVersionMigrationHandover below, and guessing it would uninstall a release
+	// a version migration still shares.
+	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
 	}
@@ -1457,34 +1462,26 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 
 	log.Debug("Uninstalling RBAC", "package", pkg.URL)
 
-	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
-	if err != nil {
-		return fmt.Errorf("converting GVK to GVR: %w", err)
-	}
-	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
-	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
-
-	// Get Resources and generate RBAC
-	generated, err := rbgen.
-		WithBaseName(compositionMeta.GetReleaseName(mg)).
-		Generate(ctx, rbacgen.Parameters{
-			CompositionName:                mg.GetName(),
-			CompositionNamespace:           mg.GetNamespace(),
-			CompositionGVR:                 compositionGVR,
-			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
-			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
-			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
-		})
-	if err != nil {
-		return fmt.Errorf("generating RBAC for composition %s/%s: %w",
-			mg.GetNamespace(), mg.GetName(), err)
-	}
+	// #402: release the derived RBAC by the owner recorded on it, which needs no chart. Regenerating it
+	// from the chart (chart-inspector, which reads the passwordRef Secret too) is the fallback for RBAC
+	// written before owners were recorded; a composition labelled on any apply since is never wedged by
+	// an unreadable chart here.
 	rbInstaller := rbac.NewRBACInstaller(dyn)
+	var released int
 	err = helmMetrics.TimedRBAC(func() error {
-		return rbInstaller.UninstallRBAC(generated)
+		var rerr error
+		released, rerr = rbInstaller.UninstallOwned(ctx, mg.GetUID())
+		return rerr
 	})
 	if err != nil {
-		return fmt.Errorf("uninstalling rbac: %w", err)
+		return fmt.Errorf("releasing rbac owned by %s/%s: %w", mg.GetNamespace(), mg.GetName(), err)
+	}
+	if released == 0 {
+		if err := h.uninstallRegeneratedRBAC(ctx, mg, pkg, rbInstaller, helmMetrics); err != nil {
+			return err
+		}
+	} else {
+		log.Debug("Released derived RBAC by recorded owner", "objects", released)
 	}
 
 	h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("Deleted composition: %s", mg.GetName())))
@@ -1540,6 +1537,9 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
+	// #402: record this composition as an owner of every derived object, so its Delete can release
+	// them without the chart.
+	generated.SetOwner(mg.GetUID())
 
 	rbInstaller := rbac.NewRBACInstaller(dyn)
 	var report rbac.ApplyReport
@@ -1739,4 +1739,38 @@ func failedIntendedDeletions(res *helmconfig.ReconcileResult) int {
 		return short
 	}
 	return 0
+}
+
+// uninstallRegeneratedRBAC is the pre-#402 teardown: regenerate this composition's RBAC from the
+// chart and delete it by name. Only for RBAC that records no owner (written before #402); it needs
+// the chart, so it fails while the chart is unreadable.
+func (h *handler) uninstallRegeneratedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, rbInstaller *rbac.RBACInstaller, helmMetrics *metrics.HelmMetrics) error {
+	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
+	if err != nil {
+		return fmt.Errorf("converting GVK to GVR: %w", err)
+	}
+	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
+	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
+
+	generated, err := rbgen.
+		WithBaseName(compositionMeta.GetReleaseName(mg)).
+		Generate(ctx, rbacgen.Parameters{
+			CompositionName:                mg.GetName(),
+			CompositionNamespace:           mg.GetNamespace(),
+			CompositionGVR:                 compositionGVR,
+			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
+			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
+			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
+		})
+	if err != nil {
+		return fmt.Errorf("generating RBAC for composition %s/%s: %w",
+			mg.GetNamespace(), mg.GetName(), err)
+	}
+	err = helmMetrics.TimedRBAC(func() error {
+		return rbInstaller.UninstallRBAC(generated)
+	})
+	if err != nil {
+		return fmt.Errorf("uninstalling rbac: %w", err)
+	}
+	return nil
 }
