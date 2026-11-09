@@ -49,6 +49,17 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if include "core-provider.otlpNodeLocal" . }}
+            # Node-local OTLP (core-provider.otlpNodeLocal): HOST_IP must come first, because $(VAR)
+            # expands only variables defined earlier in this list. Not in the ConfigMap: envFrom
+            # can't carry a downward-API value, and env wins over envFrom for the same key.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):{{ include "core-provider.otlpPort" . }}"
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
