@@ -597,6 +597,28 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// selfHealed defers the drift return until after the status write below. See #337 at the end of
 	// this block.
 	selfHealed := false
+	// The render dropped objects that the merge did NOT delete. That is the #304 shape ("removed from
+	// the spec, child still alive"), and it reads Changed == false: plumbing's changed counts
+	// created/deleted/patched, and an intended deletion that didn't happen is none of those. So it
+	// must be logged OUTSIDE the Changed branch, or the one case the intendedDeletions field exists
+	// for (#346) is never printed. That is exactly how krateo-autopilot on krateo-057 reported "up to
+	// date" 62 times with objects its spec no longer renders.
+	// Since plumbing v1.35.0 a deletion helm skipped because the object is helm.sh/resource-policy:
+	// keep is reported apart (KeptDeletions) and correctly re-records the release, so only what is
+	// left, intended and neither deleted nor kept (a deletion that FAILED), is a defect worth a Warn.
+	if n := failedIntendedDeletions(reconcileRes); n > 0 {
+		log.Warn("Composition render dropped objects whose deletion failed: they are still alive and still in the release", "package", pkg.URL,
+			"failedCount", n,
+			"intendedDeletions", reconcileRes.IntendedDeletions,
+			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
+			"keptDeletions", reconcileRes.KeptDeletions,
+			"deleted", reconcileRes.Deleted, "changed", reconcileRes.Changed)
+	}
+	if kept := len(reconcileRes.KeptDeletions) + reconcileRes.KeptDeletionsOmitted; kept > 0 {
+		log.Info("Composition render dropped objects kept by helm.sh/resource-policy: keep; the release now records the change", "package", pkg.URL,
+			"keptDeletions", reconcileRes.KeptDeletions,
+			"keptDeletionsOmitted", reconcileRes.KeptDeletionsOmitted, "changed", reconcileRes.Changed)
+	}
 	if reconcileRes.Changed {
 		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
 		// was done about it, and at Debug it was invisible on every cluster that runs at Info —
@@ -1701,6 +1723,22 @@ func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.Exte
 	}
 	obs.Conditions = append(obs.Conditions, compositionCondition.SyncedGracefulPausePending())
 	return obs, err
+}
+
+// failedIntendedDeletions is how many objects the render asked to delete that were neither deleted
+// nor kept (helm.sh/resource-policy: keep, reported by plumbing v1.35.0 as KeptDeletions): deletions
+// that FAILED, so a child that should be gone is still alive (#304). It counts the omitted tails too,
+// so a truncated list cannot hide a shortfall.
+func failedIntendedDeletions(res *helmconfig.ReconcileResult) int {
+	if res == nil {
+		return 0
+	}
+	intended := len(res.IntendedDeletions) + res.IntendedDeletionsOmitted
+	kept := len(res.KeptDeletions) + res.KeptDeletionsOmitted
+	if short := intended - res.Deleted - kept; short > 0 {
+		return short
+	}
+	return 0
 }
 
 // uninstallRegeneratedRBAC is the pre-#402 teardown: regenerate this composition's RBAC from the
