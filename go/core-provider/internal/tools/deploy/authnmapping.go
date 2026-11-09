@@ -83,7 +83,6 @@ func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace st
 	return obj, nil
 }
 
-
 // hashAuthnServiceAccountMapping contributes deterministic inputs to the digest so Deploy and
 // Lookup agree regardless of cluster state. No-op when no apiRef is declared.
 func hashAuthnServiceAccountMapping(opts DeployOptions, saName string, hsh *hasher.ObjectHash) error {
