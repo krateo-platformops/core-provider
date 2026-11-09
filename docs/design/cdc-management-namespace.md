@@ -126,6 +126,27 @@ placements, so it can't leak when it does retire.
 namespace, and deleting that namespace can still deadlock on its compositions. Every current-version
 controller, and every definition not mid-upgrade, is fully covered.
 
+### 4.1 The move is one-way: a rollback floor
+
+Rolling core-provider **back** below the release that ships this (2.13.77) is unsafe as it stands.
+The older release has no notion of a management namespace: 2.13.76 deploys every controller into
+`cr.Namespace` (9 sites), reclaims leaked controllers only there (`client.InNamespace(selfNamespace)`),
+and contains 0 references to `ManagementNamespace`/`CDC_NAMESPACE` (main has 5). After a rollback it
+would redeploy each controller in its definition's namespace and never see or remove the copy in the
+management namespace. The result is **two controllers per Kind**, and the cdc has no leader election,
+so both reconcile the same compositions. That is the overlap section 4 exists to prevent.
+
+**To roll back:** first delete, in core-provider's namespace, the Deployments whose container args
+include `-group=composition.krateo.io`. Select them by those args, **not by label**: oasgen-provider's
+controllers live in the same namespace with the same labels (`app.kubernetes.io/component=controller`,
+`app.kubernetes.io/managed-by=krateo`), and a label-selected delete would remove them too (on
+krateo-057, 2026-11-09: 70 composition controllers and 34 oasgen ones, all in krateo-system). Print both
+counts before deleting anything.
+
+Two smaller leftovers of a rollback, both harmless: the authn mappings named `cdc-<management ns>-<sa>`
+stay behind next to the re-created `cdc-<definition ns>-<sa>` ones, and derived RBAC keeps its
+`owner.composition.krateo.io/<uid>` labels (#402), which the older release ignores.
+
 ## 5. Input states the implementation must cover
 
 | state | expected |
