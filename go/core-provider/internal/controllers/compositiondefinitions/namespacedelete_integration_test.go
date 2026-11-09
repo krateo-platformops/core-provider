@@ -111,13 +111,38 @@ func assessNamespaceDeleteFinishes(ctx context.Context, t *testing.T, cfg *envco
 		t.Fatalf("delete namespace %s: %v", nsdeleteNamespace, err)
 	}
 	// On 057 this never happened without a human. Bound it generously, but bound it.
-	rehomeEventually(t, 6*time.Minute, "namespace "+nsdeleteNamespace+" to finish deleting with no finalizer removed by hand", func() bool {
-		err := r.Get(ctx, nsdeleteNamespace, "", &corev1.Namespace{})
-		if err != nil && !apierrors.IsNotFound(err) {
+	// On timeout, say what is left and why: the namespace's own deletion conditions name what remains
+	// (NamespaceContentRemaining, NamespaceFinalizersRemaining), the probe's finalizers and conditions
+	// say whether the controller took the Delete, and its log says what the Delete did. #404's run 9
+	// timed out here with core-provider correctly waiting for the composition, and nothing else.
+	deadline = time.Now().Add(6 * time.Minute)
+	for {
+		var ns corev1.Namespace
+		err := r.Get(ctx, nsdeleteNamespace, "", &ns)
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
 			t.Fatalf("get namespace %s: %v", nsdeleteNamespace, err)
 		}
-		return apierrors.IsNotFound(err)
-	})
+		if time.Now().After(deadline) {
+			for _, c := range ns.Status.Conditions {
+				t.Logf("dump: namespace condition %s=%s reason=%s message=%s", c.Type, c.Status, c.Reason, c.Message)
+			}
+			if u, gerr := dyn.Resource(rehomeGVR).Namespace(nsdeleteNamespace).Get(ctx, probe, metav1.GetOptions{}); gerr != nil {
+				t.Logf("dump: probe: %v", gerr)
+			} else {
+				t.Logf("dump: probe finalizers=%v deletionTimestamp=%v", u.GetFinalizers(), u.GetDeletionTimestamp())
+				conds, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+				for _, c := range conds {
+					t.Logf("dump: probe condition %v", c)
+				}
+			}
+			dumpControllerPods(ctx, t, cfg, mgmtNamespace)
+			t.Fatalf("timed out after 6m waiting for namespace %s to finish deleting with no finalizer removed by hand (dump above)", nsdeleteNamespace)
+		}
+		time.Sleep(5 * time.Second)
+	}
 
 	// Deliberately NOT asserted: that the controller still exists afterwards. This was the Kind's only
 	// definition, so its Delete correctly removes the controller AFTER the composition is gone
@@ -127,7 +152,7 @@ func assessNamespaceDeleteFinishes(ctx context.Context, t *testing.T, cfg *envco
 }
 
 // dumpControllerPods logs every pod of the rehome Kind's controller in ns: its phase, each
-// container's state and restarts, and the tail of its log. Diagnostics only.
+// container's state and restarts, and the last 120 lines of its log. Diagnostics only.
 func dumpControllerPods(ctx context.Context, t *testing.T, cfg *envconf.Config, ns string) {
 	t.Helper()
 	cs, err := kubernetes.NewForConfig(cfg.Client().RESTConfig())
@@ -154,7 +179,7 @@ func dumpControllerPods(ctx context.Context, t *testing.T, cfg *envconf.Config, 
 			t.Logf("dump:   container %s ready=%v restarts=%d waiting=%+v terminated=%+v lastTerminated=%+v",
 				c.Name, c.Ready, c.RestartCount, c.State.Waiting, c.State.Terminated, c.LastTerminationState.Terminated)
 		}
-		tail := int64(40)
+		tail := int64(120)
 		raw, err := cs.CoreV1().Pods(ns).GetLogs(p.Name, &corev1.PodLogOptions{TailLines: &tail}).DoRaw(ctx)
 		if err != nil {
 			t.Logf("dump:   logs: %v", err)
