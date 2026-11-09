@@ -134,6 +134,12 @@ type DeployOptions struct {
 	ApiRefName      string
 	ApiRefNamespace string
 	ApiRefExtras    string
+	// ApiRefDelegation is the definition's spec.apiRef.delegation, rendered onto the controller's authn
+	// mapping as spec.delegation (#405). nil renders no delegation key.
+	ApiRefDelegation *definitionsv1alpha1.ApiRefDelegation
+	// AuthnSupport is which optional mapping fields the installed authn CRD serves (AuthnMappingSupport),
+	// resolved once per reconcile by the caller. A field it doesn't serve is not rendered.
+	AuthnSupport AuthnSupport
 	// AuthnNamespace is the authn operator namespace where the ServiceAccount allowlist
 	// mapping is created (when ApiRefName is set). Empty defaults to "krateo-system".
 	AuthnNamespace string
@@ -879,7 +885,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy.
+	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy. The
+	// rendered fields come from opts.AuthnSupport, the same served-CRD read Deploy uses (#405).
 	if err = hashAuthnServiceAccountMapping(opts, sa.Name, &hsh); err != nil {
 		return "", fmt.Errorf("error hashing authn ServiceAccount mapping: %v", err)
 	}
