@@ -65,9 +65,8 @@ var (
 )
 
 const (
-	crdPath       = "../../../crds"
-	testdataPath  = "../../../testdata/test"
-	manifestsPath = "./testdata/manifests"
+	crdPath      = "../../../crds"
+	testdataPath = "../../../testdata/test"
 
 	namespace = "test-system"
 
@@ -86,6 +85,14 @@ func TestMain(m *testing.M) {
 	restore := e2e.PinKubeconfig("cp-compositiondefinitions")
 
 	clusterName = "krateo-core-provider-controller"
+	cdcImage := os.Getenv(cdcImageEnv)
+	if cdcImage == "" {
+		restore()
+		fmt.Fprintf(os.Stderr, "%s is required: the suite runs the composition-dynamic-controller built from this checkout.\n"+
+			"  docker build -t composition-dynamic-controller:dev go/composition-dynamic-controller\n"+
+			"  %s=composition-dynamic-controller:dev go test -tags=integration ./...\n", cdcImageEnv, cdcImageEnv)
+		os.Exit(1)
+	}
 	// Setup refuses to start without it (#313); the chart passes it as CDC_NAMESPACE.
 	ManagementNamespace = mgmtNamespace
 	testenv = env.New()
@@ -111,6 +118,7 @@ func TestMain(m *testing.M) {
 	testenv.Setup(
 		cleanAssetFolder,
 		createCluster,
+		envfuncs.LoadImageToCluster(clusterName, cdcImage),
 		e2e.CreateNamespace(namespace),
 		e2e.CreateNamespace(mgmtNamespace),
 
@@ -121,79 +129,12 @@ func TestMain(m *testing.M) {
 			}
 			r.WithNamespace(namespace)
 
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-deployment"), os.ModePerm)
+			// The chart's own cdc templates, with the commit's own cdc image (#404). See cdcImageEnv.
+			written, err := renderChartAssets(filepath.Join(os.TempDir(), "assets"), mgmtNamespace, cdcImage)
 			if err != nil {
-				return ctx, err
+				return ctx, fmt.Errorf("render the chart's cdc assets: %w", err)
 			}
-			err = os.Link(filepath.Join(manifestsPath, "deployment.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-deployment", "deployment.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-configmap"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "configmap.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-configmap", "configmap.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "json-schema-configmap"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "json-schema-configmap.yaml"), filepath.Join(os.TempDir(), "assets", "json-schema-configmap", "configmap.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-service"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "service.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-service", "service.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-rbac"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "clusterrole.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "clusterrole.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "clusterrolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "clusterrolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "authn-serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "authn-serviceaccount.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "serviceaccount.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "secret-role.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "secret-role.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "secret-rolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "secret-rolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "compositiondefinition-role.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "compositiondefinition-role.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "compositiondefinition-rolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "compositiondefinition-rolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
+			fmt.Printf("rendered %d cdc asset files from %s with %s\n", len(written), chartDir, cdcImage)
 
 			// Install CRDs
 			err = decoder.DecodeEachFile(

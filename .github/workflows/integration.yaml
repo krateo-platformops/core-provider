@@ -10,6 +10,8 @@ on:
     paths:
       - "go/core-provider/**"
       - "helm/core-provider/**"
+      # The suite runs the cdc built from the commit (#404), so a cdc change is under test too.
+      - "go/composition-dynamic-controller/**"
       - ".github/workflows/integration.yaml"
   workflow_dispatch: {}
 
@@ -30,6 +32,11 @@ jobs:
         uses: helm/kind-action@v1
         with:
           install_only: true
+      # The suite deploys composition controllers from the CHART's templates with THIS commit's cdc
+      # (#404). It used to run a fixture pinned to composition-dynamic-controller:2.13.31 that had
+      # drifted from the chart, and no test needed that controller to work until #313's incident test.
+      - name: Build the cdc from this commit
+        run: docker build -t "composition-dynamic-controller:ci-${GITHUB_SHA::12}" go/composition-dynamic-controller
       - name: Run the integration suite
         working-directory: go/core-provider
         env:
@@ -37,6 +44,7 @@ jobs:
           KIND_NODE_IMAGE: kindest/node:v1.36.4
         run: |
           set -uo pipefail
+          export CDC_IMAGE="composition-dynamic-controller:ci-${GITHUB_SHA::12}"
           # -p 1: every package starts a cluster, and a runner cannot hold them all at once.
           go test -tags=integration -count=1 -p 1 -timeout 55m -v ./... 2>&1 | tee /tmp/integration.log
           rc=${PIPESTATUS[0]}
