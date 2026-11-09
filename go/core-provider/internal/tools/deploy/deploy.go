@@ -749,7 +749,8 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	// the real teardown, every Undeploy that was re-run (a re-triggered retirement, a definition
 	// delete) wedged on it (#416). Deleting another component's object would need delete on every
 	// Secret in that scope for one cleanup core-provider doesn't own, so the lifecycle belongs to
-	// authn (Diego, 2026-11-09). On krateo-057 only 1 such Secret existed across 70 definitions.
+	// authn (Diego, 2026-11-09): authn 0.40.0 sets an ownerReference from the Secret to the mapping,
+	// which core-provider still deletes, so the garbage collector removes it.
 
 	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
 	// no namespace in it, so it is shared with any other definition on this Kind+version.
