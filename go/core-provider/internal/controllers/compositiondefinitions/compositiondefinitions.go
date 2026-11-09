@@ -1806,19 +1806,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// has been repointed first. Like the reclaim, a failure never fails the Update: it is logged and
 	// tried again on the next one.
 	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr))
-	switch {
-	case serr != nil && len(sweep.Removed) == 0:
-		log.Info("could not check for dangling controller bindings; will retry on the next update (#414)", "error", serr.Error())
-	case sweep.DryRun && len(sweep.Found) > 0:
-		log.Info("DRY RUN: would remove bindings that name only a retired controller's absent ServiceAccount (#414)",
-			"bindings", danglingNames(sweep.Found), "kept", sweep.Kept)
-	case len(sweep.Removed) > 0:
-		log.Info("removed bindings that named only a retired controller's absent ServiceAccount (#414)",
-			"removed", sweep.Removed, "kept", sweep.Kept)
-		if serr != nil {
-			log.Info("some dangling controller bindings or roles could not be removed; will retry on the next update (#414)", "error", serr.Error())
-		}
-	}
+	msg, kv := danglingSweepLogLine(gvr.Resource, sweep, serr)
+	log.Info(msg, kv...)
 
 	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
 	// `crd`: the VersionInfo projection keeps only versions present in the CRD it is given, so feeding

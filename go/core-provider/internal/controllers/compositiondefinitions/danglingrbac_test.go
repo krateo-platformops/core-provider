@@ -2,8 +2,11 @@ package compositiondefinitions
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -111,4 +114,45 @@ func TestSweepDanglingControllerRBAC(t *testing.T) {
 			t.Error("a sweep without a CRD deleted something")
 		}
 	})
+}
+
+// #414 follow-up. Every sweep logs exactly one line naming its outcome and how many it found, so a
+// census diff can tell "evaluated, nothing found" from "not evaluated". The first version was silent
+// on a dry run that found nothing, which is the most common state on a cluster.
+func TestDanglingSweepLogLineCoversEveryOutcome(t *testing.T) {
+	one := []deploy.DanglingBinding{{Kind: "RoleBinding", Namespace: "app-ns", Name: "b", ServiceAccount: "krateo-system/installers-v1"}}
+	boom := errors.New("boom")
+	cases := []struct {
+		name        string
+		sweep       danglingSweep
+		err         error
+		wantOutcome string
+		wantFound   int
+		wantErr     bool
+	}{
+		{"dry run, nothing found", danglingSweep{DryRun: true}, nil, danglingOutcomeDryRun, 0, false},
+		{"dry run, found", danglingSweep{DryRun: true, Found: one}, nil, danglingOutcomeDryRun, 1, false},
+		{"search failed", danglingSweep{}, boom, danglingOutcomeError, 0, true},
+		{"removal on, nothing found", danglingSweep{}, nil, danglingOutcomeNone, 0, false},
+		{"removal on, removed", danglingSweep{Found: one, Removed: []string{"x"}}, nil, danglingOutcomeRemoved, 1, false},
+		{"removal on, partly failed", danglingSweep{Found: one}, boom, danglingOutcomeRemoved, 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg, kv := danglingSweepLogLine("installers", c.sweep, c.err)
+			if !strings.Contains(msg, "#414") {
+				t.Errorf("msg %q does not carry #414", msg)
+			}
+			fields := map[string]any{}
+			for i := 0; i+1 < len(kv); i += 2 {
+				fields[kv[i].(string)] = kv[i+1]
+			}
+			if fields["outcome"] != c.wantOutcome || fields["found"] != c.wantFound || fields["resource"] != "installers" {
+				t.Errorf("outcome=%v found=%v resource=%v, want %s %d installers", fields["outcome"], fields["found"], fields["resource"], c.wantOutcome, c.wantFound)
+			}
+			if _, has := fields["error"]; has != c.wantErr {
+				t.Errorf("error field present=%v, want %v", has, c.wantErr)
+			}
+		})
+	}
 }
