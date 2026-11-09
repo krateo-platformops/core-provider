@@ -48,7 +48,9 @@ func recordAuthnDelegation(cr *compositiondefinitionsv1alpha1.CompositionDefinit
 			Reason:             reasonDelegationUnsupported,
 			Message: "spec.apiRef.delegation needs authn-crds >= 0.37.0 on this cluster: the installed " +
 				"serviceaccounts.serviceaccount.authn.krateo.io does not serve spec.delegation, so it is not " +
-				"rendered on the controller's authn mapping and the controller cannot delegate",
+				"rendered on the controller's authn mapping and the controller cannot delegate (check: " +
+				"kubectl get crd serviceaccounts.serviceaccount.authn.krateo.io -o jsonpath=" +
+				"'{.spec.versions[?(@.name==\"v1alpha1\")].schema.openAPIV3Schema.properties.spec.properties.delegation}' is empty)",
 		})
 		return
 	}
