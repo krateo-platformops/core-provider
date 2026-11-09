@@ -46,7 +46,7 @@ func TestControllerClusterRoleCoversEveryClientCall(t *testing.T) {
 	var missing []string
 	for _, k := range SortedKeys(needs) {
 		n := needs[k]
-		ok, conditional := Grants(rules, n.Group, n.Resource)
+		ok, conditional := Grants(rules, n.Group, n.Resource, n.Verb)
 		if !ok {
 			missing = append(missing, k)
 			t.Errorf("NOT GRANTED: apiGroup %q resource %q — required by %s at %v\n"+
@@ -84,7 +84,7 @@ func TestPodsRuleIsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, _ := Grants(rules, "", "pods")
+	ok, _ := Grants(rules, "", "pods", "list")
 	if !ok {
 		t.Error("core/v1 pods is not granted. waitForControllerDrained LISTs pods before revoking " +
 			"a retiring controller's ServiceAccount; without this rule every CompositionDefinition " +
@@ -93,8 +93,25 @@ func TestPodsRuleIsPresent(t *testing.T) {
 
 	// CONTROL: a resource the controller has no business touching must NOT be granted, or Grants
 	// is returning true for everything and the assertion above means nothing.
-	if bad, _ := Grants(rules, "", "nodes"); bad {
+	if bad, _ := Grants(rules, "", "nodes", "get"); bad {
 		t.Error("control: core/v1 nodes reports as granted. Either the chart grants far more than " +
 			"it should, or Grants matches indiscriminately — both make this guard worthless")
+	}
+}
+
+// The verb is part of the grant (#416). 2.13.77 shipped a Delete on secrets while the chart granted
+// secrets only get/list/watch; keyed on the resource alone, the guard above passed and every
+// CompositionDefinition Undeploy ended in a 403. Both arms are asserted, so this cannot pass by
+// Grants answering the same for every verb.
+func TestGrantsIsVerbAware(t *testing.T) {
+	rules, err := ParseClusterRole(filepath.Clean(chartClusterRole))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := Grants(rules, "", "secrets", "get"); !ok {
+		t.Error("control: core/v1 secrets get is not reported as granted; the chart grants it, so the parser lost the verbs")
+	}
+	if ok, _ := Grants(rules, "", "secrets", "delete"); ok {
+		t.Error("core/v1 secrets delete reports as granted; the chart grants secrets only get/list/watch, so Grants ignores the verb")
 	}
 }

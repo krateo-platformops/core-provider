@@ -98,7 +98,17 @@ type Need struct {
 	GoType   string
 	Group    string
 	Resource string
-	Sites    []string
+	// Verb is the RBAC verb the call needs (methodVerb). A grant of the resource with other verbs
+	// does not cover it: 2.13.77 shipped a Delete on secrets against a get/list/watch rule, and this
+	// guard, keyed on the resource alone, passed (#416).
+	Verb  string
+	Sites []string
+}
+
+// methodVerb maps a controller-runtime client method to the RBAC verb it needs.
+var methodVerb = map[string]string{
+	"Get": "get", "List": "list", "Create": "create", "Delete": "delete",
+	"Update": "update", "Patch": "patch", "DeleteAllOf": "deletecollection",
 }
 
 // Scan walks root for non-test Go files and returns the grants implied by client calls, plus any
@@ -170,6 +180,12 @@ func scanFile(fset *token.FileSet, f *ast.File, path string, needs map[string]*N
 				if !ok {
 					continue
 				}
+				// `x := T{}` and `x := &T{}`. The pointer form is how most objects are built before a
+				// Delete or Get, and missing it hid 2.13.77's Delete on secrets from this guard
+				// entirely (#416): `sec := &corev1.Secret{}; kube.Delete(ctx, sec)` implied no need.
+				if u, ok := rhs.(*ast.UnaryExpr); ok && u.Op == token.AND {
+					rhs = u.X
+				}
 				if cl, ok := rhs.(*ast.CompositeLit); ok {
 					if t := typeName(cl.Type); t != "" {
 						locals[id.Name] = t
@@ -195,9 +211,10 @@ func scanFile(fset *token.FileSet, f *ast.File, path string, needs map[string]*N
 				}
 				site := fmt.Sprintf("%s:%d (%s.%s)", filepath.Base(path), fset.Position(call.Pos()).Line, fn.Name.Name, sel.Sel.Name)
 				if g, ok := TypeGrant[t]; ok {
-					k := g.Group + "/" + g.Resource
+					verb := methodVerb[sel.Sel.Name]
+					k := g.Group + "/" + g.Resource + ":" + verb
 					if needs[k] == nil {
-						needs[k] = &Need{GoType: t, Group: g.Group, Resource: g.Resource}
+						needs[k] = &Need{GoType: t, Group: g.Group, Resource: g.Resource, Verb: verb}
 					}
 					needs[k].Sites = append(needs[k].Sites, site)
 				} else if !notAnObject[t] {
@@ -234,6 +251,10 @@ func objectTypeOf(arg ast.Expr, locals map[string]string) string {
 }
 
 func typeName(e ast.Expr) string {
+	// `var x *corev1.Secret` names the same object type as `var x corev1.Secret`.
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
 	if sel, ok := e.(*ast.SelectorExpr); ok {
 		if pkg, ok := sel.X.(*ast.Ident); ok {
 			return pkg.Name + "." + sel.Sel.Name
@@ -246,6 +267,7 @@ func typeName(e ast.Expr) string {
 type Rule struct {
 	Groups      []string
 	Resources   []string
+	Verbs       []string
 	Conditional bool
 }
 
@@ -287,6 +309,16 @@ func ParseClusterRole(path string) ([]Rule, error) {
 		if cur == nil {
 			continue
 		}
+		if inline := inlineList(trimmed); inline != nil {
+			switch {
+			case strings.HasPrefix(trimmed, "resources:"):
+				cur.Resources = append(cur.Resources, inline...)
+			case strings.HasPrefix(trimmed, "verbs:"):
+				cur.Verbs = append(cur.Verbs, inline...)
+			}
+			section = ""
+			continue
+		}
 		switch {
 		case strings.HasPrefix(trimmed, "resources:"):
 			section = "resources"
@@ -299,15 +331,21 @@ func ParseClusterRole(path string) ([]Rule, error) {
 				cur.Groups = append(cur.Groups, v)
 			case "resources":
 				cur.Resources = append(cur.Resources, v)
+			case "verbs":
+				cur.Verbs = append(cur.Verbs, v)
 			}
 		}
 	}
 	return rules, nil
 }
 
-// Grants reports whether the rules cover group/resource, honouring "*" in either position.
-func Grants(rules []Rule, group, resource string) (ok, conditional bool) {
+// Grants reports whether the rules grant verb on group/resource, honouring "*" in any position. A rule
+// that names the resource but not the verb does NOT grant it (#416).
+func Grants(rules []Rule, group, resource, verb string) (ok, conditional bool) {
 	for _, r := range rules {
+		if !hasVerb(r.Verbs, verb) {
+			continue
+		}
 		g := false
 		for _, rg := range r.Groups {
 			if rg == group || rg == "*" {
@@ -339,4 +377,30 @@ func SortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(ks)
 	return ks
+}
+
+// hasVerb reports whether verbs includes verb or "*".
+func hasVerb(verbs []string, verb string) bool {
+	for _, v := range verbs {
+		if v == verb || v == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineList parses a one-line YAML flow list such as `verbs: ["get", "list"]`, or returns nil.
+func inlineList(line string) []string {
+	i := strings.Index(line, "[")
+	j := strings.LastIndex(line, "]")
+	if i < 0 || j < i || !strings.Contains(line[:i], ":") {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(line[i+1:j], ",") {
+		if v := strings.Trim(strings.TrimSpace(p), `"'`); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -186,10 +187,23 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 		}
 		if compositionDefinition != nil {
 			version, kind, err := getChartVersionKind(compositionDefinition)
-			if err != nil {
+			switch {
+			case err == nil:
+			case !withCredentials && errors.Is(err, errDefinitionStatusUnset):
+				// Locate, which a composition's Delete uses (#419). The labels name this definition
+				// exactly (name, namespace, GVR); with no status there is nothing to check them
+				// against. A definition with no status never became Available, so no version
+				// migration can be in flight for isVersionMigrationHandover to protect. Failing here
+				// instead deadlocked: the definition's Delete waits for its compositions, and the
+				// composition's Delete needed this status, which a definition deleted before its
+				// first status write never gets. Get (Create/Update) still requires it.
+				g.logger.Debug("Composition definition has no status yet; trusting the composition's labels to locate it for teardown",
+					"compositionDefinitionName", cdInfo.Name, "compositionDefinitionNamespace", cdInfo.Namespace)
+				break
+			default:
 				return nil, fmt.Errorf("error getting chart version and kind from composition definition '%s' in namespace '%s': %w", cdInfo.Name, cdInfo.Namespace, err)
 			}
-			if version != uns.GetLabels()[compositionMeta.CompositionVersionLabel] || kind != uns.GetKind() {
+			if err == nil && (version != uns.GetLabels()[compositionMeta.CompositionVersionLabel] || kind != uns.GetKind()) {
 				g.logger.Warn("Labels do not match composition definition", "compositionDefinitionName", cdInfo.Name, "compositionDefinitionNamespace", cdInfo.Namespace, "gvr", gvr.String(), "expectedVersion", uns.GetLabels()[compositionMeta.CompositionVersionLabel], "foundVersion", version, "expectedKind", uns.GetKind(), "foundKind", kind)
 				compositionDefinition = nil
 			}
@@ -434,13 +448,18 @@ func (g *dynamicGetter) searchCompositionDefinition(gvr schema.GroupVersionResou
 	return compositionDefinition, nil
 }
 
+// errDefinitionStatusUnset marks a CompositionDefinition whose status core-provider has not written
+// yet (no status.apiVersion / status.kind): it never became Available. Distinct from a status that is
+// present but malformed, which stays a hard error.
+var errDefinitionStatusUnset = errors.New("the composition definition's status is not set yet")
+
 func getChartVersionKind(el *unstructured.Unstructured) (string, string, error) {
 	apiversion, ok, err := unstructured.NestedString(el.UnstructuredContent(), "status", "apiVersion")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to resolve 'status.apiVersion': %w", err)
 	}
 	if !ok {
-		return "", "", fmt.Errorf("missing 'status.apiVersion'")
+		return "", "", fmt.Errorf("missing 'status.apiVersion': %w", errDefinitionStatusUnset)
 	}
 	versionSplit := strings.Split(apiversion, "/")
 	if len(versionSplit) != 2 {
@@ -451,7 +470,7 @@ func getChartVersionKind(el *unstructured.Unstructured) (string, string, error) 
 		return "", "", fmt.Errorf("failed to resolve 'status.kind': %w", err)
 	}
 	if !ok {
-		return "", "", fmt.Errorf("missing 'status.kind'")
+		return "", "", fmt.Errorf("missing 'status.kind': %w", errDefinitionStatusUnset)
 	}
 
 	version := versionSplit[1]

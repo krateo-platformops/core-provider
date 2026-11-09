@@ -8,10 +8,8 @@ import (
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
 	"github.com/krateo-platformops/core-provider/internal/tools/objects"
-	"github.com/krateo-platformops/plumbing/endpoints"
 	hasher "github.com/krateo-platformops/plumbing/kubeutil/hasher"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -83,32 +81,6 @@ func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace st
 		return nil, fmt.Errorf("rendering authn ServiceAccount mapping: %w", err)
 	}
 	return obj, nil
-}
-
-// deleteAuthnClientConfigSecret deletes the session credential authn stored for a cdc's identity:
-// the Secret named endpoints.SecretName(<mapping name>) in the authn namespace. The mapping name IS
-// the identity's username (authn login.go), and endpoints.SecretName is the one definition of the
-// Secret's name, shared with authn; it must not be rebuilt here, since a near-miss deletes nothing,
-// silently.
-//
-// ORDER (authn's): call it only AFTER the controller has drained and its mapping has been deleted. If
-// the Secret went first while the mapping existed, a stray login would make authn re-create it.
-// Without the mapping, such a login gets 403 NoMapping and writes nothing.
-func deleteAuthnClientConfigSecret(ctx context.Context, kube client.Client, authnNamespace, saNamespace, saName string) error {
-	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-
-	sec := &corev1.Secret{}
-	sec.SetNamespace(authnNamespaceOrDefault(authnNamespace))
-	sec.SetName(endpoints.SecretName(authnMappingName(saNamespace, saName)))
-	if err := kube.Delete(ctx, sec); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // never issued (no apiRef), or already gone
-		}
-		log.Error(err, "deleting the cdc's authn clientconfig Secret", "name", sec.GetName(), "namespace", sec.GetNamespace())
-		return fmt.Errorf("deleting the cdc's authn clientconfig Secret %s/%s: %w", sec.GetNamespace(), sec.GetName(), err)
-	}
-	log.Debug("authn clientconfig Secret deleted", "name", sec.GetName(), "namespace", sec.GetNamespace())
-	return nil
 }
 
 // hashAuthnServiceAccountMapping contributes deterministic inputs to the digest so Deploy and
