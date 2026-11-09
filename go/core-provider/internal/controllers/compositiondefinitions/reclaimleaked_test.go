@@ -8,6 +8,7 @@ import (
 
 	"github.com/krateo-platformops/core-provider/apis"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -54,8 +55,17 @@ func leakCRD(versions ...string) *apiextensionsv1.CustomResourceDefinition {
 	return crd
 }
 
+// leakDeploy is this Kind's controller as core-provider renders it: the name AND the args the cdc
+// template passes, with the version taken from the name.
 func leakDeploy(name string) *appsv1.Deployment {
-	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: leakNS}}
+	v := strings.TrimSuffix(strings.TrimPrefix(name, leakResource+"-"), "-controller")
+	return argsDeploy(name, "-group="+leakGroup, "-resource="+leakResource, "-version="+v)
+}
+
+func argsDeploy(name string, args ...string) *appsv1.Deployment {
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: leakNS}}
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "c", Args: args}}
+	return d
 }
 
 func leakComposition(name, versionLabel string) *unstructured.Unstructured {
@@ -288,5 +298,71 @@ func TestFindLeakedControllersListsEveryPlacement(t *testing.T) {
 	got := versions(both)
 	if len(got) != 2 || !slices.Contains(got, "v0-3-470") || !slices.Contains(got, "v0-3-480") {
 		t.Fatalf("every placement: leaked versions %v, want v0-3-470 and v0-3-480 exactly once each", got)
+	}
+}
+
+// The name pattern is shared with oasgen-provider, whose controllers are <RestDefinition
+// name>-controller with this package's labels. In a shared placement (#313's management
+// namespace), a RestDefinition named <plural>-<anything> matches. It must never be read as a leaked
+// version of this Kind: retiring it deletes another provider's controller.
+func TestFindLeakedControllersIgnoresAnotherOwnersController(t *testing.T) {
+	foreign := argsDeploy("installers-v0-3-480-controller", "-group=github.ogen.krateo.io", "-resource=repoes", "-version=v1alpha1")
+	unidentified := argsDeploy("installers-v0-3-479-controller")
+	real := leakDeploy("installers-v0-3-478-controller")
+	e := leakExternal(t, leakCRD("v0-3-484", "vacuum"),
+		[]*appsv1.Deployment{leakDeploy("installers-v0-3-484-controller"), foreign, unidentified, real},
+		leakComposition("installer", "v0-3-484"))
+
+	leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Control: the real leak beside them is still found, so the guard is not refusing everything.
+	if len(leaked) != 1 || leaked[0].Name != "installers-v0-3-478-controller" {
+		t.Fatalf("leaked = %+v, want exactly this Kind's real leak installers-v0-3-478-controller; kept=%v", leaked, kept)
+	}
+	joined := strings.Join(kept, ",")
+	for _, want := range []string{leakNS + "/installers-v0-3-480-controller:foreign", leakNS + "/installers-v0-3-479-controller:unidentified"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("kept = %v, want %q", kept, want)
+		}
+	}
+}
+
+// A foreign Deployment in one placement must not hide this Kind's real controller for the SAME
+// version in another (the identity check runs before the per-version dedupe).
+func TestFindLeakedControllersForeignDoesNotShadowReal(t *testing.T) {
+	foreign := argsDeploy("installers-v0-3-480-controller", "-group=github.ogen.krateo.io", "-resource=repoes", "-version=v1alpha1")
+	real := leakDeploy("installers-v0-3-480-controller")
+	real.Namespace = "legacy-ns"
+	e := leakExternal(t, leakCRD("v0-3-484", "vacuum"),
+		[]*appsv1.Deployment{leakDeploy("installers-v0-3-484-controller"), foreign, real},
+		leakComposition("installer", "v0-3-484"))
+	leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS, "legacy-ns"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaked) != 1 || leaked[0].Version != "v0-3-480" {
+		t.Fatalf("leaked = %+v, want v0-3-480 from legacy-ns; kept=%v", leaked, kept)
+	}
+}
+
+// The version in the NAME must be the version the controller RUNS. A Deployment named for v0-3-480
+// that runs -version=v0-3-484 is not v0-3-480's controller; retiring it would remove whatever it
+// actually serves.
+func TestFindLeakedControllersRequiresTheNamedVersionInArgs(t *testing.T) {
+	mismatch := argsDeploy("installers-v0-3-480-controller", "-group="+leakGroup, "-resource="+leakResource, "-version=v0-3-484")
+	e := leakExternal(t, leakCRD("v0-3-484", "vacuum"),
+		[]*appsv1.Deployment{leakDeploy("installers-v0-3-484-controller"), mismatch},
+		leakComposition("installer", "v0-3-484"))
+	leaked, kept, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaked) != 0 {
+		t.Fatalf("leaked = %+v, want none: the args say v0-3-484; kept=%v", leaked, kept)
+	}
+	if !strings.Contains(strings.Join(kept, ","), "installers-v0-3-480-controller:foreign") {
+		t.Errorf("kept = %v, want the mismatch kept as foreign", kept)
 	}
 }
