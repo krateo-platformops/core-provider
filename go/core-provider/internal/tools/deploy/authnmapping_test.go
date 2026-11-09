@@ -35,7 +35,7 @@ func TestRenderAuthnServiceAccountMapping(t *testing.T) {
 		ApiRefName:          "status-sources",
 		AuthnNamespace:      "krateo-system",
 	}
-	obj, err := renderAuthnServiceAccountMapping(opts, "fireworksapps-v1-0-0", "apps", "")
+	obj, err := renderAuthnServiceAccountMapping(opts, "fireworksapps-v1-0-0", "apps")
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -68,14 +68,14 @@ func TestHashAuthnServiceAccountMapping_GatedByApiRef(t *testing.T) {
 		ControllerNamespace: "test-ns", Namespace: "apps", AuthnNamespace: "krateo-system"}
 
 	h1 := hasher.NewFNVObjectHash()
-	if err := hashAuthnServiceAccountMapping(base, "sa", "", &h1); err != nil {
+	if err := hashAuthnServiceAccountMapping(base, "sa", &h1); err != nil {
 		t.Fatalf("hash (no apiRef): %v", err)
 	}
 
 	withRef := base
 	withRef.ApiRefName = "status-sources"
 	h2 := hasher.NewFNVObjectHash()
-	if err := hashAuthnServiceAccountMapping(withRef, "sa", "", &h2); err != nil {
+	if err := hashAuthnServiceAccountMapping(withRef, "sa", &h2); err != nil {
 		t.Fatalf("hash (apiRef): %v", err)
 	}
 

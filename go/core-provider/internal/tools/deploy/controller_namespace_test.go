@@ -77,7 +77,7 @@ func TestAuthnMappingFollowsTheControllerNamespace(t *testing.T) {
 		RBACFolderPath: "testdata", ApiRefName: "status-sources", AuthnNamespace: "krateo-system",
 	}
 	sa := resourceNamer(testGVR.Resource, testGVR.Version)
-	obj, err := renderAuthnServiceAccountMapping(opts, sa, testControllerNS, "")
+	obj, err := renderAuthnServiceAccountMapping(opts, sa, testControllerNS)
 	if err != nil {
 		t.Fatal(err)
 	}
