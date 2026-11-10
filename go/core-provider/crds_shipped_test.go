@@ -44,3 +44,25 @@ func TestShippedCRDChartIsTheGeneratedCRDs(t *testing.T) {
 	}
 	t.Logf("compared %d generated CRDs against the chart", len(generated))
 }
+
+// #435. core-provider projects the CompositionDefinition CRD onto REMOTE targets from an embedded
+// copy (internal/tools/deploy/assets, //go:embed in remoteseed.go). It was hand-kept, had not changed
+// since the monorepo fold, and differed from crds/ by 227 diff lines, so a spoke's shadow definition
+// lost spec.controller, upgradePolicy, claims and apiRef.delegation. make generate now writes it; this
+// requires it to stay byte-identical to the generated CRD.
+func TestRemoteSeedCRDIsTheGeneratedCRD(t *testing.T) {
+	want, err := os.ReadFile("crds/core.krateo.io_compositiondefinitions.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile("internal/tools/deploy/assets/compositiondefinitions-crd.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) == 0 {
+		t.Fatal("the generated CRD is empty: the comparison would pass vacuously")
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("the CRD projected onto remote targets differs from crds/core.krateo.io_compositiondefinitions.yaml; run make generate")
+	}
+}
