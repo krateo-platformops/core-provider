@@ -159,8 +159,16 @@ func main() {
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
 
+	// Metrics AND traces come from provider-runtime's telemetry.Setup since v1.14 (#395, its
+	// design-tracing §11.4): one TracerProvider owns the global, and the reconciler's reconcile /
+	// observe / create / update / delete spans parent core-provider's own
+	// compositiondefinition.observe span (coretelemetry.Tracer() uses the global). Setup installs the
+	// W3C propagator on every call, tracing on or off, which core-provider's SetupTracing did before.
+	// Tracing exports OTLP/HTTP only: with OTEL_TRACING_ENABLED and protocol grpc, Setup refuses to
+	// start rather than send HTTP to a gRPC port.
 	telemetryMetrics, telemetryShutdown, err := telemetry.Setup(context.Background(), log, telemetry.Config{
 		Enabled:        telemetryEnabled,
+		TracingEnabled: *tracingEnabled,
 		ServiceName:    *metricsServiceName,
 		ExportInterval: telemetryExportInterval,
 	})
@@ -171,20 +179,6 @@ func main() {
 	defer func() {
 		if err := telemetryShutdown(context.Background()); err != nil {
 			log.Error(err, "Cannot shutdown OpenTelemetry metrics")
-		}
-	}()
-
-	// Distributed reconcile traces (gated OTEL_TRACING_ENABLED, default off). Reuses the
-	// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES set above, so the trace + metrics resources
-	// are identical (same service.name/version).
-	tracingShutdown, err := coretelemetry.SetupTracing(context.Background(), log, *tracingEnabled)
-	if err != nil {
-		log.Error(err, "Cannot initialize OpenTelemetry tracing")
-		os.Exit(1)
-	}
-	defer func() {
-		if err := tracingShutdown(context.Background()); err != nil {
-			log.Error(err, "Cannot shutdown OpenTelemetry tracing")
 		}
 	}()
 

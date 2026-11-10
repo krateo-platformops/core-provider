@@ -160,6 +160,33 @@ func EnsureCompositionVersionPolicy(ctx context.Context, kube client.Client) err
 	return upgradeLegacyPolicy(ctx, kube)
 }
 
+// isLegacyPolicy reports whether existing carries exactly the pre-#66 ApplyConfiguration mutation
+// this package must migrate. It is the decision upgradeLegacyPolicy acts on, separated so it can be
+// tested on an object a client could not store: since k8s.io/api v0.37 types
+// MutatingAdmissionPolicy, neither the apiserver nor controller-runtime v0.25's fake client accepts a
+// spec.mutations that is not a list, so the malformed case is reachable only through a direct call
+// (#395).
+func isLegacyPolicy(existing *unstructured.Unstructured) (bool, error) {
+	muts, found, err := unstructured.NestedSlice(existing.Object, "spec", "mutations")
+	if err != nil {
+		// A malformed spec.mutations is NOT "nothing to migrate". This function exists to recognise
+		// one specific legacy shape, so an object it cannot parse is exactly the case worth hearing
+		// about — and returning false here would make it indistinguishable from a clean no-op, with no
+		// log line on the local path either. Report it; both callers decide what it costs.
+		return false, fmt.Errorf("reading spec.mutations of %s: %w", PolicyName, err)
+	}
+	if !found || len(muts) != 1 {
+		return false, nil
+	}
+	m, ok := muts[0].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	patchType, _, _ := unstructured.NestedString(m, "patchType")
+	expr, _, _ := unstructured.NestedString(m, "applyConfiguration", "expression")
+	return patchType == "ApplyConfiguration" && expr == legacyApplyConfigurationExpression(), nil
+}
+
 // UpgradeLegacyCompositionVersionPolicy migrates an existing pre-#66 policy onto the JSON Patch
 // form WITHOUT creating anything. It is the local-target entry point.
 //
@@ -224,26 +251,9 @@ func upgradeLegacyPolicy(ctx context.Context, kube client.Client) error {
 		return err
 	}
 
-	muts, found, err := unstructured.NestedSlice(existing.Object, "spec", "mutations")
-	if err != nil {
-		// A malformed spec.mutations is NOT "nothing to migrate". This function exists to recognise
-		// one specific legacy shape, so an object it cannot parse is exactly the case worth hearing
-		// about — and returning nil here would make it indistinguishable from a clean no-op, with no
-		// log line on the local path either. Report it; both callers decide what it costs.
-		return fmt.Errorf("reading spec.mutations of %s: %w", PolicyName, err)
-	}
-	if !found || len(muts) != 1 {
-		return nil
-	}
-	m, ok := muts[0].(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	patchType, _, _ := unstructured.NestedString(m, "patchType")
-	expr, _, _ := unstructured.NestedString(m, "applyConfiguration", "expression")
-	if patchType != "ApplyConfiguration" || expr != legacyApplyConfigurationExpression() {
-		return nil
+	legacy, err := isLegacyPolicy(existing)
+	if err != nil || !legacy {
+		return err
 	}
 
 	desired, _ := objects()

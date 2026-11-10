@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"strings"
 	"testing"
 
@@ -13,15 +14,14 @@ import (
 )
 
 func newScheme() *runtime.Scheme {
+	// The REAL admissionregistration/v1 types. k8s.io/api v0.35 had no typed v1
+	// MutatingAdmissionPolicy, so this registered unstructured stand-ins; from v0.37 the type exists
+	// and controller-runtime v0.25's fake client tracks managed fields against it, refusing objects
+	// "with types from the same schema" when the scheme holds an unstructured stand-in (#395). The
+	// tests still pass unstructured objects; the client converts them through these types.
 	s := runtime.NewScheme()
-	// Register the policy + binding GVKs as unstructured so the fake client can track them.
-	for _, kind := range []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"} {
-		gvk := schema.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: kind}
-		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(gvk)
-		s.AddKnownTypeWithName(gvk, u)
-		lst := &unstructured.UnstructuredList{}
-		s.AddKnownTypeWithName(gvk.GroupVersion().WithKind(kind+"List"), lst)
+	if err := admissionregistrationv1.AddToScheme(s); err != nil {
+		panic(err)
 	}
 	return s
 }
