@@ -572,6 +572,87 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("Idle: an unchanged reconcile writes nothing, and a real status change still writes (#439)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// Observe ends with an UNCONDITIONAL updateStatus. That is only free if the status it sends
+		// is byte-identical to the stored one, because then the apiserver writes nothing and
+		// resourceVersion does not move. Until #439 the cdc stamped status.lastReconcileTime on every
+		// pass, so every idle reconcile was a real write: ~1.4/s on 057, each one waking every watcher.
+		//
+		// The sleep matters. The old timestamp had one-second resolution, so two passes inside the
+		// same second would have agreed even with the stamp present, and this assessment would pass
+		// against the defect it guards.
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Error("Decoding composition manifests.", "error", err)
+			return ctx
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+
+		observe := func(label string) *unstructured.Unstructured {
+			t.Helper()
+			u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("%s: getting composition: %v", label, err)
+			}
+			if _, err := handler.Observe(ctx, u); err != nil {
+				t.Fatalf("%s: Observe: %v", label, err)
+			}
+			after, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("%s: getting composition: %v", label, err)
+			}
+			return after
+		}
+		statusOf := func(u *unstructured.Unstructured) string {
+			st, _, _ := unstructured.NestedMap(u.Object, "status")
+			b, _ := json.Marshal(st)
+			return string(b)
+		}
+
+		// Warm-up: whatever the earlier assessments left unconverged gets written here, not below.
+		settled := observe("warm-up")
+		time.Sleep(1100 * time.Millisecond)
+		idle := observe("idle pass")
+		if idle.GetResourceVersion() != settled.GetResourceVersion() {
+			t.Errorf("an idle reconcile wrote the composition: resourceVersion %s -> %s.\nbefore: %s\nafter:  %s",
+				settled.GetResourceVersion(), idle.GetResourceVersion(), statusOf(settled), statusOf(idle))
+		}
+		if _, found, _ := unstructured.NestedFieldNoCopy(idle.Object, "status", "lastReconcileTime"); found {
+			t.Errorf("status.lastReconcileTime is still present after a pass (#439 dropped it)")
+		}
+
+		// CONTROL: the unchanged resourceVersion above must not be because Observe never reached its
+		// write. Corrupt one controller-owned field out of band; the next pass must put it back,
+		// which is a real write, so resourceVersion moves.
+		want, _, _ := unstructured.NestedString(idle.Object, "status", "helmChartVersion")
+		if want == "" {
+			t.Fatal("premise: status.helmChartVersion is empty, so corrupting it would not be detectable")
+		}
+		corrupt := idle.DeepCopy()
+		if err := unstructured.SetNestedField(corrupt.Object, "0.0.0-corrupted", "status", "helmChartVersion"); err != nil {
+			t.Fatal(err)
+		}
+		corrupted, err := cli.UpdateStatus(ctx, corrupt, metav1.UpdateOptions{})
+		if err != nil {
+			t.Fatalf("corrupting status: %v", err)
+		}
+		healed := observe("pass after corruption")
+		if got, _, _ := unstructured.NestedString(healed.Object, "status", "helmChartVersion"); got != want {
+			t.Errorf("control: status.helmChartVersion = %q after a pass, want %q restored", got, want)
+		}
+		if healed.GetResourceVersion() == corrupted.GetResourceVersion() {
+			t.Errorf("control: a pass that changed status did not move resourceVersion (%s), so the "+
+				"idle arm above cannot tell a no-op write from no write at all", corrupted.GetResourceVersion())
+		}
+		t.Logf("idle: rv %s -> %s (unchanged); control: rv %s -> %s (written)",
+			settled.GetResourceVersion(), idle.GetResourceVersion(), corrupted.GetResourceVersion(), healed.GetResourceVersion())
+		return ctx
 	}).Assess("Regression: A Stale ResourceVersion Is A Quiet Requeue, Never A Wedge", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// A reconcile holds the copy of the CR it began with, and a concurrent writer (an umbrella
 		// re-applying the instance, a kubectl edit, the reconcile's own external-create annotation

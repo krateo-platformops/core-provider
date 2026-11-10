@@ -19,11 +19,6 @@
       "type": "string",
       "description": "Version of the helm chart deployed"
     },
-    "lastReconcileTime": {
-      "type": "string",
-      "format": "date-time",
-      "description": "Wall-clock time of the most recent reconcile of this composition, written on EVERY reconcile whether or not anything changed. It is a liveness signal, not a change signal: a value that stops advancing means the controller stopped reconciling, which no condition can tell you. It exists because #298 removed the accidental one -- the Ready condition's LastTransitionTime used to move every reconcile, for the defective reason that three phases wrote three different messages for one Available state, so the idempotency guard could never fire. Fixing that made the timestamp honest and silent, hence this field. DECLARED HERE DELIBERATELY: structural CRD schemas PRUNE undeclared status fields, and this repo shipped managedDigest and previousManagedCount without declaring them, which cost 502 false drift reports across 30 compositions before anyone noticed the apiserver was silently dropping them. A field written by a controller and absent from this file does not exist."
-    },
     "managed": {
       "type": "array",
       "description": "List of the managed resources installed by the helm chart",
