@@ -589,6 +589,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 
 	if cr.Status.CurrentGVK() != gvk {
 		log.Debug("Follower status not yet on this version", "status", cr.Status.CurrentGVK().String(), "chart", gvk.String())
+		markUpdatePending(cr, "follower status not yet on "+gvk.Version)
 		return notUpToDate, nil
 	}
 	// #313: a follower can only own a LEGACY copy, in its own namespace. In the management namespace
@@ -601,6 +602,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 		if own {
 			log.Debug("Follower still runs its own composition controller; handing it over",
 				"gvr", gvr.String(), "owner", owner.Namespace+"/"+owner.Name)
+			markUpdatePending(cr, "handing its own composition controller over to "+owner.Namespace+"/"+owner.Name)
 			return notUpToDate, nil
 		}
 	}
@@ -616,6 +618,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 			}
 			if len(stale.Items) > 0 {
 				log.Debug("Follower's compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				markUpdatePending(cr, fmt.Sprintf("%d follower compositions pending migration from %s", len(stale.Items), vi.Version))
 				return notUpToDate, nil
 			}
 		}

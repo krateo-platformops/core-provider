@@ -169,10 +169,10 @@ func TestMalformedMutationsIsAnErrorNotASilentNoOp(t *testing.T) {
 	// NestedSlice fails on a non-slice value at that path.
 	p.Object["spec"] = map[string]any{"mutations": "this is not a list"}
 
-	ctx := context.Background()
-	c := fakeclient.NewClientBuilder().WithScheme(newScheme()).WithObjects(p.DeepCopy()).Build()
-
-	err := UpgradeLegacyCompositionVersionPolicy(ctx, c)
+	// Through the decision, not a client: since k8s.io/api v0.37 types MutatingAdmissionPolicy, the
+	// fake client refuses to store this object at all (as the apiserver would), so it can only reach
+	// isLegacyPolicy directly (#395).
+	_, err := isLegacyPolicy(p)
 	if err == nil {
 		t.Fatal("a malformed spec.mutations returned success; it is indistinguishable from a clean " +
 			"no-op, which is the one thing this function must never be")

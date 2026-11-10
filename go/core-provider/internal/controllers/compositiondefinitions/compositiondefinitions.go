@@ -827,6 +827,22 @@ func seedReadyIfAbsent(cr *compositiondefinitionsv1alpha1.CompositionDefinition)
 	}
 }
 
+// markUpdatePending is what an Observe that found drift, and hands the reconcile to Update, says about
+// Ready (#395, Diego 2026-11-10). provider-runtime >= v1.8.0 requires every successful Observe to set
+// Ready and resets it to Unknown/NotObserved on an Observe error, so the six drift returns, which set
+// nothing, would leave NotObserved in place after an error and report a contract breach.
+//
+// The rule: KEEP the definition's last real Ready. Its controller keeps serving the current version
+// while the update runs, so a chart bump or digest change must not flap it to False. Only when Ready is
+// absent or NotObserved (a first pass, or after an Observe error), when there is no real verdict to
+// keep, does it say Ready=False/Creating "update pending: <why>".
+func markUpdatePending(cr *compositiondefinitionsv1alpha1.CompositionDefinition, why string) {
+	switch cr.GetCondition(rtv1.TypeReady).Reason {
+	case "", rtv1.ReasonNotObserved:
+		cr.SetConditions(rtv1.Creating().WithMessage("update pending: " + why))
+	}
+}
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -1063,6 +1079,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	if !statusChanged {
 		log.Debug("CRD status changed", "gvr", gvr.String())
+		markUpdatePending(cr, "the generated CRD differs from the served one")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1131,6 +1148,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	if cr.Status.Digest != dig {
 		log.Debug("Rendered resources digest changed", "status", cr.Status.Digest, "rendered", dig)
+		markUpdatePending(cr, "the rendered controller resources changed")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1143,6 +1161,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if cr.Status.Digest != dig {
 		log.Debug("Deployed resources digest changed", "status", cr.Status.Digest, "deployed", dig)
+		markUpdatePending(cr, "the deployed controller resources drifted")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1158,6 +1177,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if len(orphans) > 0 {
 		log.Info("Orphaned compositions pending adoption", "gvr", gvr.String(), "count", len(orphans))
+		markUpdatePending(cr, fmt.Sprintf("%d orphaned compositions pending adoption", len(orphans)))
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1189,6 +1209,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			}
 			if len(stale.Items) > 0 {
 				log.Debug("Compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				markUpdatePending(cr, fmt.Sprintf("%d compositions pending migration from %s", len(stale.Items), vi.Version))
 				return reconciler.ExternalObservation{
 					ResourceExists:   true,
 					ResourceUpToDate: false,
@@ -1207,6 +1228,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
 	} else if len(prunable) > 0 {
 		log.Debug("Stale served versions pending prune", "versions", prunable)
+		markUpdatePending(cr, fmt.Sprintf("stale served versions pending prune: %v", prunable))
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
