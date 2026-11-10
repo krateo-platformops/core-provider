@@ -519,7 +519,13 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 		return readyOutcome{reason: "Unavailable", message: v.message}
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
-	case condition.ReasonZeroEvidence, ReasonInventoryNotRecorded:
+	case condition.ReasonZeroEvidence, ReasonInventoryNotRecorded, ReasonChildrenForbidden:
+		// ChildrenForbidden JOINED THIS ARM LATE (#430). The rollup has returned it since #318, but
+		// this switch had no case for it, so it fell to the Available tail below: a composition whose
+		// every child read was refused reported Ready=True/Available, the opposite of the Unknown that
+		// #318 decided and installer allowlisted. The tests checked the rollup's reason, never what
+		// reached the condition; TestEveryReasonTheRollupReturnsIsHandledByResolveReady now walks the
+		// rollup's reasons, the domain the stampReady guard never covered.
 		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
 		// the author's health RESTAction IS evidence, and it is better evidence than the generic
 		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
@@ -539,6 +545,9 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 		// code it guards must not pass, and this one does not.
 		if v.reason == ReasonInventoryNotRecorded {
 			return readyOutcome{reason: ReasonInventoryNotRecorded, message: v.message}
+		}
+		if v.reason == ReasonChildrenForbidden {
+			return readyOutcome{reason: ReasonChildrenForbidden, message: v.message}
 		}
 		return readyOutcome{reason: condition.ReasonZeroEvidence, message: v.message}
 	}

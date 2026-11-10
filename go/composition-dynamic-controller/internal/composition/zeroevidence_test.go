@@ -241,6 +241,7 @@ func TestStampReady_RoutesEveryReasonToTheRightCondition(t *testing.T) {
 		{"Creating", "False", "Creating"},
 		{"Unavailable", "False", "Unavailable"},
 		{"ZeroEvidence", string(metav1.ConditionUnknown), "ZeroEvidence"},
+		{"ChildrenForbidden", string(metav1.ConditionUnknown), "ChildrenForbidden"}, // #430
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			mg := &unstructured.Unstructured{Object: map[string]any{
