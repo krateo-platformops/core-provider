@@ -50,13 +50,28 @@ import (
 var (
 	krateoNamespace = env.String(krateoNamespaceEnvVar, krateoNamespaceDefault)
 	helmMaxHistory  = env.Int(helmMaxHistoryEnvvar, 3)
+	// helmOperationTimeout is the Timeout of every helm install, upgrade, rollback and uninstall
+	// (#410). helm applies it to EACH wait, not to the operation as a whole: execHook calls
+	// WatchUntilReady(resources, timeout) once per hook, in weight order (measured on kind: two
+	// 12s hooks under a 20s Timeout finished in 32s, deployed). A Timeout of 0 is NO deadline
+	// (watchtools.ContextWithOptionalTimeout -> context.WithCancel(Background)), independent of the
+	// reconcile's context. The cdc passed 0, so a hook Job that could never complete held its install,
+	// and the reconcile running it, for hours, and the composition's deletion queued behind it with no
+	// status. With a bound, a hook that has not finished within it fails the operation: the release
+	// is "failed", the composition reports it, and a pending deletion proceeds. A chain of hooks that
+	// each finish within it is not cut short, however long the chain. Default 15m (Diego, 2026-11-10).
+	helmOperationTimeout = env.Duration(helmTimeoutEnvvar, 15*time.Minute)
 	// pendingOperationGrace: a helm release found in a pending-* status is rolled back ONLY if it
 	// has been pending LONGER than this — i.e. genuinely stuck (the controller died mid-operation),
 	// not legitimately in-flight. A large composition's upgrade (hundreds of children + hooks) can
 	// stay pending for tens of seconds; rolling that back mid-flight caused an Upgrade<->Rollback
-	// thrash on the 319-resource portal composition. Default 5m (>= helm's default op timeout), so
-	// only operations that exceeded a real upgrade are treated as stuck. Tunable per deployment.
-	pendingOperationGrace = env.Duration(pendingGraceEnvvar, 5*time.Minute)
+	// thrash on the 319-resource portal composition. It was 5m, documented as ">= helm's default op
+	// timeout", while the real timeout was unbounded. It now defaults to the per-wait bound plus a
+	// minute, so a single hook still inside its bound is never taken for stuck. It does NOT cover a
+	// whole multi-hook operation, which helm does not bound: an operation longer than the grace can be
+	// rolled back by a SECOND live cdc pod, which happens only while a rollout overlaps two pods (there
+	// is no leader election). Tunable per deployment.
+	pendingOperationGrace = env.Duration(pendingGraceEnvvar, helmOperationTimeout+time.Minute)
 
 	// childTeardownGrace bounds how long Delete waits for finalizer-bearing managed children to
 	// finish deleting before it uninstalls the release anyway (krateo-core-provider#108). The wait
@@ -72,6 +87,10 @@ const (
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
 	reasonPendingHelmOperation = "PendingHelmOperation"
+
+	// Ready-condition reason written BEFORE an install or uninstall starts (#410), so an operation
+	// that runs long (a slow hook) is visible on the composition instead of leaving it without status.
+	reasonHelmOperationInProgress = "HelmOperationInProgress"
 
 	// Event reasons
 	reasonCreated = "CompositionCreated"
@@ -93,6 +112,7 @@ const (
 	helmMaxHistoryEnvvar     = "HELM_MAX_HISTORY"
 	krateoNamespaceEnvVar    = "KRATEO_NAMESPACE"
 	pendingGraceEnvvar       = "COMPOSITION_CONTROLLER_PENDING_GRACE"
+	helmTimeoutEnvvar        = "COMPOSITION_CONTROLLER_HELM_TIMEOUT"
 	childTeardownGraceEnvvar = "COMPOSITION_CONTROLLER_CHILD_TEARDOWN_GRACE"
 
 	// Default namespace for Krateo Installation
@@ -447,6 +467,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
+				Timeout:        helmOperationTimeout,
 			})
 		})
 		if err != nil {
@@ -564,6 +585,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 				// into the current release: invalid ownership metadata") and wedges the platform (D1,
 				// 2026-07-08); with it the release takes ownership, self-healing the conflict.
 				TakeOwnership: true,
+				// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
+				Timeout: helmOperationTimeout,
 			},
 			MaxHistory: helmMaxHistory,
 		})
@@ -924,6 +947,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// un-adoptable child 500s the entire reconcile and wedges the platform (D1); with it the
 		// release takes ownership and self-heals the conflict.
 		TakeOwnership: true,
+		// Bounds the install (or upgrade) and its hooks (#410).
+		Timeout: helmOperationTimeout,
+	}
+
+	// #410: say what is about to run before it runs, so an install held by a slow or hung hook is
+	// visible on the composition. Bounded by helmOperationTimeout.
+	if mg, err = recordHelmOperation(ctx, mg, "install", time.Now(), updateOpts, log); err != nil {
+		return err
 	}
 
 	// Check if the release already exists before attempting to install, this can happen if the create event is triggered after a failed install
@@ -1161,6 +1192,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 					Values:                values,
 					PostRenderer:          postrenderLabels,
 					TakeOwnership:         true,
+					Timeout:               helmOperationTimeout, // #410
 				},
 				MaxHistory: helmMaxHistory,
 			})
@@ -1409,6 +1441,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
+				Timeout:        helmOperationTimeout,
 			})
 		}); rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
@@ -1440,11 +1473,17 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			len(pending), childTeardownGrace, pendingIDs(pending))))
 	}
 
+	// #410: the uninstall runs pre/post-delete hooks too; say so before it starts.
+	if mg, err = recordHelmOperation(ctx, mg, "uninstall", time.Now(), updateOpts, log); err != nil {
+		return err
+	}
+
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
 		return helmMetrics.TimedUninstall(func() error {
 			return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
 				IgnoreNotFound: true,
+				Timeout:        helmOperationTimeout,
 			})
 		})
 	})
