@@ -837,29 +837,39 @@ func seedReadyIfAbsent(cr *compositiondefinitionsv1alpha1.CompositionDefinition)
 // absent or NotObserved (a first pass, or after an Observe error), when there is no real verdict to
 // keep, does it say Ready=False/Creating "update pending: <why>".
 func markUpdatePending(cr *compositiondefinitionsv1alpha1.CompositionDefinition, why string) {
-	switch cr.GetCondition(rtv1.TypeReady).Reason {
-	case "", rtv1.ReasonNotObserved:
-		cr.SetConditions(rtv1.Creating().WithMessage("update pending: " + why))
+	cur := cr.GetCondition(rtv1.TypeReady)
+	switch {
+	case cur.Reason == "", cur.Reason == rtv1.ReasonNotObserved,
+		// Already this function's own verdict: refresh it, so the message names the CURRENT drift
+		// rather than whichever drift was first seen (review of #434, nit). Any other Creating, and
+		// every real verdict, is left alone.
+		cur.Reason == rtv1.ReasonCreating && strings.HasPrefix(cur.Message, updatePendingPrefix):
+		cr.SetConditions(rtv1.Creating().WithMessage(updatePendingPrefix + why))
 	}
 }
+
+// updatePendingPrefix starts every message markUpdatePending writes, which is how it recognises its own.
+const updatePendingPrefix = "update pending: "
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
-	// Engine reconcile span. core-provider is the top of the chain (no inbound traceparent);
-	// the OTel log handler (provider-runtime logging.NewOTelHandler) bridges this span's
-	// trace_id/span_id onto every log of the reconcile. No-op tracer until OTEL_TRACING_ENABLED.
+	// core-provider's own observe span, a child of provider-runtime's reconcile/observe spans since
+	// v1.14 (#395): the runtime opens the Server-kind root (linked to any krateo.io/traceparent), so
+	// this one is Internal. The log handler bridges the active span's trace_id/span_id onto records
+	// logged through a ctx-bound Logger (logging.WithContext). No-op tracer until OTEL_TRACING_ENABLED.
 	ctx, span := coretelemetry.Tracer().Start(ctx, "compositiondefinition.observe",
-		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String("k8s.object.name", cr.GetName()),
 			attribute.String("k8s.object.namespace", cr.GetNamespace()),
 		),
 	)
 	defer span.End()
-	log := e.log.WithValues("operation", "observe")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "observe")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	// D3 (2026-07-08): the managed reconciler hands us the CompositionDefinition from the
@@ -1439,7 +1449,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf(errNotCR)
 	}
 
-	log := e.log.WithValues("operation", "create")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "create")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	log.Info("Creating CompositionDefinition")
@@ -1636,7 +1647,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf(errNotCR)
 	}
 
-	log := e.log.WithValues("operation", "update")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "update")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	log.Info("Updating CompositionDefinition")
@@ -2032,7 +2044,8 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
-	log := e.log.WithValues("operation", "delete")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "delete")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	cr.SetConditions(rtv1.Deleting())
