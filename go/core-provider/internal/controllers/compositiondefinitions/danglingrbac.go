@@ -63,6 +63,42 @@ func (e *external) sweepDanglingControllerRBAC(ctx context.Context, gvr schema.G
 	return out, err
 }
 
+// Outcomes of one sweep, as logged in the "outcome" field.
+const (
+	danglingOutcomeError   = "error"   // the search failed: NOT evaluated
+	danglingOutcomeDryRun  = "dry-run" // evaluated; found is what removal would delete (may be 0)
+	danglingOutcomeRemoved = "removed" // evaluated with removal on, and something was found
+	danglingOutcomeNone    = "none"    // evaluated with removal on, nothing found
+)
+
+// danglingSweepLogLine is the ONE line every sweep logs, whatever it found, including nothing. The
+// first version logged only when it found something, so a definition whose sweep found nothing was
+// indistinguishable in the log from one whose sweep never ran, and a census diff could not tell
+// "the rule excludes it" from "not evaluated yet". Every line carries outcome, resource and found,
+// and the logger adds the definition's name and namespace.
+func danglingSweepLogLine(resource string, s danglingSweep, err error) (string, []any) {
+	kv := []any{"resource", resource, "found", len(s.Found), "bindings", danglingNames(s.Found), "kept", s.Kept}
+	switch {
+	case err != nil && len(s.Found) == 0:
+		// A failed search returns nothing found; removal only runs when something was.
+		return "could not check for dangling controller bindings; will retry on the next update (#414)",
+			append(kv, "outcome", danglingOutcomeError, "error", err.Error())
+	case s.DryRun:
+		return "DRY RUN: would remove bindings that name only a retired controller's absent ServiceAccount (#414)",
+			append(kv, "outcome", danglingOutcomeDryRun)
+	case len(s.Found) == 0:
+		return "no bindings name only a retired controller's absent ServiceAccount (#414)",
+			append(kv, "outcome", danglingOutcomeNone)
+	}
+	kv = append(kv, "outcome", danglingOutcomeRemoved, "removed", s.Removed)
+	if err != nil {
+		// Some deletes failed; what was removed is still reported. Retried on the next update.
+		return "removed some bindings that named only a retired controller's absent ServiceAccount; the rest will be retried on the next update (#414)",
+			append(kv, "error", err.Error())
+	}
+	return "removed bindings that named only a retired controller's absent ServiceAccount (#414)", kv
+}
+
 // danglingNames renders bindings for a log line.
 func danglingNames(found []deploy.DanglingBinding) []string {
 	out := make([]string, 0, len(found))
