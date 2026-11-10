@@ -151,3 +151,55 @@ func setsReady(call *ast.CallExpr) bool {
 	})
 	return found
 }
+
+// The follower's drift returns are `return notUpToDate, nil` (an identifier, not a literal), so the
+// Observe guard above cannot see them. Same rule: each is preceded in its block by a Ready write.
+func TestEveryFollowerDriftReturnMarksUpdatePending(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "controllerowner.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var drift, unmarked []int
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "observeFollower" {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			blk, ok := n.(*ast.BlockStmt)
+			if !ok {
+				return true
+			}
+			for i, st := range blk.List {
+				ret, ok := st.(*ast.ReturnStmt)
+				if !ok || len(ret.Results) == 0 {
+					continue
+				}
+				if id, ok := ret.Results[0].(*ast.Ident); !ok || id.Name != "notUpToDate" {
+					continue
+				}
+				line := fset.Position(ret.Pos()).Line
+				drift = append(drift, line)
+				marked := false
+				for _, prev := range blk.List[:i] {
+					if es, ok := prev.(*ast.ExprStmt); ok {
+						if call, ok := es.X.(*ast.CallExpr); ok && setsReady(call) {
+							marked = true
+						}
+					}
+				}
+				if !marked {
+					unmarked = append(unmarked, line)
+				}
+			}
+			return true
+		})
+	}
+	if len(drift) != 3 {
+		t.Errorf("found %d follower drift returns (lines %v), want 3; update this count deliberately", len(drift), drift)
+	}
+	if len(unmarked) > 0 {
+		t.Errorf("follower drift returns without a Ready write in their block: lines %v", unmarked)
+	}
+}
