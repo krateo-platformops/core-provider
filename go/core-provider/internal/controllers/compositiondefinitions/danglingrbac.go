@@ -88,9 +88,11 @@ const (
 // indistinguishable in the log from one whose sweep never ran, and a census diff could not tell
 // "the rule excludes it" from "not evaluated yet". Every line carries phase, outcome, resource and
 // found, and the logger adds the definition's name and namespace. bindings, kept and removed are
-// always arrays (never null), so a reader parses one shape.
+// PRESENT ON EVERY LINE and always arrays: removed was first added only on the removed outcome,
+// so the other lines lacked it and a reader saw it as null (github-provider-kog, 2.13.81).
 func danglingSweepLogLine(phase, resource string, s danglingSweep, err error) (string, []any) {
-	kv := []any{"phase", phase, "resource", resource, "found", len(s.Found), "bindings", danglingNames(s.Found), "kept", nonNil(s.Kept)}
+	kv := []any{"phase", phase, "resource", resource, "found", len(s.Found), "bindings", danglingNames(s.Found),
+		"kept", nonNil(s.Kept), "removed", nonNil(s.Removed)}
 	switch {
 	case err != nil && len(s.Found) == 0:
 		// A failed search returns nothing found; removal only runs when something was.
@@ -103,7 +105,7 @@ func danglingSweepLogLine(phase, resource string, s danglingSweep, err error) (s
 		return "no bindings name only a retired controller's absent ServiceAccount (#414)",
 			append(kv, "outcome", danglingOutcomeNone)
 	}
-	kv = append(kv, "outcome", danglingOutcomeRemoved, "removed", nonNil(s.Removed))
+	kv = append(kv, "outcome", danglingOutcomeRemoved)
 	if err != nil {
 		// Some deletes failed; what was removed is still reported. Retried.
 		return "removed some bindings that named only a retired controller's absent ServiceAccount; the rest will be retried (#414)",
