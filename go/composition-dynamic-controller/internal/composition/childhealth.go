@@ -564,8 +564,8 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 	// ten minutes before one such condition's own timestamp.
 	//
 	// A condition's message describes the STATE; the phase that happened to observe it is not part
-	// of the state. Which phase ran is already recorded in events and logs, and freshness now has
-	// its own field (status.lastReconcileTime), so nothing is lost by making this stable.
+	// of the state. Which phase ran is already recorded in events and logs, and per-reconcile
+	// liveness is in the cdc's `reconcile` trace spans (#439), so nothing is lost by making this stable.
 	msg := defaultMsg
 	if p.present && p.message != "" {
 		msg = p.message
@@ -586,7 +586,7 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 // not a guard.
 //
 // If you are tempted to add a phase-specific message back: the information you want is in the events
-// and the logs, and per-reconcile freshness is in status.lastReconcileTime. A condition message that
+// and the logs, and per-reconcile liveness is in the `reconcile` trace spans (#439). A condition message that
 // changes without the condition changing destroys the only thing LastTransitionTime is for.
 const readyMessageAvailable = "Composition is up-to-date"
 
