@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -31,6 +32,16 @@ import (
 //  4. the binding is not helm-owned (a chart's own object; removing it would fight helm).
 // Deleting is safe where repointing was not: a binding to a ServiceAccount that does not exist grants
 // nothing to anyone today, and removing it closes the door on anything that later takes that name.
+
+// compositionVersion is the shape of a version core-provider derives for a composition Kind: "v" plus
+// the chart's semver with dots as dashes (chart.go, adoption.go), e.g. v0-1-2, v1-8-101, and a
+// prerelease tail such as v1-0-0-rc-1. A subject <plural>-<x> is a composition controller's only if <x>
+// has this shape: two CRDs can share a plural (modelconfigs.kagent.dev and
+// modelconfigs.composition.krateo.io on krateo-057), so a non-composition ServiceAccount named
+// modelconfigs-v1alpha2 in the controller namespace must never read as a retired controller's
+// (Diego, 2026-11-10, from installer's finding). Every served composition.krateo.io version on 057
+// other than vacuum matches.
+var compositionVersion = regexp.MustCompile(`^v[0-9]+-[0-9]+-[0-9]+(-[0-9A-Za-z-]+)?$`)
 
 // helmReleaseNameAnnotation marks an object helm owns (also used by errIfHelmOwned in the RBAC
 // installer of the cdc).
@@ -107,7 +118,7 @@ func FindDanglingControllerBindings(ctx context.Context, opts DanglingOptions) (
 				continue
 			}
 			version := strings.TrimPrefix(name, prefix)
-			if version == "" || known[version] {
+			if !compositionVersion.MatchString(version) || known[version] {
 				continue
 			}
 			id := k.kind + " " + b.GetNamespace() + "/" + b.GetName()

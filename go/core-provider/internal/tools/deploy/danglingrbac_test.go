@@ -98,6 +98,13 @@ func TestFindDanglingControllerBindings(t *testing.T) {
 		dBinding("app-ns", "portal-elsewhere", "Role", "x", nil, "other-ns/portals-v1-8-32"),
 		// NOT A CANDIDATE: another Kind's controller (prefix must be exactly "portals-").
 		dBinding("app-ns", "portalagents", "Role", "x", nil, mgmtNS+"/portalagents-v1-8-28"),
+		// NOT A CANDIDATE: <plural>-<x> where <x> is not a composition version. Two CRDs can share a
+		// plural (kagent.dev and composition.krateo.io modelconfigs), so a non-composition
+		// ServiceAccount of this shape must never read as a retired controller's.
+		dBinding("app-ns", "portal-kagentish", "Role", "x", nil, mgmtNS+"/portals-v1alpha2"),
+		dBinding("app-ns", "portal-other", "Role", "x", nil, mgmtNS+"/portals-reader"),
+		// FOUND: a prerelease composition version (chart 1.0.0-rc.1 -> v1-0-0-rc-1).
+		dBinding("app-ns", "portal-rc", "Role", "portal-rc", nil, mgmtNS+"/portals-v1-0-0-rc-1"),
 	)
 	found, kept, err := FindDanglingControllerBindings(context.Background(), portalsOpts(dyn))
 	if err != nil {
@@ -111,6 +118,7 @@ func TestFindDanglingControllerBindings(t *testing.T) {
 		"ClusterRoleBinding/portal -> krateo-system/portals-v1-8-28",
 		"RoleBinding app-ns/portal -> krateo-system/portals-v1-8-28",
 		"RoleBinding app-ns/portal-4f2874bz -> krateo-system/portals-v1-8-29",
+		"RoleBinding app-ns/portal-rc -> krateo-system/portals-v1-0-0-rc-1",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("found:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
