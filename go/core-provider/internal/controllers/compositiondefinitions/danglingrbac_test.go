@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -72,7 +73,7 @@ func TestSweepDanglingControllerRBAC(t *testing.T) {
 
 	t.Run("dry run reports and deletes nothing", func(t *testing.T) {
 		e, dyn := sweepExternal(t, leakCRD("v0-3-484", "vacuum"), false, objs()...)
-		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS})
+		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS}, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +90,7 @@ func TestSweepDanglingControllerRBAC(t *testing.T) {
 
 	t.Run("removal enabled deletes only the retired version's binding", func(t *testing.T) {
 		e, dyn := sweepExternal(t, leakCRD("v0-3-484", "vacuum"), true, objs()...)
-		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS})
+		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS}, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +107,7 @@ func TestSweepDanglingControllerRBAC(t *testing.T) {
 
 	t.Run("no CRD is an error, not every version retired", func(t *testing.T) {
 		e, dyn := sweepExternal(t, nil, true, objs()...)
-		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS})
+		got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS}, false)
 		if err == nil {
 			t.Errorf("no CRD returned no error (found %v)", danglingNames(got.Found))
 		}
@@ -139,7 +140,7 @@ func TestDanglingSweepLogLineCoversEveryOutcome(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			msg, kv := danglingSweepLogLine("installers", c.sweep, c.err)
+			msg, kv := danglingSweepLogLine(danglingPhaseUpdate, "installers", c.sweep, c.err)
 			if !strings.Contains(msg, "#414") {
 				t.Errorf("msg %q does not carry #414", msg)
 			}
@@ -153,6 +154,90 @@ func TestDanglingSweepLogLineCoversEveryOutcome(t *testing.T) {
 			if _, has := fields["error"]; has != c.wantErr {
 				t.Errorf("error field present=%v, want %v", has, c.wantErr)
 			}
+			if fields["phase"] != danglingPhaseUpdate {
+				t.Errorf("phase=%v, want %s", fields["phase"], danglingPhaseUpdate)
+			}
+			// One shape for readers: kept (and removed, when present) are never null.
+			for _, k := range []string{"kept", "removed", "bindings"} {
+				if v, has := fields[k]; has && v.([]string) == nil {
+					t.Errorf("%s is a nil slice; it must log as [], not null", k)
+				}
+			}
 		})
 	}
+}
+
+// #414, Delete path. When the definition's Delete removed the Kind's CRD, every version is retired
+// by that act, so the sweep runs WITHOUT a CRD and finds the bindings of every version, the one that
+// was current included. Without kindRemoved, a missing CRD is still an error (the arm above).
+func TestSweepDanglingControllerRBACOnKindRemoval(t *testing.T) {
+	ctx := context.Background()
+	e, dyn := sweepExternal(t, nil, true,
+		sweepBinding("retired", leakResource+"-v0-3-480"),
+		sweepBinding("was-current", leakResource+"-v0-3-484"),
+	)
+	got, err := e.sweepDanglingControllerRBAC(ctx, leakGVR(), []string{leakNS}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Found) != 2 || len(got.Removed) == 0 {
+		t.Errorf("found %v removed %v, want both bindings found and removed", danglingNames(got.Found), got.Removed)
+	}
+	for _, name := range []string{"retired", "was-current"} {
+		if bindingExists(t, dyn, name) {
+			t.Errorf("binding %s survived the Kind's removal", name)
+		}
+	}
+}
+
+// Diego, 2026-11-10: with removal on, a failed sweep holds the Delete (it is the last chance); a dry
+// run never does.
+func TestDeleteSweepError(t *testing.T) {
+	boom := errors.New("boom")
+	if err := deleteSweepError(danglingSweep{}, nil); err != nil {
+		t.Errorf("no failure held the delete: %v", err)
+	}
+	if err := deleteSweepError(danglingSweep{DryRun: true}, boom); err != nil {
+		t.Errorf("a dry run held the delete: %v", err)
+	}
+	if err := deleteSweepError(danglingSweep{}, boom); !errors.Is(err, boom) {
+		t.Errorf("with removal on, a failed sweep must hold the delete; got %v", err)
+	}
+}
+
+// sweepOnDelete wires Delete's skipCRD into the sweep. CRD removed by this Delete: no CRD is needed
+// and every version's binding goes. CRD kept (another definition needs the Kind): the live CRD
+// decides, so the version still on it keeps its binding.
+func TestSweepOnDelete(t *testing.T) {
+	ctx := context.Background()
+	objs := func() []runtime.Object {
+		return []runtime.Object{
+			sweepBinding("retired", leakResource+"-v0-3-480"),
+			sweepBinding("on-crd", leakResource+"-v0-3-484"),
+		}
+	}
+	t.Run("this Delete removed the CRD", func(t *testing.T) {
+		e, dyn := sweepExternal(t, nil, true, objs()...)
+		if err := e.sweepOnDelete(ctx, leakGVR(), []string{leakNS}, false, logging.NewNopLogger()); err != nil {
+			t.Fatal(err)
+		}
+		if bindingExists(t, dyn, "retired") || bindingExists(t, dyn, "on-crd") {
+			t.Error("with the Kind removed, every version's binding must go")
+		}
+	})
+	t.Run("another definition keeps the CRD", func(t *testing.T) {
+		e, dyn := sweepExternal(t, leakCRD("v0-3-484", "vacuum"), true, objs()...)
+		if err := e.sweepOnDelete(ctx, leakGVR(), []string{leakNS}, true, logging.NewNopLogger()); err != nil {
+			t.Fatal(err)
+		}
+		if bindingExists(t, dyn, "retired") || !bindingExists(t, dyn, "on-crd") {
+			t.Error("with the CRD kept, only the version off it may go")
+		}
+	})
+	t.Run("CRD kept but unreadable holds the delete when removal is on", func(t *testing.T) {
+		e, _ := sweepExternal(t, nil, true, objs()...)
+		if err := e.sweepOnDelete(ctx, leakGVR(), []string{leakNS}, true, logging.NewNopLogger()); err == nil {
+			t.Error("a sweep that could not run must hold the deletion")
+		}
+	})
 }
