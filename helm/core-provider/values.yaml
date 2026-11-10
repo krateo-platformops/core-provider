@@ -443,6 +443,13 @@ cdc:
   # and then be silently overridden by this one, which is the same shape of quiet failure as the
   # "128Mi" suffix above. The values schema therefore REFUSES GOMEMLIMIT under `cdc.env`.
   goMemLimit: request
+  # helmTimeout (#410) bounds every helm install, upgrade, rollback and uninstall a CDC runs, hooks
+  # included, as a Go duration. helm waits for hooks with this bound; with none (the old behaviour)
+  # a hook Job that could never complete held its install, and the composition's deletion behind it,
+  # for hours with no status. Past the bound the operation fails: the release is "failed" and the
+  # composition reports it. The CDC's pending-operation grace defaults to this plus a minute, so a
+  # second CDC pod never rolls back an operation still inside its bound. Zero is refused (no bound).
+  helmTimeout: 15m
   # Probes (#333). Without them a CDC whose informer can never list its resource (its CRD version
   # is no longer served) reports Ready=true for as long as its process runs: measured for four days
   # on five controllers logging `"Failed to watch" ... failed to list *unstructured.Unstructured: the
