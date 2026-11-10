@@ -111,6 +111,17 @@ func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force 
 	return setReadyCondition(mg, condition.ZeroEvidence(), message, force)
 }
 
+// setChildrenForbiddenStatus stamps Ready=Unknown/ChildrenForbidden (#318, #430). Built here for the
+// same reason as setInventoryNotRecordedStatus: only this rollup can produce it.
+func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionUnknown,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonChildrenForbidden,
+	}, message, force)
+}
+
 // setInventoryNotRecordedStatus stamps Ready=Unknown/InventoryNotRecorded.
 //
 // Built here rather than taken from unstructured-runtime's condition package, deliberately: this
@@ -499,6 +510,11 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setCreatingStatus(mg, out.message, force)
 	case condition.ReasonZeroEvidence:
 		return setZeroEvidenceStatus(mg, out.message, force)
+	case ReasonChildrenForbidden:
+		// Unknown, like ZeroEvidence, with its own reason: nothing was assessed AND at least one read
+		// was refused, a gap in the RBAC this controller generates (#318). installer allowlisted it
+		// (their #646). Unreachable before #430: resolveReady dropped the rollup's reason.
+		return setChildrenForbiddenStatus(mg, out.message, force)
 	case ReasonInventoryNotRecorded:
 		// Unknown, like ZeroEvidence, and with a DIFFERENT reason so a consumer can tell "nothing
 		// is readable" from "nothing was recorded". See ReasonInventoryNotRecorded for why those

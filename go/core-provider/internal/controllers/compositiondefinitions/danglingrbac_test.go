@@ -157,9 +157,14 @@ func TestDanglingSweepLogLineCoversEveryOutcome(t *testing.T) {
 			if fields["phase"] != danglingPhaseUpdate {
 				t.Errorf("phase=%v, want %s", fields["phase"], danglingPhaseUpdate)
 			}
-			// One shape for readers: kept (and removed, when present) are never null.
+			// One shape for readers: kept, removed and bindings are on EVERY line, and never null.
 			for _, k := range []string{"kept", "removed", "bindings"} {
-				if v, has := fields[k]; has && v.([]string) == nil {
+				v, has := fields[k]
+				if !has {
+					t.Errorf("%s is missing from the %s line; every line must carry it", k, c.wantOutcome)
+					continue
+				}
+				if v.([]string) == nil {
 					t.Errorf("%s is a nil slice; it must log as [], not null", k)
 				}
 			}
