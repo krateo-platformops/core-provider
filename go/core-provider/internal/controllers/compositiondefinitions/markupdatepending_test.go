@@ -24,6 +24,8 @@ func TestMarkUpdatePending(t *testing.T) {
 		{"NotObserved becomes Creating", ptrCond(rtv1.NotObserved()), rtv1.ReasonCreating, "update pending: x"},
 		{"Available is kept (no flap per chart change)", ptrCond(rtv1.Available()), rtv1.ReasonAvailable, ""},
 		{"Unavailable is kept", ptrCond(rtv1.Unavailable()), rtv1.ReasonUnavailable, ""},
+		{"its own update-pending message is refreshed to the current drift", ptrCond(rtv1.Creating().WithMessage("update pending: older")), rtv1.ReasonCreating, "update pending: x"},
+		{"another Creating is left alone", ptrCond(rtv1.Creating().WithMessage("installing")), rtv1.ReasonCreating, "installing"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cr := &compositiondefinitionsv1alpha1.CompositionDefinition{}

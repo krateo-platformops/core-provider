@@ -50,7 +50,18 @@ var (
 	buildCommit  = "unknown"
 )
 
+// main exits with run's code. run returns rather than calling os.Exit, so its deferred telemetry
+// and log shutdowns always run and flush buffered spans, metrics and log records; os.Exit inside it
+// skipped every defer (provider-runtime's review of #434, L3).
 func main() {
+	os.Exit(run())
+}
+
+// shutdownTimeout bounds each telemetry shutdown on exit: a collector that is down must not hold the
+// process past its termination grace period.
+const shutdownTimeout = 5 * time.Second
+
+func run() int {
 	envVarPrefix := fmt.Sprintf("%s_PROVIDER", strcase.UpperSnakeCase(providerName))
 
 	debug := flag.Bool("debug", env.Bool(fmt.Sprintf("%s_DEBUG", envVarPrefix), false), "Run with debug logging.")
@@ -92,10 +103,9 @@ func main() {
 	}
 
 	// Identify ALL OTel signal pipelines (metrics, traces, logs) via the standard OTel env BEFORE any
-	// exporter/handler is built. provider-runtime builds its metrics resource from resource.Default()
-	// and IGNORES cfg.ServiceName, so service.name/version must arrive via OTEL_SERVICE_NAME /
-	// OTEL_RESOURCE_ATTRIBUTES; the log + trace resources reuse the same, keeping all three signals
-	// identical. core-provider is the engine/operator, so it carries no composition-id.
+	// exporter/handler is built. OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES are the one source
+	// every pipeline reads (provider-runtime has honoured cfg.ServiceName too since v1.9.1, unless
+	// OTEL_SERVICE_NAME is set), so metrics, traces and logs carry the same service.name/version. core-provider is the engine/operator, so it carries no composition-id.
 	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
 	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects:
 	// the stamp describes the image that is actually running, whereas the env var describes what the
@@ -123,14 +133,17 @@ func main() {
 	logsShutdown, err := coretelemetry.SetupOTLPLogs(context.Background(), *logsEnabled, *metricsServiceName)
 	if err != nil {
 		log.Default().Printf("cannot initialize OpenTelemetry logs: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Emit logs as one JSON object per line in the OTel log model (RFC3339Nano UTC `timestamp`,
 	// SeverityNumber, service.name, trace correlation) for logs-ingester, AND — when OTEL_LOGS_ENABLED
 	// — tee them to the OTLP pipeline. Shared handler from provider-runtime; see
 	// docs/log-ingester-compatibility.md.
-	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
+	// slog-backed, not logr-backed: only a slog Logger can carry a context, so logging.WithContext(log,
+	// ctx) at the reconcile sites adds trace_id/span_id to their records (provider-runtime v1.13.0;
+	// review of #434, L1). The logr-backed form silently ignored WithContext.
+	log := logging.NewSlogLogger(*slog.New(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
 
 	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this pod
 	// running", without needing an OTel pipeline or a metrics scrape (#105).
@@ -140,7 +153,9 @@ func main() {
 	ctrl.SetLogger(logr.FromSlogHandler(logging.NewOTelHandler(slog.LevelInfo, os.Stderr, *metricsServiceName)))
 
 	defer func() {
-		if err := logsShutdown(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := logsShutdown(ctx); err != nil {
 			log.Error(err, "Cannot shutdown OpenTelemetry logs")
 		}
 	}()
@@ -173,19 +188,21 @@ func main() {
 		ExportInterval: telemetryExportInterval,
 	})
 	if err != nil {
-		log.Error(err, "Cannot initialize OpenTelemetry metrics")
-		os.Exit(1)
+		log.Error(err, "Cannot initialize OpenTelemetry telemetry")
+		return 1
 	}
 	defer func() {
-		if err := telemetryShutdown(context.Background()); err != nil {
-			log.Error(err, "Cannot shutdown OpenTelemetry metrics")
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := telemetryShutdown(ctx); err != nil {
+			log.Error(err, "Cannot shutdown OpenTelemetry telemetry")
 		}
 	}()
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		log.Error(err, "Cannot get API server rest config")
-		os.Exit(1)
+		return 1
 	}
 
 	// "0" is controller-runtime's value for "no probe server".
@@ -216,7 +233,7 @@ func main() {
 	})
 	if err != nil {
 		log.Error(err, "Cannot create controller manager")
-		os.Exit(1)
+		return 1
 	}
 
 	// Probes (#333). Liveness answers from the probe server alone, so a slow or failing reconcile
@@ -226,7 +243,7 @@ func main() {
 	// anything satisfied.
 	if err := health.Register(mgr); err != nil {
 		log.Error(err, "Cannot register health probes")
-		os.Exit(1)
+		return 1
 	}
 
 	o := controller.Options{
@@ -240,7 +257,7 @@ func main() {
 
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Error(err, "Cannot add APIs to scheme")
-		os.Exit(1)
+		return 1
 	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
 		ControllerOptions:  o,
@@ -249,22 +266,23 @@ func main() {
 		RemoveDanglingRBAC: *removeDanglingRBAC,
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
-		os.Exit(1)
+		return 1
 	}
 	if err := kubernetestargets.Setup(mgr, kubernetestargets.Options{
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup KubernetesTarget controller")
-		os.Exit(1)
+		return 1
 	}
 	if err := compositionmirror.Setup(mgr, compositionmirror.Options{
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup composition mirror controller")
-		os.Exit(1)
+		return 1
 	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "Cannot start controller manager")
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

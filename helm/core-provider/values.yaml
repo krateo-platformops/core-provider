@@ -33,10 +33,10 @@ otel:
   # (otel-collector-daemonset >= 0.1.21). Never the daemonset's headless Service: it spreads spans
   # across nodes and they lose their pod metadata.
   endpoint: ""
-  # With tracing on (otel.enabled and otel.tracing), core-provider exports traces through
-  # provider-runtime, which speaks OTLP/HTTP only: protocol grpc makes core-provider refuse to start
-  # ("provider-runtime exports traces over OTLP/HTTP only"), rather than send HTTP to a gRPC port as
-  # it did before 2.13.82 (#395). Keep http/protobuf when tracing is on.
+  # Keep http/protobuf: no Krateo exporter speaks gRPC (core-provider's metrics and traces, and the
+  # composition controllers', are OTLP/HTTP). With tracing on, core-provider refuses to start on grpc
+  # ("provider-runtime exports traces over OTLP/HTTP only"); otherwise it would send to the wrong port
+  # silently (review of #434, L4).
   protocol: http/protobuf
 imagePullSecrets: []
 nameOverride: "core-provider"
