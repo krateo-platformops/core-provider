@@ -50,23 +50,27 @@ import (
 var (
 	krateoNamespace = env.String(krateoNamespaceEnvVar, krateoNamespaceDefault)
 	helmMaxHistory  = env.Int(helmMaxHistoryEnvvar, 3)
-	// helmOperationTimeout bounds every helm install, upgrade, rollback and uninstall (#410). helm
-	// waits for hooks with the action's Timeout, and a Timeout of 0 is NO deadline
+	// helmOperationTimeout is the Timeout of every helm install, upgrade, rollback and uninstall
+	// (#410). helm applies it to EACH wait, not to the operation as a whole: execHook calls
+	// WatchUntilReady(resources, timeout) once per hook, in weight order (measured on kind: two
+	// 12s hooks under a 20s Timeout finished in 32s, deployed). A Timeout of 0 is NO deadline
 	// (watchtools.ContextWithOptionalTimeout -> context.WithCancel(Background)), independent of the
 	// reconcile's context. The cdc passed 0, so a hook Job that could never complete held its install,
 	// and the reconcile running it, for hours, and the composition's deletion queued behind it with no
-	// status. With a bound, the operation fails at it: the release is "failed", the composition
-	// reports it, and a pending deletion proceeds. Default 15m (Diego, 2026-11-10).
+	// status. With a bound, a hook that has not finished within it fails the operation: the release
+	// is "failed", the composition reports it, and a pending deletion proceeds. A chain of hooks that
+	// each finish within it is not cut short, however long the chain. Default 15m (Diego, 2026-11-10).
 	helmOperationTimeout = env.Duration(helmTimeoutEnvvar, 15*time.Minute)
 	// pendingOperationGrace: a helm release found in a pending-* status is rolled back ONLY if it
 	// has been pending LONGER than this — i.e. genuinely stuck (the controller died mid-operation),
 	// not legitimately in-flight. A large composition's upgrade (hundreds of children + hooks) can
 	// stay pending for tens of seconds; rolling that back mid-flight caused an Upgrade<->Rollback
-	// thrash on the 319-resource portal composition. It must exceed the longest LEGITIMATE operation,
-	// which is now helmOperationTimeout: a shorter grace would let a second cdc pod (rollouts overlap;
-	// there is no leader election) roll back an operation still inside its bound. So the default is
-	// the timeout plus a minute (it was 5m, documented as ">= helm's default op timeout", when the real
-	// timeout was unbounded). Tunable per deployment.
+	// thrash on the 319-resource portal composition. It was 5m, documented as ">= helm's default op
+	// timeout", while the real timeout was unbounded. It now defaults to the per-wait bound plus a
+	// minute, so a single hook still inside its bound is never taken for stuck. It does NOT cover a
+	// whole multi-hook operation, which helm does not bound: an operation longer than the grace can be
+	// rolled back by a SECOND live cdc pod, which happens only while a rollout overlaps two pods (there
+	// is no leader election). Tunable per deployment.
 	pendingOperationGrace = env.Duration(pendingGraceEnvvar, helmOperationTimeout+time.Minute)
 
 	// childTeardownGrace bounds how long Delete waits for finalizer-bearing managed children to

@@ -608,7 +608,7 @@
         "helmTimeout": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
-          "title": "Bound on every helm install/upgrade/rollback/uninstall a CDC runs, hooks included, as a Go duration (e.g. 15m, 1h30m). A hook that does not finish within it fails the operation instead of holding it forever (#410). Zero is refused: it would mean no bound.",
+          "title": "helm Timeout for every install/upgrade/rollback/uninstall a CDC runs, as a Go duration (e.g. 15m, 1h30m). helm applies it to EACH hook and each resource wait, not to the whole operation: a hook that does not finish within it fails the operation instead of holding it forever (#410). Set it above the slowest single hook. Zero is refused: it would mean no bound.",
           "default": "15m"
         },
         "goMemLimit": {

@@ -125,7 +125,7 @@ func TestHelmOperationInProgressCondition(t *testing.T) {
 	if c.Reason != reasonHelmOperationInProgress || c.Status != metav1.ConditionFalse {
 		t.Errorf("reason=%q status=%q, want %s False", c.Reason, c.Status, reasonHelmOperationInProgress)
 	}
-	for _, w := range []string{"helm install in progress", "2026-11-10T06:13:54Z", "15m0s"} {
+	for _, w := range []string{"helm install in progress", "2026-11-10T06:13:54Z", "each hook and each wait must finish within 15m0s"} {
 		if !strings.Contains(c.Message, w) {
 			t.Errorf("message %q lacks %q", c.Message, w)
 		}

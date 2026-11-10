@@ -16,10 +16,10 @@ import (
 // helmOperationInProgress is the Ready condition written BEFORE an install or uninstall starts
 // (#410). On krateo-057 a composition's install sat on a hook that could never start for three
 // hours with no condition at all, and its deletion waited behind it just as silently. The message
-// says what is running, since when, and the bound at which it fails.
+// says what is running, since when, and the bound that applies to each of its hooks and waits.
 func helmOperationInProgress(phase string, started time.Time, bound time.Duration) metav1.Condition {
 	c := condition.FailWithReason(reasonHelmOperationInProgress)
-	c.Message = fmt.Sprintf("helm %s in progress since %s; it fails if not finished within %s (a hook that never completes fails it)",
+	c.Message = fmt.Sprintf("helm %s in progress since %s; each hook and each wait must finish within %s, or the operation fails",
 		phase, started.UTC().Format(time.RFC3339), bound)
 	return c
 }
