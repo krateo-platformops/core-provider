@@ -1805,8 +1805,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// retirement deleted it (128 on 057, 2026-11-09). After the reclaim, so whatever it just retired
 	// has been repointed first. Like the reclaim, a failure never fails the Update: it is logged and
 	// tried again on the next one.
-	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr))
-	msg, kv := danglingSweepLogLine(gvr.Resource, sweep, serr)
+	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr), false)
+	msg, kv := danglingSweepLogLine(danglingPhaseUpdate, gvr.Resource, sweep, serr)
 	log.Info(msg, kv...)
 
 	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
@@ -2254,6 +2254,16 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}
 			return fmt.Errorf("error undeploying CompositionDefinition: %w", err)
 
+		}
+
+		// #414: the bindings this definition's controllers leave behind. The sweep in Update reaches
+		// only definitions that still exist, so a deleted definition's leftovers were never removed
+		// (15 of 130 on krateo-057). Runs after Undeploy, so the current controller's ServiceAccount
+		// is gone too. When this Delete removed the Kind's CRD (no other definition keeps it), every
+		// version is retired by that act; otherwise the live CRD says which are. A handed-over
+		// controller returned above, before this, because its ServiceAccount lives on.
+		if err := e.sweepOnDelete(ctx, gvr, controllerPlacements(cr), skipCRD, log); err != nil {
+			return err
 		}
 	} else {
 		log.Debug("CRD not found, deletion has already been completed", "gvk", gvk.String())
