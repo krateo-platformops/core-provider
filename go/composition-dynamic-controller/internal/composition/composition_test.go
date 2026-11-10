@@ -650,7 +650,7 @@ func TestController(t *testing.T) {
 			t.Errorf("control: a pass that changed status did not move resourceVersion (%s), so the "+
 				"idle arm above cannot tell a no-op write from no write at all", corrupted.GetResourceVersion())
 		}
-		t.Logf("idle: rv %s -> %s (unchanged); control: rv %s -> %s (written)",
+		t.Logf("idle pass: rv %s -> %s (must be equal); control: rv %s -> %s (must differ)",
 			settled.GetResourceVersion(), idle.GetResourceVersion(), corrupted.GetResourceVersion(), healed.GetResourceVersion())
 		return ctx
 	}).Assess("Regression: A Stale ResourceVersion Is A Quiet Requeue, Never A Wedge", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
