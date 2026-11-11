@@ -143,6 +143,14 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 	if n := rootsBefore(rec, joined1[0]); n < 2 {
 		t.Errorf("control: expected the Observe that found no release to run before the install's pass, saw %d roots before the act", n)
 	}
+	// unstructured-runtime v1.15.0: the root of a pass that ACTS carries provider_runtime.acted=true,
+	// so the tail sampler keeps it; the Observe that found no release did not act and carries none.
+	if v, ok := rootActed(rootOf(t, rec, joined1[0])); !ok || !v {
+		t.Errorf("the install's root must carry %s=true, got (%v, present %v)", tracecontext.AttrActed, v, ok)
+	}
+	if _, ok := rootActed(firstRoot(t, rec)); ok {
+		t.Errorf("the first pass (an Observe that found no release) acted nothing, so its root must carry no %s", tracecontext.AttrActed)
+	}
 
 	// ARM 2: a new traceparent on the existing composition reaches Observe, which applies.
 	patch := []byte(`{"metadata":{"annotations":{"` + runtimeMeta.AnnotationKeyTraceparent + `":"` + up2 + `"}}}`)
@@ -154,6 +162,9 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 		t.Fatalf("an existing composition's new upstream must be joined ONCE, by Observe's apply; got %s", spanNames(joined2))
 	}
 	waitMarker(ctx, t, cli, name, tracecontext.Canonical(sc2), time.Minute)
+	if v, ok := rootActed(rootOf(t, rec, joined2[0])); !ok || !v {
+		t.Errorf("Observe's apply root must carry %s=true, got (%v, present %v)", tracecontext.AttrActed, v, ok)
+	}
 
 	// Every pass is its own root, never an upstream child; and up1 was never re-joined.
 	for _, s := range rec.Ended() {
@@ -239,6 +250,45 @@ func rootsBefore(rec *tracetest.SpanRecorder, s sdktrace.ReadOnlySpan) int {
 		}
 	}
 	return n
+}
+
+// rootOf is the reconcile root the act links back to (the act -> root link, present because roots
+// are head-sampled here).
+func rootOf(t *testing.T, rec *tracetest.SpanRecorder, act sdktrace.ReadOnlySpan) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, l := range act.Links() {
+		for _, r := range rec.Ended() {
+			if r.Name() == tracecontext.SpanReconcile && r.SpanContext().SpanID() == l.SpanContext.SpanID() {
+				return r
+			}
+		}
+	}
+	t.Fatalf("no recorded reconcile root is linked from act %q (links %d)", act.Name(), len(act.Links()))
+	return nil
+}
+
+// firstRoot is the earliest-started reconcile root.
+func firstRoot(t *testing.T, rec *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
+	t.Helper()
+	var first sdktrace.ReadOnlySpan
+	for _, r := range rec.Ended() {
+		if r.Name() == tracecontext.SpanReconcile && (first == nil || r.StartTime().Before(first.StartTime())) {
+			first = r
+		}
+	}
+	if first == nil {
+		t.Fatal("no reconcile root recorded")
+	}
+	return first
+}
+
+func rootActed(s sdktrace.ReadOnlySpan) (bool, bool) {
+	for _, kv := range s.Attributes() {
+		if kv.Key == tracecontext.AttrActed {
+			return kv.Value.AsBool(), true
+		}
+	}
+	return false, false
 }
 
 func spanNames(spans []sdktrace.ReadOnlySpan) string {
