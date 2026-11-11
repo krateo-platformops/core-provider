@@ -50,7 +50,18 @@ var (
 	buildCommit  = "unknown"
 )
 
+// main exits with run's code. run returns rather than calling os.Exit, so its deferred telemetry
+// and log shutdowns always run and flush buffered spans, metrics and log records; os.Exit inside it
+// skipped every defer (provider-runtime's review of #434, L3).
 func main() {
+	os.Exit(run())
+}
+
+// shutdownTimeout bounds each telemetry shutdown on exit: a collector that is down must not hold the
+// process past its termination grace period.
+const shutdownTimeout = 5 * time.Second
+
+func run() int {
 	envVarPrefix := fmt.Sprintf("%s_PROVIDER", strcase.UpperSnakeCase(providerName))
 
 	debug := flag.Bool("debug", env.Bool(fmt.Sprintf("%s_DEBUG", envVarPrefix), false), "Run with debug logging.")
@@ -65,6 +76,9 @@ func main() {
 	syncPeriod := flag.Duration("sync", env.Duration(fmt.Sprintf("%s_SYNC", envVarPrefix), time.Minute*10), "Controller manager cache re-list period such as 300ms, 1.5h, or 2h45m")
 	pollInterval := flag.Duration("poll", env.Duration(fmt.Sprintf("%s_POLL_INTERVAL", envVarPrefix), time.Minute*3), "Poll interval controls how often an individual resource should be checked for drift.")
 	maxReconcileRate := flag.Int("max-reconcile-rate", env.Int(fmt.Sprintf("%s_MAX_RECONCILE_RATE", envVarPrefix), 5), "The global maximum rate per second at which resources may checked for drift from the desired state.")
+	// #414: off = dry run (dangling controller bindings are logged, not deleted).
+	removeDanglingRBAC := flag.Bool("remove-dangling-controller-rbac", env.Bool(fmt.Sprintf("%s_REMOVE_DANGLING_CONTROLLER_RBAC", envVarPrefix), false),
+		"Delete RoleBindings/ClusterRoleBindings whose only subject is a retired composition controller's absent ServiceAccount (#414). Off: log them only.")
 	leaderElection := flag.Bool("leader-election", env.Bool(fmt.Sprintf("%s_LEADER_ELECTION", envVarPrefix), false), "Use leader election for the controller manager.")
 	metricsEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
 	tracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
@@ -89,10 +103,9 @@ func main() {
 	}
 
 	// Identify ALL OTel signal pipelines (metrics, traces, logs) via the standard OTel env BEFORE any
-	// exporter/handler is built. provider-runtime builds its metrics resource from resource.Default()
-	// and IGNORES cfg.ServiceName, so service.name/version must arrive via OTEL_SERVICE_NAME /
-	// OTEL_RESOURCE_ATTRIBUTES; the log + trace resources reuse the same, keeping all three signals
-	// identical. core-provider is the engine/operator, so it carries no composition-id.
+	// exporter/handler is built. OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES are the one source
+	// every pipeline reads (provider-runtime has honoured cfg.ServiceName too since v1.9.1, unless
+	// OTEL_SERVICE_NAME is set), so metrics, traces and logs carry the same service.name/version. core-provider is the engine/operator, so it carries no composition-id.
 	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
 	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects:
 	// the stamp describes the image that is actually running, whereas the env var describes what the
@@ -120,14 +133,17 @@ func main() {
 	logsShutdown, err := coretelemetry.SetupOTLPLogs(context.Background(), *logsEnabled, *metricsServiceName)
 	if err != nil {
 		log.Default().Printf("cannot initialize OpenTelemetry logs: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Emit logs as one JSON object per line in the OTel log model (RFC3339Nano UTC `timestamp`,
 	// SeverityNumber, service.name, trace correlation) for logs-ingester, AND — when OTEL_LOGS_ENABLED
 	// — tee them to the OTLP pipeline. Shared handler from provider-runtime; see
 	// docs/log-ingester-compatibility.md.
-	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
+	// slog-backed, not logr-backed: only a slog Logger can carry a context, so logging.WithContext(log,
+	// ctx) at the reconcile sites adds trace_id/span_id to their records (provider-runtime v1.13.0;
+	// review of #434, L1). The logr-backed form silently ignored WithContext.
+	log := logging.NewSlogLogger(*slog.New(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
 
 	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this pod
 	// running", without needing an OTel pipeline or a metrics scrape (#105).
@@ -137,7 +153,9 @@ func main() {
 	ctrl.SetLogger(logr.FromSlogHandler(logging.NewOTelHandler(slog.LevelInfo, os.Stderr, *metricsServiceName)))
 
 	defer func() {
-		if err := logsShutdown(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := logsShutdown(ctx); err != nil {
 			log.Error(err, "Cannot shutdown OpenTelemetry logs")
 		}
 	}()
@@ -156,39 +174,35 @@ func main() {
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
 
+	// Metrics AND traces come from provider-runtime's telemetry.Setup since v1.14 (#395, its
+	// design-tracing §11.4): one TracerProvider owns the global, and the reconciler's reconcile /
+	// observe / create / update / delete spans parent core-provider's own
+	// compositiondefinition.observe span (coretelemetry.Tracer() uses the global). Setup installs the
+	// W3C propagator on every call, tracing on or off, which core-provider's SetupTracing did before.
+	// Tracing exports OTLP/HTTP only: with OTEL_TRACING_ENABLED and protocol grpc, Setup refuses to
+	// start rather than send HTTP to a gRPC port.
 	telemetryMetrics, telemetryShutdown, err := telemetry.Setup(context.Background(), log, telemetry.Config{
 		Enabled:        telemetryEnabled,
+		TracingEnabled: *tracingEnabled,
 		ServiceName:    *metricsServiceName,
 		ExportInterval: telemetryExportInterval,
 	})
 	if err != nil {
-		log.Error(err, "Cannot initialize OpenTelemetry metrics")
-		os.Exit(1)
+		log.Error(err, "Cannot initialize OpenTelemetry telemetry")
+		return 1
 	}
 	defer func() {
-		if err := telemetryShutdown(context.Background()); err != nil {
-			log.Error(err, "Cannot shutdown OpenTelemetry metrics")
-		}
-	}()
-
-	// Distributed reconcile traces (gated OTEL_TRACING_ENABLED, default off). Reuses the
-	// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES set above, so the trace + metrics resources
-	// are identical (same service.name/version).
-	tracingShutdown, err := coretelemetry.SetupTracing(context.Background(), log, *tracingEnabled)
-	if err != nil {
-		log.Error(err, "Cannot initialize OpenTelemetry tracing")
-		os.Exit(1)
-	}
-	defer func() {
-		if err := tracingShutdown(context.Background()); err != nil {
-			log.Error(err, "Cannot shutdown OpenTelemetry tracing")
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := telemetryShutdown(ctx); err != nil {
+			log.Error(err, "Cannot shutdown OpenTelemetry telemetry")
 		}
 	}()
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		log.Error(err, "Cannot get API server rest config")
-		os.Exit(1)
+		return 1
 	}
 
 	// "0" is controller-runtime's value for "no probe server".
@@ -219,7 +233,7 @@ func main() {
 	})
 	if err != nil {
 		log.Error(err, "Cannot create controller manager")
-		os.Exit(1)
+		return 1
 	}
 
 	// Probes (#333). Liveness answers from the probe server alone, so a slow or failing reconcile
@@ -229,7 +243,7 @@ func main() {
 	// anything satisfied.
 	if err := health.Register(mgr); err != nil {
 		log.Error(err, "Cannot register health probes")
-		os.Exit(1)
+		return 1
 	}
 
 	o := controller.Options{
@@ -243,30 +257,32 @@ func main() {
 
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Error(err, "Cannot add APIs to scheme")
-		os.Exit(1)
+		return 1
 	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
-		ControllerOptions: o,
-		Metrics:           telemetryMetrics,
-		Pluralizer:        pluralizer.New(false),
+		ControllerOptions:  o,
+		Metrics:            telemetryMetrics,
+		Pluralizer:         pluralizer.New(false),
+		RemoveDanglingRBAC: *removeDanglingRBAC,
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
-		os.Exit(1)
+		return 1
 	}
 	if err := kubernetestargets.Setup(mgr, kubernetestargets.Options{
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup KubernetesTarget controller")
-		os.Exit(1)
+		return 1
 	}
 	if err := compositionmirror.Setup(mgr, compositionmirror.Options{
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup composition mirror controller")
-		os.Exit(1)
+		return 1
 	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "Cannot start controller manager")
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

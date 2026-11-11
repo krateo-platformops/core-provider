@@ -56,7 +56,6 @@ var reservedStatusFields = map[string]struct{}{
 	"healthEvaluatedChildren": {},
 	"managedChildrenCount":    {},
 	"unreadableChildrenCount": {},
-	"lastReconcileTime":       {},
 	"conditions":              {},
 	"observedGeneration":      {},
 	// The resolved helm release name. Reserved as well as declared because a blueprint author

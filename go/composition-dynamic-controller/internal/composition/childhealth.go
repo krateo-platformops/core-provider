@@ -519,7 +519,13 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 		return readyOutcome{reason: "Unavailable", message: v.message}
 	case "Creating":
 		return readyOutcome{reason: "Creating", message: v.message}
-	case condition.ReasonZeroEvidence, ReasonInventoryNotRecorded:
+	case condition.ReasonZeroEvidence, ReasonInventoryNotRecorded, ReasonChildrenForbidden:
+		// ChildrenForbidden JOINED THIS ARM LATE (#430). The rollup has returned it since #318, but
+		// this switch had no case for it, so it fell to the Available tail below: a composition whose
+		// every child read was refused reported Ready=True/Available, the opposite of the Unknown that
+		// #318 decided and installer allowlisted. The tests checked the rollup's reason, never what
+		// reached the condition; TestEveryReasonTheRollupReturnsIsHandledByResolveReady now walks the
+		// rollup's reasons, the domain the stampReady guard never covered.
 		// A blueprint that projected ready=TRUE is honoured here and the composition is Available:
 		// the author's health RESTAction IS evidence, and it is better evidence than the generic
 		// rollup's, so a projection turns zero evidence into one positive signal. This branch is
@@ -540,6 +546,9 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 		if v.reason == ReasonInventoryNotRecorded {
 			return readyOutcome{reason: ReasonInventoryNotRecorded, message: v.message}
 		}
+		if v.reason == ReasonChildrenForbidden {
+			return readyOutcome{reason: ReasonChildrenForbidden, message: v.message}
+		}
 		return readyOutcome{reason: condition.ReasonZeroEvidence, message: v.message}
 	}
 	// Available. The base is the caller's message, or the author's projected message when they
@@ -555,8 +564,8 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 	// ten minutes before one such condition's own timestamp.
 	//
 	// A condition's message describes the STATE; the phase that happened to observe it is not part
-	// of the state. Which phase ran is already recorded in events and logs, and freshness now has
-	// its own field (status.lastReconcileTime), so nothing is lost by making this stable.
+	// of the state. Which phase ran is already recorded in events and logs, and per-reconcile
+	// liveness is in the cdc's `reconcile` trace spans (#439), so nothing is lost by making this stable.
 	msg := defaultMsg
 	if p.present && p.message != "" {
 		msg = p.message
@@ -577,7 +586,7 @@ func resolveReadyVerdict(p projectedHealth, defaultMsg string, v healthVerdict) 
 // not a guard.
 //
 // If you are tempted to add a phase-specific message back: the information you want is in the events
-// and the logs, and per-reconcile freshness is in status.lastReconcileTime. A condition message that
+// and the logs, and per-reconcile liveness is in the `reconcile` trace spans (#439). A condition message that
 // changes without the condition changing destroys the only thing LastTransitionTime is for.
 const readyMessageAvailable = "Composition is up-to-date"
 
@@ -752,10 +761,120 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 		// readiness, so existence genuinely IS health — not a gap, and not counted as one.
 		return childHealthy
 	default:
-		// A CUSTOM resource nobody told us how to read. Not healthy-by-existence — unevaluated.
-		// mongodbcommunity reporting `.status.phase: Failed` with no conditions lands here (#121).
+		// A third-party CUSTOM resource. Read only what it publishes in a documented shape
+		// (thirdPartyReady); anything else stays unevaluated, never healthy-by-existence.
+		// mongodbcommunity reporting `.status.phase: Failed` with no conditions lands there (#121).
+		return thirdPartyReady(group, obj)
+	}
+}
+
+// thirdPartyReady classifies a custom resource outside *.krateo.io and the native groups (#399).
+// Until #399 every such child was childUnevaluated, so a kagent Agent at Ready=True/DeploymentReady,
+// a CloudNativePG Cluster, a Keycloak and an ExternalSecret were never read, and on krateo-057 the
+// model-configs composition (three kagent ModelConfigs, each Accepted=True) reported ZeroEvidence.
+//
+// Two arms, and only two:
+//
+//  1. GENERIC: a `Ready` condition, the Kubernetes convention for "this resource is serving". True
+//     and current is healthy; anything else is converging. Not failed: a third party's reasons
+//     (ClusterIsNotReady, SecretSyncedError, ...) are its own vocabulary, and nothing here can
+//     tell a transient one from a permanent one, so this states only "not ready". krateoReady's
+//     failure reasons are rest-dynamic-controller's and the runtimes', never a third party's.
+//  2. KIND-SPECIFIC, only where a kind has no `Ready` but documents its readiness condition, with
+//     the citation beside it (thirdPartyKindReady). `Accepted` is NEVER read generically: in
+//     Gateway API, Accepted is not Programmed.
+//
+// No conditions, or conditions with neither, stay unevaluated.
+//
+// STALENESS: a True written for an older generation says nothing about the current spec, so it is
+// read as converging. The condition's own observedGeneration is checked first (CloudNativePG writes
+// it only there), then status.observedGeneration (Keycloak, kagent v1alpha2); when neither exists no
+// gate applies, rather than refusing a resource that never publishes one.
+func thirdPartyReady(group string, obj *unstructured.Unstructured) childState {
+	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if !found {
 		return childUnevaluated
 	}
+	if ready, ok := conditionByType(conds, "Ready"); ok {
+		switch {
+		case staleCondition(obj, ready):
+			return childConverging
+		case stringField(ready, "status") == "True":
+			return childHealthy
+		default:
+			return childConverging
+		}
+	}
+	return thirdPartyKindReady(group, obj, conds)
+}
+
+// thirdPartyKindReady holds the kind-specific arms of thirdPartyReady. Each one cites the code that
+// writes the condition it reads.
+func thirdPartyKindReady(group string, obj *unstructured.Unstructured, conds []any) childState {
+	switch {
+	case group == "kagent.dev" && obj.GetKind() == "ModelConfig":
+		// kagent ModelConfig has no Ready condition. Its controller writes `Accepted`:
+		//   - v1alpha2, kagent v0.7.0 go/internal/controller/reconciler/reconciler.go
+		//     reconcileModelConfigStatus: Accepted=True/ModelConfigReconciled, or
+		//     Accepted=False/ModelConfigReconcileFailed when the API-key Secret cannot be read.
+		//     observedGeneration only top-level. This is the shape krateo-057 shows.
+		//   - v1alpha3, kagent v1.0.0 go/core/internal/controller/modelconfig.go: Accepted plus
+		//     ResolvedRefs (the Secret references), each with its own observedGeneration.
+		// Healthy only when Accepted is True and current, and ResolvedRefs, where present, is True.
+		accepted, ok := conditionByType(conds, "Accepted")
+		if !ok {
+			return childUnevaluated
+		}
+		if staleCondition(obj, accepted) || stringField(accepted, "status") != "True" {
+			return childConverging
+		}
+		if refs, ok := conditionByType(conds, "ResolvedRefs"); ok &&
+			(staleCondition(obj, refs) || stringField(refs, "status") != "True") {
+			return childConverging
+		}
+		return childHealthy
+	}
+	return childUnevaluated
+}
+
+// conditionByType returns the first condition of the given type.
+func conditionByType(conds []any, typ string) (map[string]any, bool) {
+	for _, c := range conds {
+		if cm, ok := c.(map[string]any); ok && stringField(cm, "type") == typ {
+			return cm, true
+		}
+	}
+	return nil, false
+}
+
+// staleCondition reports whether cond was written for an older generation of obj: its own
+// observedGeneration if it carries one, else status.observedGeneration, else (neither published)
+// never stale.
+func staleCondition(obj *unstructured.Unstructured, cond map[string]any) bool {
+	gen := obj.GetGeneration()
+	if gen == 0 {
+		return false
+	}
+	if og, ok := int64Field(cond, "observedGeneration"); ok {
+		return og != gen
+	}
+	if og, found, _ := unstructured.NestedInt64(obj.Object, "status", "observedGeneration"); found {
+		return og != gen
+	}
+	return false
+}
+
+// int64Field reads an integer field of an unstructured map, whichever numeric type decoding left.
+func int64Field(m map[string]any, key string) (int64, bool) {
+	switch v := m[key].(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
 }
 
 // podReady classifies a bare Pod. Most Pods in a composition belong to a Deployment/StatefulSet and

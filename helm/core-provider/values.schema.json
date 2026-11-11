@@ -565,7 +565,7 @@
         },
         "env": {
           "type": "object",
-          "title": "Environment variables, rendered into each CDC's ConfigMap and read via envFrom. GOMEMLIMIT is REFUSED here: the deployment sets it as a container env var, which takes precedence over envFrom, so a value set here would be silently ignored. Use cdc.goMemLimit instead.",
+          "title": "Environment variables, rendered into each CDC's ConfigMap and read via envFrom. GOMEMLIMIT is REFUSED here: the deployment sets it as a container env var, which takes precedence over envFrom, so a value set here would be silently ignored. Use cdc.goMemLimit instead. COMPOSITION_CONTROLLER_HELM_TIMEOUT is refused too: cdc.helmTimeout renders that key, and a second copy would make a duplicate key in the ConfigMap. Use cdc.helmTimeout.",
           "additionalProperties": {
             "type": "string"
           },
@@ -586,8 +586,17 @@
             "COMPOSITION_CONTROLLER_DEBUG": "false"
           },
           "not": {
-            "required": [
-              "GOMEMLIMIT"
+            "anyOf": [
+              {
+                "required": [
+                  "GOMEMLIMIT"
+                ]
+              },
+              {
+                "required": [
+                  "COMPOSITION_CONTROLLER_HELM_TIMEOUT"
+                ]
+              }
             ]
           }
         },
@@ -595,6 +604,12 @@
           "type": "string",
           "title": "Fullname override",
           "default": ""
+        },
+        "helmTimeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+          "title": "helm Timeout for every install/upgrade/rollback/uninstall a CDC runs, as a Go duration (e.g. 15m, 1h30m). helm applies it to EACH hook and each resource wait, not to the whole operation: a hook that does not finish within it fails the operation instead of holding it forever (#410). Set it above the slowest single hook. Zero is refused: it would mean no bound.",
+          "default": "15m"
         },
         "goMemLimit": {
           "type": "string",
@@ -856,6 +871,18 @@
           "type": "boolean",
           "title": "Enable leader election (keeps the old and new pod of a rolling update from both reconciling; required for replicaCount>=2)",
           "default": true
+        }
+      }
+    },
+    "danglingControllerRBAC": {
+      "type": "object",
+      "title": "Bindings left by retired composition controllers (#414)",
+      "additionalProperties": false,
+      "properties": {
+        "remove": {
+          "type": "boolean",
+          "title": "Delete RoleBindings/ClusterRoleBindings whose only subject is a retired controller's absent ServiceAccount (false: log them only, a dry run)",
+          "default": false
         }
       }
     },

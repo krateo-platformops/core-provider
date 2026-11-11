@@ -65,11 +65,14 @@ var (
 )
 
 const (
-	crdPath       = "../../../crds"
-	testdataPath  = "../../../testdata/test"
-	manifestsPath = "./testdata/manifests"
+	crdPath      = "../../../crds"
+	testdataPath = "../../../testdata/test"
 
 	namespace = "test-system"
+
+	// mgmtNamespace is where every local composition controller lives (#313). Deliberately NOT
+	// namespace: with the two equal, every placement bug would be invisible.
+	mgmtNamespace = "krateo-mgmt-test"
 )
 
 func TestMain(m *testing.M) {
@@ -82,6 +85,16 @@ func TestMain(m *testing.M) {
 	restore := e2e.PinKubeconfig("cp-compositiondefinitions")
 
 	clusterName = "krateo-core-provider-controller"
+	cdcImage := os.Getenv(cdcImageEnv)
+	if cdcImage == "" {
+		restore()
+		fmt.Fprintf(os.Stderr, "%s is required: the suite runs the composition-dynamic-controller built from this checkout.\n"+
+			"  docker build -t composition-dynamic-controller:dev go/composition-dynamic-controller\n"+
+			"  %s=composition-dynamic-controller:dev go test -tags=integration ./...\n", cdcImageEnv, cdcImageEnv)
+		os.Exit(1)
+	}
+	// Setup refuses to start without it (#313); the chart passes it as CDC_NAMESPACE.
+	ManagementNamespace = mgmtNamespace
 	testenv = env.New()
 	kindCluster := kind.NewCluster(clusterName)
 
@@ -105,7 +118,9 @@ func TestMain(m *testing.M) {
 	testenv.Setup(
 		cleanAssetFolder,
 		createCluster,
+		envfuncs.LoadImageToCluster(clusterName, cdcImage),
 		e2e.CreateNamespace(namespace),
+		e2e.CreateNamespace(mgmtNamespace),
 
 		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
 			r, err := resources.New(cfg.Client().RESTConfig())
@@ -114,79 +129,12 @@ func TestMain(m *testing.M) {
 			}
 			r.WithNamespace(namespace)
 
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-deployment"), os.ModePerm)
+			// The chart's own cdc templates, with the commit's own cdc image (#404). See cdcImageEnv.
+			written, err := renderChartAssets(filepath.Join(os.TempDir(), "assets"), mgmtNamespace, cdcImage)
 			if err != nil {
-				return ctx, err
+				return ctx, fmt.Errorf("render the chart's cdc assets: %w", err)
 			}
-			err = os.Link(filepath.Join(manifestsPath, "deployment.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-deployment", "deployment.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-configmap"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "configmap.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-configmap", "configmap.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "json-schema-configmap"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "json-schema-configmap.yaml"), filepath.Join(os.TempDir(), "assets", "json-schema-configmap", "configmap.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-service"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "service.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-service", "service.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-rbac"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "clusterrole.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "clusterrole.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "clusterrolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "clusterrolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "authn-serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "authn-serviceaccount.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "serviceaccount.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "serviceaccount.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "secret-role.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "secret-role.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "secret-rolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "secret-rolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "compositiondefinition-role.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "compositiondefinition-role.yaml"))
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "rbac", "compositiondefinition-rolebinding.yaml"), filepath.Join(os.TempDir(), "assets", "cdc-rbac", "compositiondefinition-rolebinding.yaml"))
-			if err != nil {
-				return ctx, err
-			}
+			fmt.Printf("rendered %d cdc asset files from %s with %s\n", len(written), chartDir, cdcImage)
 
 			// Install CRDs
 			err = decoder.DecodeEachFile(
@@ -534,6 +482,12 @@ func TestController(t *testing.T) {
 		return ctx
 	}).Assess("Test Reclaim a leaked per-version controller (#327)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessReclaimLeaked(ctx, t, cfg, r)
+	}).Assess("Test #313: the migration is stop-before-start", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		r, err := resources.New(cfg.Client().RESTConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return assessMigrationIsStopBeforeStart(ctx, t, cfg, r)
 	}).Assess("Test Re-home: the second definition follows", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeFollower(ctx, t, cfg, r)
 	}).Assess("Test ApiRef RBAC condition", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
@@ -571,6 +525,12 @@ func TestController(t *testing.T) {
 		return ctx
 	}).Assess("Test Re-home: deleting the original hands the controller over", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		return assessRehomeHandover(ctx, t, cfg, r)
+	}).Assess("Test #313: deleting the owner's namespace finishes with no manual finalizer removal", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		r, err := resources.New(cfg.Client().RESTConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return assessNamespaceDeleteFinishes(ctx, t, cfg, r)
 	}).Feature()
 
 	testenv.Test(t, f)

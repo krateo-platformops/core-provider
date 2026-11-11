@@ -219,11 +219,23 @@ type ControllerConfig struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
 	ResyncInterval *string `json:"resyncInterval,omitempty"`
 
+	// Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
+	// INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
+	// render the same dedicated controller, byte for byte. It exists first so the API is settled before
+	// the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
+	// the union of its members' permissions, and names let Kinds with similar permissions share one.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Pool *string `json:"pool,omitempty"`
+
 	// ScaleToZero runs this Kind's controller at zero replicas while no instance of it exists, and
 	// wakes it when the first one appears (#393). Off when unset: the controller runs at the chart's
 	// replica count, as before. Opting in costs one metadata watch on this Kind's instances, which is
 	// what wakes it, so it is per definition rather than global. While idle the definition reports
-	// Ready=True with reason Idle.
+	// Ready=True and ControllerActive=False, both with reason ScaledToZero (plumbing conditions, the
+	// strings shared with oasgen-provider).
 	// +optional
 	ScaleToZero *bool `json:"scaleToZero,omitempty"`
 
@@ -292,6 +304,30 @@ type ApiReference struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Extras *apiextensionsv1.JSON `json:"extras,omitempty"`
+
+	// Delegation lets this definition's composition controller act on behalf of a caller through
+	// authn's POST /delegate (#405). It is rendered onto the controller's authn ServiceAccount mapping
+	// (spec.delegation) on every apply; a value set by hand on the mapping is replaced. Absent means no
+	// delegation key on the mapping at all, which authn answers with 403 DelegationNotAllowed.
+	//
+	// The bounds are authn's own (serviceaccounts.serviceaccount.authn.krateo.io): if this field
+	// accepted more, the apiserver would reject the mapping's update instead, far from this object.
+	// Enabling it on a real definition is a platform decision, not a default.
+	// +optional
+	Delegation *ApiRefDelegation `json:"delegation,omitempty"`
+}
+
+// ApiRefDelegation mirrors authn's ServiceAccount mapping spec.delegation, with its bounds.
+type ApiRefDelegation struct {
+	// Allowed enables delegation for the controller's identity. Required whenever delegation is set.
+	Allowed bool `json:"allowed"`
+
+	// MaxDepth limits how deep a delegation chain may go. Unset leaves authn's own default (3, applied
+	// in authn's code, not by its CRD), so it is rendered only when set.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	MaxDepth *int32 `json:"maxDepth,omitempty"`
 }
 
 // StatusFieldMapping is one projected status field (snowplow widgetDataTemplate item).

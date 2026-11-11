@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
@@ -109,6 +108,17 @@ func setUnavailableStatus(mg *unstructured.Unstructured, message string, force b
 // #119's contradictory-status comparison.
 func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force bool) error {
 	return setReadyCondition(mg, condition.ZeroEvidence(), message, force)
+}
+
+// setChildrenForbiddenStatus stamps Ready=Unknown/ChildrenForbidden (#318, #430). Built here for the
+// same reason as setInventoryNotRecordedStatus: only this rollup can produce it.
+func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionUnknown,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonChildrenForbidden,
+	}, message, force)
 }
 
 // setInventoryNotRecordedStatus stamps Ready=Unknown/InventoryNotRecorded.
@@ -288,29 +298,17 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		}
 	}
 
-	// status.lastReconcileTime — the LIVENESS signal, written on EVERY reconcile whether or not
-	// anything changed (#298).
+	// NO PER-RECONCILE TIMESTAMP HERE, deliberately (#439). status.lastReconcileTime used to be
+	// written on every reconcile as a liveness signal (#298). It cost a real status write per
+	// reconcile (~1.4/s on 057 at idle), and every one of those woke every watcher of the object for
+	// nothing. No code read it. Without it, an idle reconcile's unconditional updateStatus carries
+	// a byte-identical status, and the apiserver writes nothing: resourceVersion stays put. The
+	// integration suite's "Idle" assessment proves that.
 	//
-	// It replaces an accidental one. The Ready condition's LastTransitionTime used to advance every
-	// reconcile, which operators read as freshness — but it moved for a DEFECTIVE reason: Observe,
-	// Create and Update supplied three different messages for one Available state, so
-	// setReadyCondition's `cur.Message == message` guard could never fire while the phases
-	// alternated. Unifying the message (readyMessageAvailable) makes that timestamp honest, and
-	// honest means STILL — it now moves only when readiness actually changes. This field is what
-	// `kubectl get` can still show to answer "is the controller alive".
-	//
-	// UNCONDITIONAL on purpose, and it is free: every caller of setStatus follows it with an
-	// unconditional updateStatus (composition.go:617 in Observe, :882 in Create, :1106 in
-	// Update), so the status subresource is already written once per reconcile. This adds a field to
-	// a request that was happening anyway, not a request.
-	//
-	// It is a change signal for NOTHING: do not gate anything on it, and do not diff it. Two
-	// controllers writing one field is how #273's oscillation started, and a field that changes
-	// every reconcile would make any content-comparison a permanent false positive.
-	err = maps.SetNestedField(mg.Object, time.Now().UTC().Format(time.RFC3339), "status", "lastReconcileTime")
-	if err != nil {
-		return fmt.Errorf("setting last reconcile time in status: %w", err)
-	}
+	// Liveness lives in traces: every reconcile is a `reconcile` span carrying k8s.object.namespace
+	// and k8s.object.name, so "when was this composition last reconciled" is a max(Timestamp) query
+	// (see #439 for it). Do not add a field here that changes on every pass. It brings the write
+	// back, and it turns every content comparison of this status into a permanent false positive.
 
 	// Project the declarative status fields (statusDataTemplate) and observedGeneration.
 	// Built-in sources self/spec/status come from mg; helm is built here. Projection is
@@ -499,6 +497,11 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setCreatingStatus(mg, out.message, force)
 	case condition.ReasonZeroEvidence:
 		return setZeroEvidenceStatus(mg, out.message, force)
+	case ReasonChildrenForbidden:
+		// Unknown, like ZeroEvidence, with its own reason: nothing was assessed AND at least one read
+		// was refused, a gap in the RBAC this controller generates (#318). installer allowlisted it
+		// (their #646). Unreachable before #430: resolveReady dropped the rollup's reason.
+		return setChildrenForbiddenStatus(mg, out.message, force)
 	case ReasonInventoryNotRecorded:
 		// Unknown, like ZeroEvidence, and with a DIFFERENT reason so a consumer can tell "nothing
 		// is readable" from "nothing was recorded". See ReasonInventoryNotRecorded for why those

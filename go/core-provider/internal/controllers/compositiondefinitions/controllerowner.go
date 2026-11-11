@@ -377,9 +377,34 @@ func (e *external) controllerDeployedIn(ctx context.Context, namespace string, g
 // share every controller object by name, so there is nothing of cr's own to remove and nothing to
 // rebind: the successor's next deploy rewrites them.
 func (e *external) handOverController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, chartInfo *compositiondefinitionsv1alpha1.ChartInfo, gvr schema.GroupVersionResource, successor *compositiondefinitionsv1alpha1.CompositionDefinition, log logging.Logger) error {
-	if successor.Namespace == cr.Namespace {
-		log.Debug("Composition controller stays: the next owner shares this namespace",
-			"gvr", gvr.String(), "to", successor.Namespace+"/"+successor.Name)
+	// #313. The question was always "do the two share a controller PLACEMENT?". Before #313 that was
+	// the same as sharing a namespace; now every local definition's controller lives in the
+	// management namespace, so a hand-over moves nothing. The one thing cr can still own alone is a
+	// LEGACY pre-#313 copy in its own namespace, and only when its successor is elsewhere (in the same
+	// namespace that copy is shared, and the successor's relocation removes it).
+	if sharePlacement(cr, successor) {
+		legacy := ownLegacyPlacement(cr, successor)
+		if legacy == "" {
+			log.Debug("Composition controller stays: the next owner shares its placement",
+				"gvr", gvr.String(), "to", successor.Namespace+"/"+successor.Name, "placement", controllerNamespace(cr))
+			return nil
+		}
+		if present, err := e.controllerDeployedIn(ctx, legacy, gvr); err != nil || !present {
+			return err
+		}
+		opts := e.retiredUndeployOptions(cr, chartInfo, gvr, legacy)
+		opts.KeepShared = true
+		if err := deploy.Undeploy(ctx, e.kube, opts); err != nil {
+			return fmt.Errorf("error removing the legacy %s controller from %s on hand-over to %s/%s: %w",
+				gvr.String(), legacy, successor.Namespace, successor.Name, err)
+		}
+		if _, err := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
+			DynamicClient: e.dynamic, Namespace: legacy, NewNamespace: controllerNamespace(successor),
+			OldGVR: gvr, NewGVR: gvr,
+		}); err != nil {
+			return fmt.Errorf("error re-subjecting derived RBAC from %s to %s: %w", legacy, controllerNamespace(successor), err)
+		}
+		log.Debug("Removed the legacy controller copy on hand-over", "gvr", gvr.String(), "from", legacy)
 		return nil
 	}
 	if err := deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
@@ -388,6 +413,7 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 		KubeClient:             e.kube,
 		GVR:                    gvr,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		SkipCRD:                true,
 		KeepShared:             true,
 		DynamicClient:          e.dynamic,
@@ -403,8 +429,8 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 
 	repaired, err := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
 		DynamicClient: e.dynamic,
-		Namespace:     cr.Namespace,
-		NewNamespace:  successor.Namespace,
+		Namespace:     controllerNamespace(cr),
+		NewNamespace:  controllerNamespace(successor),
 		OldGVR:        gvr,
 		NewGVR:        gvr,
 	})
@@ -499,10 +525,19 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 		return false, nil
 	}
 
-	sharesNS := successor != nil && successor.Namespace == cr.Namespace
-	own := false
-	if !sharesNS {
-		own, err = e.controllerDeployedIn(ctx, cr.Namespace, gvr)
+	// #313: "shares" means shares a controller PLACEMENT. A legacy copy cr owns alone is still
+	// cr's own, and must be gone before the finalizer drops, or it would keep reconciling beside the
+	// successor's controller.
+	legacyOwn := false
+	if l := ownLegacyPlacement(cr, successor); l != "" {
+		if legacyOwn, err = e.controllerDeployedIn(ctx, l, gvr); err != nil {
+			return false, err
+		}
+	}
+	sharesNS := successor != nil && sharePlacement(cr, successor) && !legacyOwn
+	own := legacyOwn
+	if !sharesNS && !legacyOwn {
+		own, err = e.controllerDeployedIn(ctx, controllerNamespace(cr), gvr)
 		if err != nil {
 			return false, err
 		}
@@ -554,16 +589,20 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 
 	if cr.Status.CurrentGVK() != gvk {
 		log.Debug("Follower status not yet on this version", "status", cr.Status.CurrentGVK().String(), "chart", gvk.String())
+		markUpdatePending(cr, "follower status not yet on "+gvk.Version)
 		return notUpToDate, nil
 	}
-	if owner.Namespace != cr.Namespace {
-		own, err := e.controllerDeployedIn(ctx, cr.Namespace, gvr)
+	// #313: a follower can only own a LEGACY copy, in its own namespace. In the management namespace
+	// the controller there is the owner's, shared, and must not be read as the follower's.
+	if legacy := ownLegacyPlacement(cr, owner); legacy != "" {
+		own, err := e.controllerDeployedIn(ctx, legacy, gvr)
 		if err != nil {
 			return reconciler.ExternalObservation{}, err
 		}
 		if own {
 			log.Debug("Follower still runs its own composition controller; handing it over",
 				"gvr", gvr.String(), "owner", owner.Namespace+"/"+owner.Name)
+			markUpdatePending(cr, "handing its own composition controller over to "+owner.Namespace+"/"+owner.Name)
 			return notUpToDate, nil
 		}
 	}
@@ -579,6 +618,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 			}
 			if len(stale.Items) > 0 {
 				log.Debug("Follower's compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				markUpdatePending(cr, fmt.Sprintf("%d follower compositions pending migration from %s", len(stale.Items), vi.Version))
 				return notUpToDate, nil
 			}
 		}
@@ -659,4 +699,23 @@ func enqueueSiblingDefinitions(cli client.Client) handler.MapFunc {
 		}
 		return reqs
 	}
+}
+
+// sharePlacement reports whether a and b's controllers live in the same place (#313), which is the
+// question every hand-over decision asks. For two local definitions it is now always true: both
+// controllers live in the management namespace.
+func sharePlacement(a, b *compositiondefinitionsv1alpha1.CompositionDefinition) bool {
+	return b != nil && controllerNamespace(a) == controllerNamespace(b)
+}
+
+// ownLegacyPlacement is the namespace of a pre-#313 controller copy that cr owns ALONE with respect
+// to other: cr's own namespace, when cr is local and outside the management namespace, and other
+// is absent or elsewhere. In the same namespace a legacy copy is shared with other (same name), so
+// it is not cr's alone. "" when there is no such placement.
+func ownLegacyPlacement(cr, other *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	legacy := legacyControllerNamespace(cr)
+	if legacy == "" || (other != nil && other.Namespace == cr.Namespace) {
+		return ""
+	}
+	return legacy
 }

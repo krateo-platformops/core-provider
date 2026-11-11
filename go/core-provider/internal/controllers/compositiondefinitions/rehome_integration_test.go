@@ -78,6 +78,20 @@ func rehomeControllerIn(ctx context.Context, t *testing.T, r *resources.Resource
 	return true
 }
 
+// rehomeControllerUID is the controller Deployment's UID in the management namespace. #313: an
+// ownership hand-over must not replace the controller, so the UID survives every hand-over.
+func rehomeControllerUID(ctx context.Context, t *testing.T, r *resources.Resources) types.UID {
+	t.Helper()
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, rehomeShared+"-controller", mgmtNamespace, &dep); err != nil {
+		t.Fatalf("controller deployment in the management namespace %s: %v", mgmtNamespace, err)
+	}
+	return dep.UID
+}
+
+// rehomeOwnerUID is the controller's UID observed while the original definition still owned it.
+var rehomeOwnerUID types.UID
+
 func rehomeBindingNamespace(ctx context.Context, t *testing.T, r *resources.Resources) string {
 	t.Helper()
 	var crb rbacv1.ClusterRoleBinding
@@ -150,15 +164,19 @@ func assessRehomeFollower(ctx context.Context, t *testing.T, cfg *envconf.Config
 	if rehomeControllerIn(ctx, t, r, rehomeNamespace) {
 		t.Fatalf("follower deployed its own controller in %s: two controllers on one Kind+version", rehomeNamespace)
 	}
-	if !rehomeControllerIn(ctx, t, r, namespace) {
-		t.Fatalf("owner's controller in %s is gone", namespace)
+	if rehomeControllerIn(ctx, t, r, namespace) {
+		t.Fatalf("a controller is in the owner's namespace %s: #313 places it in %s", namespace, mgmtNamespace)
 	}
+	if !rehomeControllerIn(ctx, t, r, mgmtNamespace) {
+		t.Fatalf("owner's controller in the management namespace %s is gone", mgmtNamespace)
+	}
+	rehomeOwnerUID = rehomeControllerUID(ctx, t, r)
 
 	// No ping-pong over the shared ClusterRoleBinding: across two poll intervals it keeps naming
 	// the owner's ServiceAccount.
 	for i := 0; i < 9; i++ {
-		if got := rehomeBindingNamespace(ctx, t, r); got != namespace {
-			t.Fatalf("shared ClusterRoleBinding subject moved to %q while %s still owns the controller", got, namespace)
+		if got := rehomeBindingNamespace(ctx, t, r); got != mgmtNamespace {
+			t.Fatalf("shared ClusterRoleBinding subject is %q, want the management namespace %s", got, mgmtNamespace)
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -168,13 +186,24 @@ func assessRehomeFollower(ctx context.Context, t *testing.T, cfg *envconf.Config
 func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config, r *resources.Resources) context.Context {
 	dyn := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
 
-	// "Test Delete" removed the original: the controller now runs in the new namespace only.
-	rehomeEventually(t, 3*time.Minute, "the controller to move to "+rehomeNamespace, func() bool {
-		return rehomeControllerIn(ctx, t, r, rehomeNamespace) && !rehomeControllerIn(ctx, t, r, namespace)
+	// "Test Delete" removed the original. #313: the hand-over no longer moves the controller. It
+	// stays in the management namespace as the SAME object, and neither definition namespace holds one.
+	rehomeEventually(t, 3*time.Minute, "the moved definition to own the controller", func() bool {
+		var cd v1alpha1.CompositionDefinition
+		if err := r.Get(ctx, rehomeCDName, rehomeNamespace, &cd); err != nil {
+			return false
+		}
+		return !strings.Contains(cd.GetCondition(rtv1.TypeReady).Message, "run by CompositionDefinition")
 	})
-	rehomeEventually(t, time.Minute, "the shared ClusterRoleBinding to name the new controller", func() bool {
-		return rehomeBindingNamespace(ctx, t, r) == rehomeNamespace
-	})
+	if got := rehomeControllerUID(ctx, t, r); got != rehomeOwnerUID {
+		t.Fatalf("the hand-over replaced the controller (UID %s -> %s); #313 keeps it in place", rehomeOwnerUID, got)
+	}
+	if rehomeControllerIn(ctx, t, r, rehomeNamespace) || rehomeControllerIn(ctx, t, r, namespace) {
+		t.Fatalf("a controller appeared in a definition namespace (%s or %s)", rehomeNamespace, namespace)
+	}
+	if got := rehomeBindingNamespace(ctx, t, r); got != mgmtNamespace {
+		t.Fatalf("shared ClusterRoleBinding subject is %q after the hand-over, want %s", got, mgmtNamespace)
+	}
 	var cr rbacv1.ClusterRole
 	if err := r.Get(ctx, rehomeShared, "", &cr); err != nil {
 		t.Fatalf("shared ClusterRole after the hand-over: %v", err)
@@ -245,9 +274,19 @@ func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config
 	if err := r.Update(ctx, &next); err != nil {
 		t.Fatalf("unpausing the next copy: %v", err)
 	}
-	rehomeEventually(t, 3*time.Minute, "the controller to move to "+rehome2Namespace, func() bool {
-		return rehomeControllerIn(ctx, t, r, rehome2Namespace) && !rehomeControllerIn(ctx, t, r, rehomeNamespace)
+	rehomeEventually(t, 3*time.Minute, "the next copy to own the controller", func() bool {
+		var cd v1alpha1.CompositionDefinition
+		if err := r.Get(ctx, rehomeCDName, rehome2Namespace, &cd); err != nil {
+			return false
+		}
+		return !strings.Contains(cd.GetCondition(rtv1.TypeReady).Message, "run by CompositionDefinition")
 	})
+	if got := rehomeControllerUID(ctx, t, r); got != rehomeOwnerUID {
+		t.Fatalf("the second hand-over replaced the controller (UID %s -> %s)", rehomeOwnerUID, got)
+	}
+	if rehomeControllerIn(ctx, t, r, rehome2Namespace) || rehomeControllerIn(ctx, t, r, rehomeNamespace) {
+		t.Fatalf("a controller appeared in a definition namespace (%s or %s)", rehome2Namespace, rehomeNamespace)
+	}
 	moved = next
 	rehomeEventually(t, 3*time.Minute, "the instance to be adopted by "+rehome2Namespace, func() bool {
 		ns, _, ok := rehomeProbeLabels(ctx, dyn)

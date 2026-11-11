@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: compositiondefinitions.core.krateo.io
 spec:
   group: core.krateo.io
@@ -80,6 +80,32 @@ spec:
                   under ".api" in the projection root. Shape copied from snowplow's spec.apiRef
                   (name/namespace + inline extras).
                 properties:
+                  delegation:
+                    description: |-
+                      Delegation lets this definition's composition controller act on behalf of a caller through
+                      authn's POST /delegate (#405). It is rendered onto the controller's authn ServiceAccount mapping
+                      (spec.delegation) on every apply; a value set by hand on the mapping is replaced. Absent means no
+                      delegation key on the mapping at all, which authn answers with 403 DelegationNotAllowed.
+
+                      The bounds are authn's own (serviceaccounts.serviceaccount.authn.krateo.io): if this field
+                      accepted more, the apiserver would reject the mapping's update instead, far from this object.
+                      Enabling it on a real definition is a platform decision, not a default.
+                    properties:
+                      allowed:
+                        description: Allowed enables delegation for the controller's
+                          identity. Required whenever delegation is set.
+                        type: boolean
+                      maxDepth:
+                        description: |-
+                          MaxDepth limits how deep a delegation chain may go. Unset leaves authn's own default (3, applied
+                          in authn's code, not by its CRD), so it is rendered only when set.
+                        format: int32
+                        maximum: 8
+                        minimum: 1
+                        type: integer
+                    required:
+                    - allowed
+                    type: object
                   extras:
                     description: |-
                       Extras are author-declared STATIC values merged into the RESTAction's jq root
@@ -193,6 +219,17 @@ spec:
                   touching — or restarting — any other controller. Omitted fields fall back to the chart-global
                   defaults, so existing definitions render byte-identically.
                 properties:
+                  pool:
+                    description: |-
+                      Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
+                      INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
+                      render the same dedicated controller, byte for byte. It exists first so the API is settled before
+                      the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
+                      the union of its members' permissions, and names let Kinds with similar permissions share one.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
                   resources:
                     description: |-
                       Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
@@ -281,7 +318,8 @@ spec:
                       wakes it when the first one appears (#393). Off when unset: the controller runs at the chart's
                       replica count, as before. Opting in costs one metadata watch on this Kind's instances, which is
                       what wakes it, so it is per definition rather than global. While idle the definition reports
-                      Ready=True with reason Idle.
+                      Ready=True and ControllerActive=False, both with reason ScaledToZero (plumbing conditions, the
+                      strings shared with oasgen-provider).
                     type: boolean
                   scaleToZeroHoldDown:
                     description: |-

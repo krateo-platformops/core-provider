@@ -54,10 +54,15 @@ var (
 )
 
 type UndeployOptions struct {
-	DiscoveryClient        discovery.CachedDiscoveryInterface
-	KubeClient             client.Client
-	DynamicClient          dynamic.Interface
-	Namespace              string
+	DiscoveryClient discovery.CachedDiscoveryInterface
+	KubeClient      client.Client
+	DynamicClient   dynamic.Interface
+	Namespace       string
+	// ControllerNamespace is where this version's controller ITSELF lives: its Deployment,
+	// ServiceAccount, ConfigMaps and Service (#313). It is required: an empty value is an error,
+	// never a fall-back to Namespace, so no caller can keep the old placement by omission.
+	// Namespace keeps its other job: the namespace whose objects a namespaced grant covers.
+	ControllerNamespace    string
 	GVR                    schema.GroupVersionResource
 	Spec                   *definitionsv1alpha1.ChartInfo
 	RBACFolderPath         string
@@ -88,16 +93,29 @@ type UndeployOptions struct {
 	// Namespace are removed. Set it whenever the version is still referenced by another definition:
 	// deleting the shared objects would strip the surviving controller of its permissions.
 	KeepShared bool
+
+	// Relocating removes ONE PLACEMENT of a controller that is moving, not the controller (#313):
+	// the objects that live with the controller in ControllerNamespace (Deployment, after it has
+	// drained; ConfigMaps; Service; ServiceAccount) and its authn mapping. It keeps everything the
+	// new placement shares with the old one: everything KeepShared keeps, AND the namespaced grant
+	// Role/RoleBinding in Namespace, which the new placement uses under the same name. Deleting
+	// those would strip the new controller of its grant until the next apply.
+	Relocating bool
 }
 
 // (UndeployOptions needs no SnowplowURL: the apiRef ClusterRole + binding are deleted by name.)
 
 type DeployOptions struct {
-	GVR                    schema.GroupVersionResource
-	DiscoveryClient        discovery.CachedDiscoveryInterface
-	KubeClient             client.Client
-	DynClient              dynamic.Interface
-	Namespace              string
+	GVR             schema.GroupVersionResource
+	DiscoveryClient discovery.CachedDiscoveryInterface
+	KubeClient      client.Client
+	DynClient       dynamic.Interface
+	Namespace       string
+	// ControllerNamespace is where this version's controller ITSELF lives: its Deployment,
+	// ServiceAccount, ConfigMaps and Service (#313). It is required: an empty value is an error,
+	// never a fall-back to Namespace, so no caller can keep the old placement by omission.
+	// Namespace keeps its other job: the namespace whose objects a namespaced grant covers.
+	ControllerNamespace    string
 	Spec                   *definitionsv1alpha1.ChartInfo
 	RBACFolderPath         string
 	DeploymentTemplatePath string
@@ -116,6 +134,12 @@ type DeployOptions struct {
 	ApiRefName      string
 	ApiRefNamespace string
 	ApiRefExtras    string
+	// ApiRefDelegation is the definition's spec.apiRef.delegation, rendered onto the controller's authn
+	// mapping as spec.delegation (#405). nil renders no delegation key.
+	ApiRefDelegation *definitionsv1alpha1.ApiRefDelegation
+	// AuthnSupport is which optional mapping fields the installed authn CRD serves (AuthnMappingSupport),
+	// resolved once per reconcile by the caller. A field it doesn't serve is not rendered.
+	AuthnSupport AuthnSupport
 	// AuthnNamespace is the authn operator namespace where the ServiceAccount allowlist
 	// mapping is created (when ApiRefName is set). Empty defaults to "krateo-system".
 	AuthnNamespace string
@@ -151,7 +175,7 @@ func resourceNamer(resourceName string, chartVersion string) string {
 	return fmt.Sprintf("%s-%s", resourceName, chartVersion)
 }
 
-func createRBACResources(gvr schema.GroupVersionResource, rbacNSName types.NamespacedName, rbacFolderPath string) (corev1.ServiceAccount, rbacv1.ClusterRole, rbacv1.ClusterRoleBinding, rbacv1.Role, rbacv1.RoleBinding, error) {
+func createRBACResources(gvr schema.GroupVersionResource, rbacNSName, grantNSName types.NamespacedName, rbacFolderPath string) (corev1.ServiceAccount, rbacv1.ClusterRole, rbacv1.ClusterRoleBinding, rbacv1.Role, rbacv1.RoleBinding, error) {
 	sa := corev1.ServiceAccount{}
 	err := objects.CreateK8sObject(&sa, gvr, rbacNSName, filepath.Join(rbacFolderPath, "serviceaccount.yaml"))
 	if err != nil {
@@ -171,13 +195,13 @@ func createRBACResources(gvr schema.GroupVersionResource, rbacNSName types.Names
 	}
 
 	role := rbacv1.Role{}
-	err = objects.CreateK8sObject(&role, gvr, rbacNSName, filepath.Join(rbacFolderPath, "compositiondefinition-role.yaml"))
+	err = objects.CreateK8sObject(&role, gvr, grantNSName, filepath.Join(rbacFolderPath, "compositiondefinition-role.yaml"))
 	if err != nil {
 		return corev1.ServiceAccount{}, rbacv1.ClusterRole{}, rbacv1.ClusterRoleBinding{}, rbacv1.Role{}, rbacv1.RoleBinding{}, err
 	}
 
 	rolebinding := rbacv1.RoleBinding{}
-	err = objects.CreateK8sObject(&rolebinding, gvr, rbacNSName, filepath.Join(rbacFolderPath, "compositiondefinition-rolebinding.yaml"), "serviceAccount", sa.Name, "saNamespace", sa.Namespace)
+	err = objects.CreateK8sObject(&rolebinding, gvr, grantNSName, filepath.Join(rbacFolderPath, "compositiondefinition-rolebinding.yaml"), "serviceAccount", sa.Name, "saNamespace", sa.Namespace)
 	if err != nil {
 		return corev1.ServiceAccount{}, rbacv1.ClusterRole{}, rbacv1.ClusterRoleBinding{}, rbacv1.Role{}, rbacv1.RoleBinding{}, err
 	}
@@ -334,7 +358,7 @@ func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole
 	return nil
 }
 
-func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, keepClusterScoped bool) error {
+func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, keepClusterScoped bool, keepGrant bool) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
 	if keepClusterScoped {
@@ -356,19 +380,22 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 		log.Debug("ClusterRoleBinding successfully uninstalled", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 	}
 
-	err := kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
-		return err
-	}
-	log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
+	var err error
+	if !keepGrant {
+		err = kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
+			return err
+		}
+		log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
 
-	err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
-	if err != nil {
-		log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
-		return err
+		err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
+		if err != nil {
+			log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
+			return err
+		}
+		log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 	}
-	log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 
 	err = kubecli.Uninstall(ctx, dyn, serviceAccountGVR, &sa, kubecli.UninstallOptions{})
 	if err != nil {
@@ -383,9 +410,9 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest string, err error) {
 	applyOpts := kubecli.ApplyOptions{}
 
-	namespacedName := types.NamespacedName{
-		Namespace: opts.Namespace,
-		Name:      resourceNamer(opts.GVR.Resource, opts.GVR.Version),
+	namespacedName, err := controllerObjectName(opts.ControllerNamespace, opts.GVR)
+	if err != nil {
+		return "", err
 	}
 
 	if opts.DryRunServer {
@@ -394,7 +421,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath)
+	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), getCDCrbacNN(types.NamespacedName{Namespace: opts.Namespace, Name: namespacedName.Name}), opts.RBACFolderPath)
 	if err != nil {
 		return "", err
 	}
@@ -586,9 +613,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 }
 
 func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) error {
-	namespacedName := types.NamespacedName{
-		Namespace: opts.Namespace,
-		Name:      resourceNamer(opts.GVR.Resource, opts.GVR.Version),
+	namespacedName, err := controllerObjectName(opts.ControllerNamespace, opts.GVR)
+	if err != nil {
+		return err
 	}
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
@@ -612,7 +639,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		}
 	}
 
-	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath)
+	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), getCDCrbacNN(types.NamespacedName{Namespace: opts.Namespace, Name: namespacedName.Name}), opts.RBACFolderPath)
 	if err != nil {
 		return err
 	}
@@ -708,21 +735,30 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 	log.Debug("Configmap successfully uninstalled", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace)
 
-	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.KeepShared)
+	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.keepShared(), opts.Relocating)
 	if err != nil {
 		return err
 	}
 
 	// Remove the authn allowlist mapping (no-op if absent / authn CRD not installed). Done
 	// unconditionally so it is cleaned up even if apiRef was removed before undeploy.
-	err = deleteAuthnServiceAccountMapping(ctx, opts.KubeClient, opts.AuthnNamespace, opts.Namespace, sa.Name)
+	err = deleteAuthnServiceAccountMapping(ctx, opts.KubeClient, opts.AuthnNamespace, sa.Namespace, sa.Name)
 	if err != nil {
 		return err
 	}
 
+	// NOT deleted here: authn's clientconfig Secret for this identity. core-provider never creates it
+	// (authn issues it at the identity's first login), and 2.13.77 deleting it on every Undeploy was a
+	// 403 (core-provider's ClusterRole grants secrets only get/list/watch). Because it ran LAST, after
+	// the real teardown, every Undeploy that was re-run (a re-triggered retirement, a definition
+	// delete) wedged on it (#416). Deleting another component's object would need delete on every
+	// Secret in that scope for one cleanup core-provider doesn't own, so the lifecycle belongs to
+	// authn (Diego, 2026-11-09): authn 0.40.0 sets an ownerReference from the Secret to the mapping,
+	// which core-provider still deletes, so the garbage collector removes it.
+
 	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated. Its name has
 	// no namespace in it, so it is shared with any other definition on this Kind+version.
-	if !opts.KeepShared {
+	if !opts.keepShared() {
 		err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
 		if err != nil {
 			return err
@@ -749,7 +785,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	// The credentials Role/RoleBinding live in the Secret's namespace under the shared
 	// {resource}-{apiVersion} name; outside this definition's namespace another definition on the
 	// same version may be using them.
-	keepCredentialsRBAC := opts.KeepShared && opts.Spec != nil && opts.Spec.Credentials != nil &&
+	keepCredentialsRBAC := opts.keepShared() && opts.Spec != nil && opts.Spec.Credentials != nil &&
 		opts.Spec.Credentials.PasswordRef.Namespace != opts.Namespace
 	if opts.Spec != nil && opts.Spec.Credentials != nil && !keepCredentialsRBAC {
 		role := rbacv1.Role{}
@@ -798,14 +834,14 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 // This function is used to lookup the current state of the deployment and return the hash of the current state
 // This is used to determine if the deployment needs to be updated or not
 func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest string, err error) {
-	namespacedName := types.NamespacedName{
-		Namespace: opts.Namespace,
-		Name:      resourceNamer(opts.GVR.Resource, opts.GVR.Version),
+	namespacedName, err := controllerObjectName(opts.ControllerNamespace, opts.GVR)
+	if err != nil {
+		return "", err
 	}
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath)
+	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), getCDCrbacNN(types.NamespacedName{Namespace: opts.Namespace, Name: namespacedName.Name}), opts.RBACFolderPath)
 	if err != nil {
 		return "", err
 	}
@@ -854,7 +890,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy.
+	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy. The
+	// rendered fields come from opts.AuthnSupport, the same served-CRD read Deploy uses (#405).
 	if err = hashAuthnServiceAccountMapping(opts, sa.Name, &hsh); err != nil {
 		return "", fmt.Errorf("error hashing authn ServiceAccount mapping: %v", err)
 	}
@@ -1118,3 +1155,20 @@ func waitForControllerDrained(ctx context.Context, kube client.Client, dep *apps
 		}
 	}
 }
+
+// errNoControllerNamespace is returned when a caller leaves ControllerNamespace empty. #313 made
+// where the controller lives a separate, required input; defaulting it to Namespace would let a
+// forgotten call site keep the old placement silently.
+var errNoControllerNamespace = errors.New("deploy: ControllerNamespace is required (where the controller itself lives, #313)")
+
+// controllerObjectName is the name every one of this version's controller objects is derived from.
+func controllerObjectName(controllerNamespace string, gvr schema.GroupVersionResource) (types.NamespacedName, error) {
+	if controllerNamespace == "" {
+		return types.NamespacedName{}, errNoControllerNamespace
+	}
+	return types.NamespacedName{Namespace: controllerNamespace, Name: resourceNamer(gvr.Resource, gvr.Version)}, nil
+}
+
+// keepShared reports whether Undeploy must leave the objects shared with another placement or
+// definition. Relocating implies it: a moving controller keeps every shared object.
+func (o UndeployOptions) keepShared() bool { return o.KeepShared || o.Relocating }

@@ -43,7 +43,7 @@ func TestReclaimLeakedControllers(t *testing.T) {
 			[]*appsv1.Deployment{leakDeploy("installers-v0-3-484-controller"), leakDeploy("installers-v0-3-480-controller")},
 			leakComposition("installer", "v0-3-484"))
 		retire, calls := recorder("")
-		reclaimed, failed, _, err := e.reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, retire)
+		reclaimed, failed, _, err := e.reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS}, retire)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestReclaimLeakedControllers(t *testing.T) {
 	for _, r := range refusals {
 		t.Run(r.name, func(t *testing.T) {
 			retire, calls := recorder("")
-			reclaimed, _, _, err := r.build().reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, retire)
+			reclaimed, _, _, err := r.build().reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS}, retire)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -96,7 +96,7 @@ func TestReclaimLeakedControllers(t *testing.T) {
 				leakDeploy("installers-v0-3-484-controller")},
 			leakComposition("installer", "v0-3-484"))
 		retire, calls := recorder("v0-3-479")
-		reclaimed, failed, _, err := e.reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, retire)
+		reclaimed, failed, _, err := e.reclaimLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS}, retire)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

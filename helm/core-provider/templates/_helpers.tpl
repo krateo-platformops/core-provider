@@ -119,3 +119,24 @@ Usage:
 {{- printf "%s:%s" .img.repository $tag -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+core-provider.otlpNodeLocal is "true" when tracing/metrics export is on and no explicit otel.endpoint is
+set: the Deployment then sends to the OpenTelemetry daemonset agent on ITS OWN NODE, through the
+node IP and the daemonset's hostPort (Diego, 2026-11-09; the same standard for every provider).
+Node-local matters: the agent's k8sattributes is node-filtered, so a span sent to another node's
+agent loses its pod metadata, k8s.deployment.name included, which the audit join keys on. The
+hostPort exists on every daemonset version (0.1.19 and later), unlike the <release>-local Service
+(0.1.21+, named from the release). An explicit otel.endpoint wins: then this is "".
+*/}}
+{{- define "core-provider.otlpNodeLocal" -}}
+{{- if and .Values.otel.enabled (not .Values.otel.endpoint) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+core-provider.otlpPort is the daemonset's OTLP hostPort for the configured protocol: 4317 for gRPC,
+4318 for http/protobuf (the default).
+*/}}
+{{- define "core-provider.otlpPort" -}}
+{{- if eq (.Values.otel.protocol | default "http/protobuf") "grpc" -}}4317{{- else -}}4318{{- end -}}
+{{- end -}}

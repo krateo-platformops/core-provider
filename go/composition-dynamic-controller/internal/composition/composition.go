@@ -50,13 +50,28 @@ import (
 var (
 	krateoNamespace = env.String(krateoNamespaceEnvVar, krateoNamespaceDefault)
 	helmMaxHistory  = env.Int(helmMaxHistoryEnvvar, 3)
+	// helmOperationTimeout is the Timeout of every helm install, upgrade, rollback and uninstall
+	// (#410). helm applies it to EACH wait, not to the operation as a whole: execHook calls
+	// WatchUntilReady(resources, timeout) once per hook, in weight order (measured on kind: two
+	// 12s hooks under a 20s Timeout finished in 32s, deployed). A Timeout of 0 is NO deadline
+	// (watchtools.ContextWithOptionalTimeout -> context.WithCancel(Background)), independent of the
+	// reconcile's context. The cdc passed 0, so a hook Job that could never complete held its install,
+	// and the reconcile running it, for hours, and the composition's deletion queued behind it with no
+	// status. With a bound, a hook that has not finished within it fails the operation: the release
+	// is "failed", the composition reports it, and a pending deletion proceeds. A chain of hooks that
+	// each finish within it is not cut short, however long the chain. Default 15m (Diego, 2026-11-10).
+	helmOperationTimeout = env.Duration(helmTimeoutEnvvar, 15*time.Minute)
 	// pendingOperationGrace: a helm release found in a pending-* status is rolled back ONLY if it
 	// has been pending LONGER than this — i.e. genuinely stuck (the controller died mid-operation),
 	// not legitimately in-flight. A large composition's upgrade (hundreds of children + hooks) can
 	// stay pending for tens of seconds; rolling that back mid-flight caused an Upgrade<->Rollback
-	// thrash on the 319-resource portal composition. Default 5m (>= helm's default op timeout), so
-	// only operations that exceeded a real upgrade are treated as stuck. Tunable per deployment.
-	pendingOperationGrace = env.Duration(pendingGraceEnvvar, 5*time.Minute)
+	// thrash on the 319-resource portal composition. It was 5m, documented as ">= helm's default op
+	// timeout", while the real timeout was unbounded. It now defaults to the per-wait bound plus a
+	// minute, so a single hook still inside its bound is never taken for stuck. It does NOT cover a
+	// whole multi-hook operation, which helm does not bound: an operation longer than the grace can be
+	// rolled back by a SECOND live cdc pod, which happens only while a rollout overlaps two pods (there
+	// is no leader election). Tunable per deployment.
+	pendingOperationGrace = env.Duration(pendingGraceEnvvar, helmOperationTimeout+time.Minute)
 
 	// childTeardownGrace bounds how long Delete waits for finalizer-bearing managed children to
 	// finish deleting before it uninstalls the release anyway (krateo-core-provider#108). The wait
@@ -72,6 +87,10 @@ const (
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
 	reasonPendingHelmOperation = "PendingHelmOperation"
+
+	// Ready-condition reason written BEFORE an install or uninstall starts (#410), so an operation
+	// that runs long (a slow hook) is visible on the composition instead of leaving it without status.
+	reasonHelmOperationInProgress = "HelmOperationInProgress"
 
 	// Event reasons
 	reasonCreated = "CompositionCreated"
@@ -93,6 +112,7 @@ const (
 	helmMaxHistoryEnvvar     = "HELM_MAX_HISTORY"
 	krateoNamespaceEnvVar    = "KRATEO_NAMESPACE"
 	pendingGraceEnvvar       = "COMPOSITION_CONTROLLER_PENDING_GRACE"
+	helmTimeoutEnvvar        = "COMPOSITION_CONTROLLER_HELM_TIMEOUT"
 	childTeardownGraceEnvvar = "COMPOSITION_CONTROLLER_CHILD_TEARDOWN_GRACE"
 
 	// Default namespace for Krateo Installation
@@ -447,6 +467,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
+				Timeout:        helmOperationTimeout,
 			})
 		})
 		if err != nil {
@@ -564,6 +585,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 				// into the current release: invalid ownership metadata") and wedges the platform (D1,
 				// 2026-07-08); with it the release takes ownership, self-healing the conflict.
 				TakeOwnership: true,
+				// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
+				Timeout: helmOperationTimeout,
 			},
 			MaxHistory: helmMaxHistory,
 		})
@@ -597,6 +620,28 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// selfHealed defers the drift return until after the status write below. See #337 at the end of
 	// this block.
 	selfHealed := false
+	// The render dropped objects that the merge did NOT delete. That is the #304 shape ("removed from
+	// the spec, child still alive"), and it reads Changed == false: plumbing's changed counts
+	// created/deleted/patched, and an intended deletion that didn't happen is none of those. So it
+	// must be logged OUTSIDE the Changed branch, or the one case the intendedDeletions field exists
+	// for (#346) is never printed. That is exactly how krateo-autopilot on krateo-057 reported "up to
+	// date" 62 times with objects its spec no longer renders.
+	// Since plumbing v1.35.0 a deletion helm skipped because the object is helm.sh/resource-policy:
+	// keep is reported apart (KeptDeletions) and correctly re-records the release, so only what is
+	// left, intended and neither deleted nor kept (a deletion that FAILED), is a defect worth a Warn.
+	if n := failedIntendedDeletions(reconcileRes); n > 0 {
+		log.Warn("Composition render dropped objects whose deletion failed: they are still alive and still in the release", "package", pkg.URL,
+			"failedCount", n,
+			"intendedDeletions", reconcileRes.IntendedDeletions,
+			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
+			"keptDeletions", reconcileRes.KeptDeletions,
+			"deleted", reconcileRes.Deleted, "changed", reconcileRes.Changed)
+	}
+	if kept := len(reconcileRes.KeptDeletions) + reconcileRes.KeptDeletionsOmitted; kept > 0 {
+		log.Info("Composition render dropped objects kept by helm.sh/resource-policy: keep; the release now records the change", "package", pkg.URL,
+			"keptDeletions", reconcileRes.KeptDeletions,
+			"keptDeletionsOmitted", reconcileRes.KeptDeletionsOmitted, "changed", reconcileRes.Changed)
+	}
 	if reconcileRes.Changed {
 		// Info, not Debug (#175). This is the ONLY line that says a composition drifted and what
 		// was done about it, and at Debug it was invisible on every cluster that runs at Info —
@@ -615,41 +660,18 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// which is the defect, not the fix for it. No new call site and no new rate — the line is
 		// already gated on Changed, the same gate that decides whether a revision is written.
 		//
-		// Bounded by the cap in plumbing (ten identities plus an omitted count). Measured worst
-		// case in the fleet: steady-state drift is ONE child, so ~108 bytes per line at 120
-		// lines/hour.
-		// intendedDeletions is logged BESIDE deleted, and the pair is the whole point (#304). A
-		// bare `deleted:0` cannot distinguish "nothing was removed from the render" from "the
-		// merge was asked to remove something and did not" — and those two have different causes
-		// in different repositories:
-		//
-		//	intended 0, deleted 0   nothing to remove, OR the removal was already lost upstream
-		//	                        (the stored manifest no longer lists the child, so helm's
-		//	                        original.Difference(target) is legitimately empty)
-		//	intended >0, deleted 0  helm was asked and did not do it. Its deletion loop sits AFTER
-		//	                        both error returns in update() (pkg/kube/client.go), so ONE
-		//	                        failed patch skips every deletion — and updateResource appends
-		//	                        to res.Updated "regardless" of failure, so a non-zero patched
-		//	                        count does not rule this out.
-		//
-		// The live report this exists for was `created:0 deleted:0 patched:10` on a node removed
-		// from spec, with the child still present sixteen minutes later. With only those three
-		// numbers the two rows above are indistinguishable, and the issue has three candidate
-		// mechanisms precisely because nobody could tell them apart. plumbing has carried
-		// IntendedDeletions since v1.21.0 — the version this module already requires — and nothing
-		// here read it.
+		// Bounded by the caps in plumbing (ten identities, five paths each, plus omitted counts).
+		// Measured before changedPaths: steady-state drift is ONE child, ~108 bytes per line at 120
+		// lines/hour; changedPaths adds that child's few paths.
+		// The fields themselves, and why each is there (#175's changedObjects, #304's
+		// intendedDeletions, plumbing#112's changedPaths), are documented on reconcileDiffFields.
 		//
 		// A LOG RATHER THAN A CONDITION, deliberately: this is a diagnostic for distinguishing
 		// mechanisms, not a state a consumer should gate on. Once the mechanism is known, the fix
 		// belongs where the deletion is lost, and a condition asserting "a deletion was skipped"
 		// would be reporting a cause we have not yet established.
-		log.Info("Composition drift detected and self-healed", "package", pkg.URL,
-			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted, "patched", reconcileRes.PatchedUpdated,
-			"intendedDeletions", reconcileRes.IntendedDeletions,
-			"intendedDeletionsCount", len(reconcileRes.IntendedDeletions),
-			"intendedDeletionsOmitted", reconcileRes.IntendedDeletionsOmitted,
-			"deletionsSkipped", len(reconcileRes.IntendedDeletions) > 0 && reconcileRes.Deleted == 0,
-			"changedObjects", reconcileRes.ChangedObjects, "changedObjectsOmitted", reconcileRes.ChangedObjectsOmitted)
+		log.Info("Composition drift detected and self-healed",
+			append([]any{"package", pkg.URL}, reconcileDiffFields(reconcileRes)...)...)
 		// A FLAG, NOT A RETURN (#337). This returned here, BEFORE the setStatus/persist pair below,
 		// so a reconcile whose self-heal changed any object reported drift without ever computing
 		// or writing Ready. The two later drift returns sit AFTER the write and were always fine;
@@ -902,6 +924,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// un-adoptable child 500s the entire reconcile and wedges the platform (D1); with it the
 		// release takes ownership and self-heals the conflict.
 		TakeOwnership: true,
+		// Bounds the install (or upgrade) and its hooks (#410).
+		Timeout: helmOperationTimeout,
+	}
+
+	// #410: say what is about to run before it runs, so an install held by a slow or hung hook is
+	// visible on the composition. Bounded by helmOperationTimeout.
+	if mg, err = recordHelmOperation(ctx, mg, "install", time.Now(), updateOpts, log); err != nil {
+		return err
 	}
 
 	// Check if the release already exists before attempting to install, this can happen if the create event is triggered after a failed install
@@ -1139,6 +1169,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 					Values:                values,
 					PostRenderer:          postrenderLabels,
 					TakeOwnership:         true,
+					Timeout:               helmOperationTimeout, // #410
 				},
 				MaxHistory: helmMaxHistory,
 			})
@@ -1162,9 +1193,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// or a change arrived between the two phases.
 	if reconcileRes != nil && reconcileRes.Changed {
 		log.Info("Update wrote a helm revision; Observe's reconcile had not fully converged",
-			"package", pkg.URL, "revision", upgradedRel.Revision,
-			"created", reconcileRes.Created, "deleted", reconcileRes.Deleted,
-			"patched", reconcileRes.PatchedUpdated)
+			append([]any{"package", pkg.URL, "revision", upgradedRel.Revision}, reconcileDiffFields(reconcileRes)...)...)
 	}
 
 	previousDigest, err := maps.NestedString(mg.Object, "status", "digest")
@@ -1309,7 +1338,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// and keeps the leak from reappearing if caching is ever enabled on this path.
 	defer hc.Close()
 
-	pkg, err := h.packageInfoGetter.WithLogger(log).Get(mg)
+	// Locate, not Get (#402): Delete never fetches the chart, so it must not need the chart's
+	// credentials. With Get, a composition whose passwordRef Secret was gone (a namespace teardown
+	// that removes it first, a rotation) could never finish deleting. The definition is still read:
+	// pkg.Version decides isVersionMigrationHandover below, and guessing it would uninstall a release
+	// a version migration still shares.
+	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
 	}
@@ -1382,6 +1416,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
+				Timeout:        helmOperationTimeout,
 			})
 		}); rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
@@ -1413,11 +1448,17 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			len(pending), childTeardownGrace, pendingIDs(pending))))
 	}
 
+	// #410: the uninstall runs pre/post-delete hooks too; say so before it starts.
+	if mg, err = recordHelmOperation(ctx, mg, "uninstall", time.Now(), updateOpts, log); err != nil {
+		return err
+	}
+
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
 		return helmMetrics.TimedUninstall(func() error {
 			return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
 				IgnoreNotFound: true,
+				Timeout:        helmOperationTimeout,
 			})
 		})
 	})
@@ -1435,34 +1476,26 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 
 	log.Debug("Uninstalling RBAC", "package", pkg.URL)
 
-	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
-	if err != nil {
-		return fmt.Errorf("converting GVK to GVR: %w", err)
-	}
-	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
-	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
-
-	// Get Resources and generate RBAC
-	generated, err := rbgen.
-		WithBaseName(compositionMeta.GetReleaseName(mg)).
-		Generate(ctx, rbacgen.Parameters{
-			CompositionName:                mg.GetName(),
-			CompositionNamespace:           mg.GetNamespace(),
-			CompositionGVR:                 compositionGVR,
-			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
-			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
-			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
-		})
-	if err != nil {
-		return fmt.Errorf("generating RBAC for composition %s/%s: %w",
-			mg.GetNamespace(), mg.GetName(), err)
-	}
+	// #402: release the derived RBAC by the owner recorded on it, which needs no chart. Regenerating it
+	// from the chart (chart-inspector, which reads the passwordRef Secret too) is the fallback for RBAC
+	// written before owners were recorded; a composition labelled on any apply since is never wedged by
+	// an unreadable chart here.
 	rbInstaller := rbac.NewRBACInstaller(dyn)
+	var released int
 	err = helmMetrics.TimedRBAC(func() error {
-		return rbInstaller.UninstallRBAC(generated)
+		var rerr error
+		released, rerr = rbInstaller.UninstallOwned(ctx, mg.GetUID())
+		return rerr
 	})
 	if err != nil {
-		return fmt.Errorf("uninstalling rbac: %w", err)
+		return fmt.Errorf("releasing rbac owned by %s/%s: %w", mg.GetNamespace(), mg.GetName(), err)
+	}
+	if released == 0 {
+		if err := h.uninstallRegeneratedRBAC(ctx, mg, pkg, rbInstaller, helmMetrics); err != nil {
+			return err
+		}
+	} else {
+		log.Debug("Released derived RBAC by recorded owner", "objects", released)
 	}
 
 	h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("Deleted composition: %s", mg.GetName())))
@@ -1518,6 +1551,9 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
+	// #402: record this composition as an owner of every derived object, so its Delete can release
+	// them without the chart.
+	generated.SetOwner(mg.GetUID())
 
 	rbInstaller := rbac.NewRBACInstaller(dyn)
 	var report rbac.ApplyReport
@@ -1701,4 +1737,54 @@ func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.Exte
 	}
 	obs.Conditions = append(obs.Conditions, compositionCondition.SyncedGracefulPausePending())
 	return obs, err
+}
+
+// failedIntendedDeletions is how many objects the render asked to delete that were neither deleted
+// nor kept (helm.sh/resource-policy: keep, reported by plumbing v1.35.0 as KeptDeletions): deletions
+// that FAILED, so a child that should be gone is still alive (#304). It counts the omitted tails too,
+// so a truncated list cannot hide a shortfall.
+func failedIntendedDeletions(res *helmconfig.ReconcileResult) int {
+	if res == nil {
+		return 0
+	}
+	intended := len(res.IntendedDeletions) + res.IntendedDeletionsOmitted
+	kept := len(res.KeptDeletions) + res.KeptDeletionsOmitted
+	if short := intended - res.Deleted - kept; short > 0 {
+		return short
+	}
+	return 0
+}
+
+// uninstallRegeneratedRBAC is the pre-#402 teardown: regenerate this composition's RBAC from the
+// chart and delete it by name. Only for RBAC that records no owner (written before #402); it needs
+// the chart, so it fails while the chart is unreadable.
+func (h *handler) uninstallRegeneratedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, rbInstaller *rbac.RBACInstaller, helmMetrics *metrics.HelmMetrics) error {
+	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
+	if err != nil {
+		return fmt.Errorf("converting GVK to GVR: %w", err)
+	}
+	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
+	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
+
+	generated, err := rbgen.
+		WithBaseName(compositionMeta.GetReleaseName(mg)).
+		Generate(ctx, rbacgen.Parameters{
+			CompositionName:                mg.GetName(),
+			CompositionNamespace:           mg.GetNamespace(),
+			CompositionGVR:                 compositionGVR,
+			CompositionDefinitionName:      pkg.CompositionDefinitionInfo.Name,
+			CompositionDefinitionNamespace: pkg.CompositionDefinitionInfo.Namespace,
+			CompositionDefintionGVR:        pkg.CompositionDefinitionInfo.GVR,
+		})
+	if err != nil {
+		return fmt.Errorf("generating RBAC for composition %s/%s: %w",
+			mg.GetNamespace(), mg.GetName(), err)
+	}
+	err = helmMetrics.TimedRBAC(func() error {
+		return rbInstaller.UninstallRBAC(generated)
+	})
+	if err != nil {
+		return fmt.Errorf("uninstalling rbac: %w", err)
+	}
+	return nil
 }

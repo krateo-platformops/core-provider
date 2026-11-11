@@ -698,27 +698,40 @@ func TestNotObservedEnvtest_UnknownWithAnotherReasonIsNotExcused(t *testing.T) {
 // would read Unknown/ZeroEvidence instead of True — it would fail rather than pass vacuously, which
 // is a better failure mode than I had assumed but still not the one the arm claims to test.
 func TestNotObservedEnvtest_GroupDispatchIsLoadBearing(t *testing.T) {
+	// The arms above use krateo.io-group children, so they depend on krateoReady being reached. This
+	// proves the group decides it, with an input on which the two arms disagree.
+	//
+	// It used Ready=True until #399: a non-krateo custom child was then unevaluated (ZeroEvidence)
+	// while a krateo one was True. #399 reads a third party's Ready condition, so at Ready=True the
+	// two now AGREE (True), and that input proves nothing about dispatch. Re-read on #399: no arm
+	// above uses a non-krateo child, so none of them changed.
+	//
+	// Ready=Unknown/NotObserved still splits them. krateoReady treats NotObserved as "nothing assessed
+	// it" (unevaluated, so the lone child's parent is Unknown/ZeroEvidence), while thirdPartyReady
+	// knows no vocabulary of a third party's and reads any non-True Ready as converging (False).
 	h := getHarness(t)
-	h.createControlChild(t, unmappedGVR, unmappedKind, "kr-healthy", "True", "Available")
+	h.createControlChild(t, unmappedGVR, unmappedKind, "kr-notobserved", "Unknown", "NotObserved")
+	h.createControlChild(t, nonKrateoGVR, nonKrateoKind, "fg-notobserved", "Unknown", "NotObserved")
 	h.createControlChild(t, nonKrateoGVR, nonKrateoKind, "fg-healthy", "True", "Available")
 
-	krStatus, krReason := h.rollup(t, controlRef(unmappedGVR, "kr-healthy"))
-	fgStatus, fgReason := h.rollup(t, controlRef(nonKrateoGVR, "fg-healthy"))
+	krStatus, krReason := h.rollup(t, controlRef(unmappedGVR, "kr-notobserved"))
+	fgStatus, fgReason := h.rollup(t, controlRef(nonKrateoGVR, "fg-notobserved"))
+	okStatus, okReason := h.rollup(t, controlRef(nonKrateoGVR, "fg-healthy"))
 
-	if krStatus != "True" {
-		t.Errorf("a krateo.io-group child at Ready=True gave %s/%s, want True — krateoReady is not "+
-			"being reached, and every arm above with a healthy sibling depends on it",
-			krStatus, krReason)
+	if krStatus != "Unknown" || krReason != "ZeroEvidence" {
+		t.Errorf("a krateo.io-group child at Ready=Unknown/NotObserved gave %s/%s, want Unknown/ZeroEvidence: "+
+			"krateoReady is not being reached, and every arm above depends on it", krStatus, krReason)
 	}
-	if fgStatus != "Unknown" || fgReason != "ZeroEvidence" {
-		t.Errorf("a non-krateo.io custom child at the SAME Ready=True gave %s/%s, want "+
-			"Unknown/ZeroEvidence. classifyChild's default arm is meant to treat an unmodelled "+
-			"CUSTOM kind as unevaluated rather than healthy-by-existence; if that changed, the "+
-			"arms above need re-reading rather than this one needs updating", fgStatus, fgReason)
+	if fgStatus != "False" {
+		t.Errorf("a non-krateo.io custom child at the SAME Ready=Unknown/NotObserved gave %s/%s, want False "+
+			"(converging): thirdPartyReady (#399) reads any non-True Ready as not ready", fgStatus, fgReason)
 	}
 	if krStatus == fgStatus {
-		t.Errorf("both groups produced %s: the suffix makes NO difference for Ready=True either, "+
-			"so this suite's children are not being health-evaluated the way its arms assume",
-			krStatus)
+		t.Errorf("both groups produced %s for the same condition: the group makes no difference, so this "+
+			"suite's children are not being dispatched the way its arms assume", krStatus)
+	}
+	// #399 itself, through a real apiserver: a third party's Ready=True is now evidence.
+	if okStatus != "True" {
+		t.Errorf("a non-krateo.io custom child at Ready=True gave %s/%s, want True (#399)", okStatus, okReason)
 	}
 }

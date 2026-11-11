@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: compositiondefinitions.core.krateo.io
 spec:
   group: core.krateo.io
@@ -80,6 +80,32 @@ spec:
                   under ".api" in the projection root. Shape copied from snowplow's spec.apiRef
                   (name/namespace + inline extras).
                 properties:
+                  delegation:
+                    description: |-
+                      Delegation lets this definition's composition controller act on behalf of a caller through
+                      authn's POST /delegate (#405). It is rendered onto the controller's authn ServiceAccount mapping
+                      (spec.delegation) on every apply; a value set by hand on the mapping is replaced. Absent means no
+                      delegation key on the mapping at all, which authn answers with 403 DelegationNotAllowed.
+
+                      The bounds are authn's own (serviceaccounts.serviceaccount.authn.krateo.io): if this field
+                      accepted more, the apiserver would reject the mapping's update instead, far from this object.
+                      Enabling it on a real definition is a platform decision, not a default.
+                    properties:
+                      allowed:
+                        description: Allowed enables delegation for the controller's
+                          identity. Required whenever delegation is set.
+                        type: boolean
+                      maxDepth:
+                        description: |-
+                          MaxDepth limits how deep a delegation chain may go. Unset leaves authn's own default (3, applied
+                          in authn's code, not by its CRD), so it is rendered only when set.
+                        format: int32
+                        maximum: 8
+                        minimum: 1
+                        type: integer
+                    required:
+                    - allowed
+                    type: object
                   extras:
                     description: |-
                       Extras are author-declared STATIC values merged into the RESTAction's jq root
@@ -106,8 +132,36 @@ spec:
                     description: 'Credentials: credentials for private repos'
                     properties:
                       passwordRef:
-                        description: 'PasswordRef: reference to secret containing
-                          password for private repo'
+                        description: |-
+                          PasswordRef: reference to secret containing password for private repo.
+
+                          PRIVILEGE BOUNDARY, stated here because this is where someone writing a
+                          CompositionDefinition will read it. The namespace is caller-supplied and is NOT confined to
+                          the CompositionDefinition's own namespace: the referenced Secret is read with
+                          core-provider's ServiceAccount, which can read Secrets cluster-wide, and nothing checks that
+                          the author of this object was entitled to that Secret.
+
+                          So the credential named here travels to whatever `spec.chart.url` says. Granting create or
+                          update on compositiondefinitions is therefore equivalent to granting cluster-wide Secret
+                          READ, and should be treated as a privileged grant when writing RBAC — scope it the way you
+                          would scope secrets access, not the way you would scope an application CR.
+
+                          THIS IS INTENDED AND WAS RULED ON, not an oversight (core-provider#306; Diego,
+                          2026-11-04). Cross-namespace references are a supported capability — deploy.go detects the
+                          cross-namespace case and provisions a Role in the Secret's namespace so the fetch works, and
+                          the equivalent surface in snowplow measured 23 of 26 references as cross-namespace. The
+                          alternative considered was an RBAC check for a `use` verb against the requesting user, as
+                          snowplow#1168 rules for its own endpoint Secrets. core-provider has no requesting user on a
+                          reconcile: there is no SubjectAccessReview, UserInfo, impersonation or admission webhook
+                          anywhere in this repo, so a reconcile sees this object and nothing about who wrote it. A
+                          ServiceAccount substituted for the absent user would be a confused deputy with an
+                          authorization check bolted on, which reads as authorised while being nothing of the kind.
+                          The control therefore lives on who may write a CompositionDefinition at all.
+
+                          What is NOT in scope of that decision, and is fixed separately: the DESTINATION. A
+                          credentialed fetch refuses link-local (including the cloud metadata service at
+                          169.254.169.254), unspecified and multicast addresses, checked at dial time on the resolved
+                          address (plumbing dialguard, snowplow#1131).
                         properties:
                           key:
                             description: The key to select.
@@ -157,6 +211,136 @@ spec:
                   rule: '!has(oldSelf.version) || has(self.version)'
                 - message: Repo is required once set
                   rule: '!has(oldSelf.repo) || has(self.repo)'
+              controller:
+                description: |-
+                  Controller tunes the composition-dynamic-controller (CDC) Deployment for THIS definition's
+                  Kind. It is the per-Kind escape hatch from the otherwise-uniform, cluster-wide CDC template:
+                  a Kind with many instances can raise reconcile concurrency and lengthen its resync without
+                  touching — or restarting — any other controller. Omitted fields fall back to the chart-global
+                  defaults, so existing definitions render byte-identically.
+                properties:
+                  pool:
+                    description: |-
+                      Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
+                      INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
+                      render the same dedicated controller, byte for byte. It exists first so the API is settled before
+                      the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
+                      the union of its members' permissions, and names let Kinds with similar permissions share one.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  resources:
+                    description: |-
+                      Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
+                      template ships resources:{} (no requests), which is bad practice and makes the CDC
+                      unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs
+                      a memory/CPU floor (e.g. one caching many instances). When unset, the chart-global default
+                      (cdc.resources) applies, so existing definitions render byte-identically.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  resyncInterval:
+                    description: |-
+                      ResyncInterval is how often the CDC re-lists and re-observes every instance of the Kind to
+                      correct drift (the CDC's -resync-interval flag). On a Kind with many instances a short resync
+                      makes the controller re-enqueue the whole population continuously; lengthening it lets steady
+                      state ride watch events instead of full sweeps. Defaults to the chart-global value (3m) when
+                      unset. A Go duration string (e.g. "30m", "1h"); it is passed verbatim to the CDC's
+                      -resync-interval flag. Typed as string (not metav1.Duration) deliberately: core-provider runs
+                      no admission webhook, so the CRD schema is the only gate, and a plain string always decodes —
+                      a bad value can never fail the typed informer's atomic list-decode and stall every
+                      CompositionDefinition. The Pattern + CEL rules then reject unit-less/garbage values and
+                      non-positive durations ("0s"/negative would crash the CDC's ticker) at admission.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: resyncInterval must be a positive Go duration such
+                        as 30m or 1h
+                      rule: duration(self) > duration('0s')
+                  scaleToZero:
+                    description: |-
+                      ScaleToZero runs this Kind's controller at zero replicas while no instance of it exists, and
+                      wakes it when the first one appears (#393). Off when unset: the controller runs at the chart's
+                      replica count, as before. Opting in costs one metadata watch on this Kind's instances, which is
+                      what wakes it, so it is per definition rather than global. While idle the definition reports
+                      Ready=True and ControllerActive=False, both with reason ScaledToZero (plumbing conditions, the
+                      strings shared with oasgen-provider).
+                    type: boolean
+                  scaleToZeroHoldDown:
+                    description: |-
+                      ScaleToZeroHoldDown is how long the Kind must have no instances before its controller is scaled
+                      to zero, so a delete followed by a re-create does not bounce it. Defaults to 10m. A Go duration
+                      string, typed as a string for the same reason as ResyncInterval.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scaleToZeroHoldDown must be a positive Go duration
+                      rule: duration(self) > duration('0s')
+                  workers:
+                    description: |-
+                      Workers is the number of concurrent reconcile workers inside the CDC process (the CDC's
+                      -workers flag; one shared work queue feeds them). It is the primary lever for reconcile
+                      throughput on a Kind with many instances. Defaults to the chart-global value (1) when unset.
+                    format: int32
+                    maximum: 512
+                    minimum: 1
+                    type: integer
+                type: object
               deploy:
                 description: |-
                   Deploy: selects whether the composition-dynamic-controller (and the generated
@@ -166,11 +350,12 @@ spec:
                 properties:
                   targetRef:
                     description: |-
-                      TargetRef references a cluster-scoped KubernetesTarget describing the remote
-                      cluster to deploy to. When omitted, deployment is local.
+                      TargetRef references a KubernetesTarget (resolved in this object's own namespace)
+                      describing the remote cluster to deploy to. When omitted, deployment is local.
                     properties:
                       name:
-                        description: Name of the cluster-scoped KubernetesTarget.
+                        description: Name of the KubernetesTarget, resolved in the
+                          referencing object's own namespace.
                         type: string
                     required:
                     - name
@@ -229,6 +414,25 @@ spec:
                 x-kubernetes-list-map-keys:
                 - forPath
                 x-kubernetes-list-type: map
+              upgradePolicy:
+                default: Automatic
+                description: |-
+                  UpgradePolicy governs whether existing composition instances are migrated onto a newly
+                  served chart version:
+                    - Automatic (default): eagerly self-heal every owned instance onto the current version
+                      (retire the old version's controller once nothing references it). Backward-compatible
+                      with the pre-policy behavior.
+                    - Manual: keep existing instances on their current version (the new version is still served,
+                      so coexistence holds); migrate only when the krateo.io/upgrade-to-version annotation names
+                      the current served version.
+                    - Paused: never migrate; freeze existing instances on their version.
+                  Under Manual/Paused the old version's controller is kept so coexisting instances are not
+                  orphaned; served-version pruning still keeps any version an instance's label references.
+                enum:
+                - Automatic
+                - Manual
+                - Paused
+                type: string
             type: object
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.
@@ -300,8 +504,36 @@ spec:
                               description: 'Credentials: credentials for private repos'
                               properties:
                                 passwordRef:
-                                  description: 'PasswordRef: reference to secret containing
-                                    password for private repo'
+                                  description: |-
+                                    PasswordRef: reference to secret containing password for private repo.
+
+                                    PRIVILEGE BOUNDARY, stated here because this is where someone writing a
+                                    CompositionDefinition will read it. The namespace is caller-supplied and is NOT confined to
+                                    the CompositionDefinition's own namespace: the referenced Secret is read with
+                                    core-provider's ServiceAccount, which can read Secrets cluster-wide, and nothing checks that
+                                    the author of this object was entitled to that Secret.
+
+                                    So the credential named here travels to whatever `spec.chart.url` says. Granting create or
+                                    update on compositiondefinitions is therefore equivalent to granting cluster-wide Secret
+                                    READ, and should be treated as a privileged grant when writing RBAC — scope it the way you
+                                    would scope secrets access, not the way you would scope an application CR.
+
+                                    THIS IS INTENDED AND WAS RULED ON, not an oversight (core-provider#306; Diego,
+                                    2026-11-04). Cross-namespace references are a supported capability — deploy.go detects the
+                                    cross-namespace case and provisions a Role in the Secret's namespace so the fetch works, and
+                                    the equivalent surface in snowplow measured 23 of 26 references as cross-namespace. The
+                                    alternative considered was an RBAC check for a `use` verb against the requesting user, as
+                                    snowplow#1168 rules for its own endpoint Secrets. core-provider has no requesting user on a
+                                    reconcile: there is no SubjectAccessReview, UserInfo, impersonation or admission webhook
+                                    anywhere in this repo, so a reconcile sees this object and nothing about who wrote it. A
+                                    ServiceAccount substituted for the absent user would be a confused deputy with an
+                                    authorization check bolted on, which reads as authorised while being nothing of the kind.
+                                    The control therefore lives on who may write a CompositionDefinition at all.
+
+                                    What is NOT in scope of that decision, and is fixed separately: the DESTINATION. A
+                                    credentialed fetch refuses link-local (including the cloud metadata service at
+                                    169.254.169.254), unspecified and multicast addresses, checked at dial time on the resolved
+                                    address (plumbing dialguard, snowplow#1131).
                                   properties:
                                     key:
                                       description: The key to select.

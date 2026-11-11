@@ -75,6 +75,13 @@ var (
 	// via COMPOSITION_AUTHN_NAMESPACE; defaults to "krateo-system".
 	AuthnNamespace = envOr("COMPOSITION_AUTHN_NAMESPACE", "krateo-system")
 
+	// ManagementNamespace is where every LOCAL composition controller lives (#313): core-provider's
+	// own namespace, from the downward API (CDC_NAMESPACE, set by the chart). There is no default.
+	// Falling back to the definition's namespace would silently keep the deadlock #313 removes, and
+	// assuming "krateo-system" would be wrong for any install elsewhere. Setup refuses to start
+	// without it.
+	ManagementNamespace = envOr("CDC_NAMESPACE", "")
+
 	// SnowplowURL is snowplow's base URL. When a CompositionDefinition declares an apiRef,
 	// core-provider calls snowplow's dispatch-free GET /rbac to enumerate the RESTAction's
 	// read-set and grant it to the per-composition group. Override via CORE_PROVIDER_SNOWPLOW_URL;
@@ -108,9 +115,16 @@ type Options struct {
 	// Metrics records reconcile telemetry for the CompositionDefinition controller.
 	Metrics    reconciler.MetricsRecorder
 	Pluralizer pluralizerlib.PluralizerInterface
+	// RemoveDanglingRBAC lets a definition's Update DELETE the bindings that name only a retired
+	// controller's absent ServiceAccount (#414). False (the default) is a dry run: they are found and
+	// logged, and nothing is deleted.
+	RemoveDanglingRBAC bool
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
+	if ManagementNamespace == "" {
+		return errNoManagementNamespace
+	}
 	name := reconciler.ControllerName(compositiondefinitionsv1alpha1.CompositionDefinitionGroupKind)
 
 	l := o.ControllerOptions.Logger.WithValues("controller", name)
@@ -151,6 +165,8 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			log:        l,
 			recorder:   recorder,
 			pluralizer: o.Pluralizer,
+
+			removeDanglingRBAC: o.RemoveDanglingRBAC,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -322,6 +338,8 @@ type connector struct {
 	log        logging.Logger
 	recorder   record.EventRecorder
 	pluralizer pluralizerlib.PluralizerInterface
+
+	removeDanglingRBAC bool
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -342,6 +360,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		log:         log,
 		rec:         c.recorder,
 		pluralizer:  c.pluralizer,
+
+		removeDanglingRBAC: c.removeDanglingRBAC,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -393,6 +413,9 @@ type external struct {
 	// resourceVersion of the kubeconfig Secret used to reach it.
 	remote                bool
 	secretResourceVersion string
+
+	// removeDanglingRBAC: see Options.RemoveDanglingRBAC.
+	removeDanglingRBAC bool
 }
 
 // setTargetStatus records where the controller is deployed and whether that cluster is
@@ -748,6 +771,14 @@ func apiRefName(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string
 	return cr.Spec.ApiRef.Name
 }
 
+// apiRefDelegation is the definition's declared spec.apiRef.delegation (#405), or nil.
+func apiRefDelegation(cr *compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.ApiRefDelegation {
+	if cr.Spec.ApiRef == nil {
+		return nil
+	}
+	return cr.Spec.ApiRef.Delegation
+}
+
 func apiRefNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
 	if cr.Spec.ApiRef == nil {
 		return ""
@@ -796,23 +827,49 @@ func seedReadyIfAbsent(cr *compositiondefinitionsv1alpha1.CompositionDefinition)
 	}
 }
 
+// markUpdatePending is what an Observe that found drift, and hands the reconcile to Update, says about
+// Ready (#395, Diego 2026-11-10). provider-runtime >= v1.8.0 requires every successful Observe to set
+// Ready and resets it to Unknown/NotObserved on an Observe error, so the six drift returns, which set
+// nothing, would leave NotObserved in place after an error and report a contract breach.
+//
+// The rule: KEEP the definition's last real Ready. Its controller keeps serving the current version
+// while the update runs, so a chart bump or digest change must not flap it to False. Only when Ready is
+// absent or NotObserved (a first pass, or after an Observe error), when there is no real verdict to
+// keep, does it say Ready=False/Creating "update pending: <why>".
+func markUpdatePending(cr *compositiondefinitionsv1alpha1.CompositionDefinition, why string) {
+	cur := cr.GetCondition(rtv1.TypeReady)
+	switch {
+	case cur.Reason == "", cur.Reason == rtv1.ReasonNotObserved,
+		// Already this function's own verdict: refresh it, so the message names the CURRENT drift
+		// rather than whichever drift was first seen (review of #434, nit). Any other Creating, and
+		// every real verdict, is left alone.
+		cur.Reason == rtv1.ReasonCreating && strings.HasPrefix(cur.Message, updatePendingPrefix):
+		cr.SetConditions(rtv1.Creating().WithMessage(updatePendingPrefix + why))
+	}
+}
+
+// updatePendingPrefix starts every message markUpdatePending writes, which is how it recognises its own.
+const updatePendingPrefix = "update pending: "
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
-	// Engine reconcile span. core-provider is the top of the chain (no inbound traceparent);
-	// the OTel log handler (provider-runtime logging.NewOTelHandler) bridges this span's
-	// trace_id/span_id onto every log of the reconcile. No-op tracer until OTEL_TRACING_ENABLED.
+	// core-provider's own observe span, a child of provider-runtime's reconcile/observe spans since
+	// v1.14 (#395): the runtime opens the Server-kind root (linked to any krateo.io/traceparent), so
+	// this one is Internal. The log handler bridges the active span's trace_id/span_id onto records
+	// logged through a ctx-bound Logger (logging.WithContext). No-op tracer until OTEL_TRACING_ENABLED.
 	ctx, span := coretelemetry.Tracer().Start(ctx, "compositiondefinition.observe",
-		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String("k8s.object.name", cr.GetName()),
 			attribute.String("k8s.object.namespace", cr.GetNamespace()),
 		),
 	)
 	defer span.End()
-	log := e.log.WithValues("operation", "observe")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "observe")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	// D3 (2026-07-08): the managed reconciler hands us the CompositionDefinition from the
@@ -1032,6 +1089,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	if !statusChanged {
 		log.Debug("CRD status changed", "gvr", gvr.String())
+		markUpdatePending(cr, "the generated CRD differs from the served one")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1058,11 +1116,16 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error seeding remote target: %w", err)
 	}
 
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return reconciler.ExternalObservation{}, aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 		KubeClient:             e.kube,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
@@ -1074,6 +1137,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1086,12 +1151,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error deploying dynamic controller in dry-run mode: %w", err)
 	}
 
 	if cr.Status.Digest != dig {
 		log.Debug("Rendered resources digest changed", "status", cr.Status.Digest, "rendered", dig)
+		markUpdatePending(cr, "the rendered controller resources changed")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1104,6 +1171,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if cr.Status.Digest != dig {
 		log.Debug("Deployed resources digest changed", "status", cr.Status.Digest, "deployed", dig)
+		markUpdatePending(cr, "the deployed controller resources drifted")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1119,6 +1187,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if len(orphans) > 0 {
 		log.Info("Orphaned compositions pending adoption", "gvr", gvr.String(), "count", len(orphans))
+		markUpdatePending(cr, fmt.Sprintf("%d orphaned compositions pending adoption", len(orphans)))
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1150,6 +1219,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			}
 			if len(stale.Items) > 0 {
 				log.Debug("Compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				markUpdatePending(cr, fmt.Sprintf("%d compositions pending migration from %s", len(stale.Items), vi.Version))
 				return reconciler.ExternalObservation{
 					ResourceExists:   true,
 					ResourceUpToDate: false,
@@ -1168,6 +1238,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
 	} else if len(prunable) > 0 {
 		log.Debug("Stale served versions pending prune", "versions", prunable)
+		markUpdatePending(cr, fmt.Sprintf("stale served versions pending prune: %v", prunable))
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1378,7 +1449,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf(errNotCR)
 	}
 
-	log := e.log.WithValues("operation", "create")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "create")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	log.Info("Creating CompositionDefinition")
@@ -1438,11 +1510,20 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return err
+	}
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 		KubeClient:             e.kube,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
@@ -1454,6 +1535,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1466,6 +1549,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return err
 	}
@@ -1563,7 +1647,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf(errNotCR)
 	}
 
-	log := e.log.WithValues("operation", "update")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "update")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	log.Info("Updating CompositionDefinition")
@@ -1727,7 +1812,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	//
 	// Called from Update rather than Observe because Update runs only when something changed, so
 	// the Deployment LIST this costs is not paid per reconcile across 68 controllers.
-	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace,
+	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace, controllerPlacements(cr),
 		func(ctx context.Context, retired schema.GroupVersionResource) error {
 			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, currentControllerNamespace(cr, owner), log)
 		})
@@ -1747,6 +1832,16 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 			log.Debug("leaked-controller check kept candidates", "reasons", kept)
 		}
 	}
+
+	// #414. Bindings that name ONLY a retired controller version's ServiceAccount, which is absent,
+	// for a version no longer on the CRD. Derived RBAC was renamed twice and ResubjectDerivedRBAC
+	// repoints only the current name, so the older-named bindings kept their era's identity after
+	// retirement deleted it (128 on 057, 2026-11-09). After the reclaim, so whatever it just retired
+	// has been repointed first. Like the reclaim, a failure never fails the Update: it is logged and
+	// tried again on the next one.
+	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr), false)
+	msg, kv := danglingSweepLogLine(danglingPhaseUpdate, gvr.Resource, sweep, serr)
+	log.Info(msg, kv...)
 
 	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
 	// `crd`: the VersionInfo projection keeps only versions present in the CRD it is given, so feeding
@@ -1798,11 +1893,20 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		return gvr, err
 	}
 
+	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
+	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
+		return gvr, err
+	}
+	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr != nil {
+		return gvr, aerr
+	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 		KubeClient:             e.kube,
 		Namespace:              cr.Namespace,
+		ControllerNamespace:    controllerNamespace(cr),
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
@@ -1814,6 +1918,8 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
+		ApiRefDelegation:       apiRefDelegation(cr),
+		AuthnSupport:           authnSupport,
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
@@ -1826,6 +1932,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
+	recordAuthnDelegation(cr, authnSupport)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}
@@ -1937,7 +2044,8 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
-	log := e.log.WithValues("operation", "delete")
+	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
+	log := logging.WithContext(e.log, ctx).WithValues("operation", "delete")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
 	cr.SetConditions(rtv1.Deleting())
@@ -2136,6 +2244,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				KubeClient:             e.kube,
 				GVR:                    oldVerGVR,
 				Namespace:              cr.Namespace,
+				ControllerNamespace:    controllerNamespace(cr),
 				SkipCRD:                true,
 				DynamicClient:          e.dynamic,
 				RBACFolderPath:         CDCrbacConfigFolder,
@@ -2162,6 +2271,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			KubeClient:             e.kube,
 			GVR:                    gvr,
 			Namespace:              cr.Namespace,
+			ControllerNamespace:    controllerNamespace(cr),
 			SkipCRD:                skipCRD,
 			DynamicClient:          e.dynamic,
 			RBACFolderPath:         CDCrbacConfigFolder,
@@ -2179,6 +2289,16 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			}
 			return fmt.Errorf("error undeploying CompositionDefinition: %w", err)
 
+		}
+
+		// #414: the bindings this definition's controllers leave behind. The sweep in Update reaches
+		// only definitions that still exist, so a deleted definition's leftovers were never removed
+		// (15 of 130 on krateo-057). Runs after Undeploy, so the current controller's ServiceAccount
+		// is gone too. When this Delete removed the Kind's CRD (no other definition keeps it), every
+		// version is retired by that act; otherwise the live CRD says which are. A handed-over
+		// controller returned above, before this, because its ServiceAccount lives on.
+		if err := e.sweepOnDelete(ctx, gvr, controllerPlacements(cr), skipCRD, log); err != nil {
+			return err
 		}
 	} else {
 		log.Debug("CRD not found, deletion has already been completed", "gvk", gvk.String())

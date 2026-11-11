@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 
 	"github.com/gobuffalo/flect"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/rbac"
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
@@ -85,6 +87,13 @@ var (
 	chartInspectorExtraMu sync.Mutex
 	chartInspectorExtra   []map[string]string
 )
+
+// chartInspectorUnreadable makes the mock answer as the real chart-inspector does when the chart's
+// passwordRef Secret is gone: it reads that Secret to fetch the chart
+// (chart-inspector/internal/handlers/resources/get/resources.go:228) and fails (#402). Without it the
+// mock would answer anyway, and a Delete that fell back to regenerating RBAC from the chart would
+// look exactly like one that released it by its recorded owner.
+var chartInspectorUnreadable atomic.Bool
 
 func setChartInspectorExtra(rs []map[string]string) {
 	chartInspectorExtraMu.Lock()
@@ -182,6 +191,10 @@ func TestController(t *testing.T) {
 			// --- start chart-inspector mock server ---
 			mux := http.NewServeMux()
 			mux.HandleFunc("/resources", func(w http.ResponseWriter, r *http.Request) {
+				if chartInspectorUnreadable.Load() {
+					http.Error(w, `secrets "registry-token-402" not found`, http.StatusInternalServerError)
+					return
+				}
 				resources := []map[string]string{
 					{
 						"group":     "finops.krateo.io",
@@ -558,6 +571,87 @@ func TestController(t *testing.T) {
 			t.FailNow()
 		}
 
+		return ctx
+	}).Assess("Idle: an unchanged reconcile writes nothing, and a real status change still writes (#439)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// Observe ends with an UNCONDITIONAL updateStatus. That is only free if the status it sends
+		// is byte-identical to the stored one, because then the apiserver writes nothing and
+		// resourceVersion does not move. Until #439 the cdc stamped status.lastReconcileTime on every
+		// pass, so every idle reconcile was a real write: ~1.4/s on 057, each one waking every watcher.
+		//
+		// The sleep matters. The old timestamp had one-second resolution, so two passes inside the
+		// same second would have agreed even with the stamp present, and this assessment would pass
+		// against the defect it guards.
+		dy := dynamic.NewForConfigOrDie(c)
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Error("Decoding composition manifests.", "error", err)
+			return ctx
+		}
+		version := obj.GetLabels()["krateo.io/composition-version"]
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  version,
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+
+		observe := func(label string) *unstructured.Unstructured {
+			t.Helper()
+			u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("%s: getting composition: %v", label, err)
+			}
+			if _, err := handler.Observe(ctx, u); err != nil {
+				t.Fatalf("%s: Observe: %v", label, err)
+			}
+			after, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("%s: getting composition: %v", label, err)
+			}
+			return after
+		}
+		statusOf := func(u *unstructured.Unstructured) string {
+			st, _, _ := unstructured.NestedMap(u.Object, "status")
+			b, _ := json.Marshal(st)
+			return string(b)
+		}
+
+		// Warm-up: whatever the earlier assessments left unconverged gets written here, not below.
+		settled := observe("warm-up")
+		time.Sleep(1100 * time.Millisecond)
+		idle := observe("idle pass")
+		if idle.GetResourceVersion() != settled.GetResourceVersion() {
+			t.Errorf("an idle reconcile wrote the composition: resourceVersion %s -> %s.\nbefore: %s\nafter:  %s",
+				settled.GetResourceVersion(), idle.GetResourceVersion(), statusOf(settled), statusOf(idle))
+		}
+		if _, found, _ := unstructured.NestedFieldNoCopy(idle.Object, "status", "lastReconcileTime"); found {
+			t.Errorf("status.lastReconcileTime is still present after a pass (#439 dropped it)")
+		}
+
+		// CONTROL: the unchanged resourceVersion above must not be because Observe never reached its
+		// write. Corrupt one controller-owned field out of band; the next pass must put it back,
+		// which is a real write, so resourceVersion moves.
+		want, _, _ := unstructured.NestedString(idle.Object, "status", "helmChartVersion")
+		if want == "" {
+			t.Fatal("premise: status.helmChartVersion is empty, so corrupting it would not be detectable")
+		}
+		corrupt := idle.DeepCopy()
+		if err := unstructured.SetNestedField(corrupt.Object, "0.0.0-corrupted", "status", "helmChartVersion"); err != nil {
+			t.Fatal(err)
+		}
+		corrupted, err := cli.UpdateStatus(ctx, corrupt, metav1.UpdateOptions{})
+		if err != nil {
+			t.Fatalf("corrupting status: %v", err)
+		}
+		healed := observe("pass after corruption")
+		if got, _, _ := unstructured.NestedString(healed.Object, "status", "helmChartVersion"); got != want {
+			t.Errorf("control: status.helmChartVersion = %q after a pass, want %q restored", got, want)
+		}
+		if healed.GetResourceVersion() == corrupted.GetResourceVersion() {
+			t.Errorf("control: a pass that changed status did not move resourceVersion (%s), so the "+
+				"idle arm above cannot tell a no-op write from no write at all", corrupted.GetResourceVersion())
+		}
+		t.Logf("idle pass: rv %s -> %s (must be equal); control: rv %s -> %s (must differ)",
+			settled.GetResourceVersion(), idle.GetResourceVersion(), corrupted.GetResourceVersion(), healed.GetResourceVersion())
 		return ctx
 	}).Assess("Regression: A Stale ResourceVersion Is A Quiet Requeue, Never A Wedge", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		// A reconcile holds the copy of the CR it began with, and a concurrent writer (an umbrella
@@ -1610,6 +1704,35 @@ func TestController(t *testing.T) {
 			return ctx
 		}
 
+		// #402, in the incident's order: the composition was installed normally above; NOW its chart's
+		// passwordRef Secret disappears (as in a namespace teardown that removes it first), and the
+		// deletion must still finish. Three things make that hold, each checked rather than assumed:
+		//   1. the derived RBAC records this composition as its owner, so Delete can release it without
+		//      the chart. Precondition, or Delete would take the regeneration fallback;
+		//   2. the getter's Get really fails now (the control: the fixture does break chart access);
+		//   3. chart-inspector fails too, as the real one does, so the fallback cannot quietly succeed.
+		uid := u.GetUID()
+		if n := countOwnedRBAC(ctx, t, dy, uid); n == 0 {
+			t.Fatalf("precondition: no derived RBAC records %s as its owner, so Delete would fall back to the chart", uid)
+		} else {
+			t.Logf("#402: %d derived RBAC objects record the composition as owner before Delete", n)
+		}
+		// As an administrator, not as the controller: dy authenticates as the cdc's test ServiceAccount,
+		// which rightly may not edit CompositionDefinitions. Removing a chart's credential is the
+		// operator's act this step simulates.
+		adminDy := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
+		restoreCD := setAbsentPasswordRef(ctx, t, adminDy, "focus-data-presentation-azure", namespace)
+		defer restoreCD()
+		probeGetter, err := archive.Dynamic(cfg.Client().RESTConfig(), FakePluralizer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := probeGetter.Get(u); err == nil {
+			t.Fatal("control: the getter's Get succeeded although the passwordRef Secret is absent, so this step would not exercise #402")
+		}
+		chartInspectorUnreadable.Store(true)
+		defer chartInspectorUnreadable.Store(false)
+
 		err = cli.Delete(ctx, obj.GetName(), metav1.DeleteOptions{})
 		if err != nil {
 			t.Error("Deleting composition.", "error", err)
@@ -1662,6 +1785,11 @@ func TestController(t *testing.T) {
 		if !errors.IsNotFound(err) {
 			t.Error("Getting composition.", "error", err)
 			return ctx
+		}
+
+		// #402: the RBAC was released by its recorded owner, with the chart unreadable throughout.
+		if n := countOwnedRBAC(ctx, t, dy, uid); n != 0 {
+			t.Errorf("#402: %d derived RBAC objects still record the deleted composition %s as owner", n, uid)
 		}
 
 		return ctx
@@ -1911,4 +2039,62 @@ func SetSAToken(ctx context.Context, t *testing.T, cfg *envconf.Config) *rest.Co
 	}
 
 	return config
+}
+
+// countOwnedRBAC counts the derived RBAC objects (ClusterRoles, ClusterRoleBindings, Roles,
+// RoleBindings, cluster-wide) that record uid as an owner (#402).
+func countOwnedRBAC(ctx context.Context, t *testing.T, dy dynamic.Interface, uid types.UID) int {
+	t.Helper()
+	sel := metav1.ListOptions{LabelSelector: rbac.OwnerLabelKey(uid)}
+	n := 0
+	for _, res := range []string{"clusterroles", "clusterrolebindings", "roles", "rolebindings"} {
+		gvr := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: res}
+		l, err := dy.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, sel)
+		if err != nil {
+			t.Fatalf("listing %s owned by %s: %v", res, uid, err)
+		}
+		n += len(l.Items)
+	}
+	return n
+}
+
+// setAbsentPasswordRef points the definition's chart credentials at a Secret that does not exist,
+// and returns a func restoring the previous spec.chart.credentials.
+func setAbsentPasswordRef(ctx context.Context, t *testing.T, dy dynamic.Interface, name, ns string) func() {
+	t.Helper()
+	gvr := schema.GroupVersionResource{Group: "core.krateo.io", Version: "v1alpha1", Resource: "compositiondefinitions"}
+	secrets := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	if _, err := dy.Resource(secrets).Namespace(ns).Get(ctx, "registry-token-402", metav1.GetOptions{}); !errors.IsNotFound(err) {
+		t.Fatalf("setup: Secret %s/registry-token-402 must not exist (err %v)", ns, err)
+	}
+	cd, err := dy.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get definition %s/%s: %v", ns, name, err)
+	}
+	prev, hadPrev, _ := unstructured.NestedMap(cd.Object, "spec", "chart", "credentials")
+	creds := map[string]interface{}{
+		"username":    "deploy-bot",
+		"passwordRef": map[string]interface{}{"name": "registry-token-402", "namespace": ns, "key": "token"},
+	}
+	if err := unstructured.SetNestedMap(cd.Object, creds, "spec", "chart", "credentials"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dy.Resource(gvr).Namespace(ns).Update(ctx, cd, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("set an absent passwordRef on %s/%s: %v", ns, name, err)
+	}
+	return func() {
+		cur, err := dy.Resource(gvr).Namespace(ns).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("restore %s/%s: %v", ns, name, err)
+			return
+		}
+		if hadPrev {
+			_ = unstructured.SetNestedMap(cur.Object, prev, "spec", "chart", "credentials")
+		} else {
+			unstructured.RemoveNestedField(cur.Object, "spec", "chart", "credentials")
+		}
+		if _, err := dy.Resource(gvr).Namespace(ns).Update(context.Background(), cur, metav1.UpdateOptions{}); err != nil {
+			t.Logf("restore %s/%s: %v", ns, name, err)
+		}
+	}
 }

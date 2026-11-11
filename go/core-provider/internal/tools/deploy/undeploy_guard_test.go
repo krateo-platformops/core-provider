@@ -44,9 +44,10 @@ func TestUndeploy_RefusesWhenUnlabeledInstanceExists(t *testing.T) {
 	dyn := dynWith(newInstance("orphan", "default")) // no krateo.io/composition-version label
 
 	err := Undeploy(context.Background(), nil, UndeployOptions{
-		GVR:           guardGVR,
-		DynamicClient: dyn,
-		SkipCRD:       false,
+		ControllerNamespace: "test-ns",
+		GVR:                 guardGVR,
+		DynamicClient:       dyn,
+		SkipCRD:             false,
 	})
 
 	if !errors.Is(err, ErrCompositionStillExist) {
@@ -60,9 +61,10 @@ func TestUndeploy_SkipCRDBypassesGuard(t *testing.T) {
 	dyn := dynWith(newInstance("live", "default"))
 
 	err := Undeploy(context.Background(), nil, UndeployOptions{
-		GVR:           guardGVR,
-		DynamicClient: dyn,
-		SkipCRD:       true,
+		ControllerNamespace: "test-ns",
+		GVR:                 guardGVR,
+		DynamicClient:       dyn,
+		SkipCRD:             true,
 		// no template paths: this fails later, but it must NOT be the still-exist guard.
 	})
 
@@ -77,9 +79,10 @@ func TestUndeploy_NoInstancesPassesGuard(t *testing.T) {
 	dyn := dynWith()
 
 	err := Undeploy(context.Background(), nil, UndeployOptions{
-		GVR:           guardGVR,
-		DynamicClient: dyn,
-		SkipCRD:       false,
+		ControllerNamespace: "test-ns",
+		GVR:                 guardGVR,
+		DynamicClient:       dyn,
+		SkipCRD:             false,
 	})
 
 	if errors.Is(err, ErrCompositionStillExist) {

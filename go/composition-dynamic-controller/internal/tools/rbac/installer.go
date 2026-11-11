@@ -334,6 +334,11 @@ func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbac
 			modified = true
 		}
 	}
+	// #402: record the owner on an object that predates it, keeping every other owner's key.
+	if l, changed := mergeLabels(existingRole.Labels, role.Labels); changed {
+		existingRole.Labels = l
+		modified = true
+	}
 
 	if !modified {
 		return existingRole, nil
@@ -395,6 +400,10 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 	if err := errIfHelmOwned(existingU, "RoleBinding"); err != nil {
 		return nil, err
 	}
+	// This Update replaces the whole object, so keep the labels already there (#402: other owners'
+	// keys), with the desired ones on top.
+	merged, _ := mergeLabels(existingU.GetLabels(), u.GetLabels())
+	u.SetLabels(merged)
 
 	res, err := cli.Update(ctx, u, metav1.UpdateOptions{})
 	if err != nil {
@@ -460,6 +469,11 @@ func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv
 			modified = true
 		}
 	}
+	// #402: record the owner on an object that predates it, keeping every other owner's key.
+	if l, changed := mergeLabels(existingClusterRole.Labels, clusterRole.Labels); changed {
+		existingClusterRole.Labels = l
+		modified = true
+	}
 
 	if !modified {
 		return existingClusterRole, nil
@@ -520,6 +534,10 @@ func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRole
 	if err := errIfHelmOwned(existingU, "ClusterRoleBinding"); err != nil {
 		return nil, err
 	}
+	// This Update replaces the whole object, so keep the labels already there (#402: other owners'
+	// keys), with the desired ones on top.
+	mergedCRB, _ := mergeLabels(existingU.GetLabels(), u.GetLabels())
+	u.SetLabels(mergedCRB)
 
 	res, err := cli.Update(ctx, u, metav1.UpdateOptions{})
 	if err != nil {

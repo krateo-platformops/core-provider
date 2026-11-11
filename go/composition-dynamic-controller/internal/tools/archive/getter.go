@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -62,6 +63,11 @@ func (i *Info) IsHTTP() bool {
 
 type Getter interface {
 	Get(un *unstructured.Unstructured) (*Info, error)
+	// Locate returns what Get does except the registry credentials, and reads no Secret: the
+	// composition's definition, its chart URL/version/repo, and the definition's identity. For callers
+	// that never fetch the chart. A composition's Delete is one (#402): it must finish even when the
+	// chart's passwordRef Secret is gone, and the uninstall needs none of the chart's content.
+	Locate(un *unstructured.Unstructured) (*Info, error)
 	WithLogger(logger logging.Logger) Getter
 }
 
@@ -94,6 +100,8 @@ func (pig staticGetter) WithLogger(logger logging.Logger) Getter {
 	}
 }
 
+func (pig staticGetter) Locate(un *unstructured.Unstructured) (*Info, error) { return pig.Get(un) }
+
 func (pig staticGetter) Get(_ *unstructured.Unstructured) (*Info, error) {
 	return &Info{
 		URL: pig.chartName,
@@ -119,7 +127,15 @@ func (g *dynamicGetter) WithLogger(logger logging.Logger) Getter {
 	}
 }
 
-func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
+func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) { return g.get(uns, true) }
+
+func (g *dynamicGetter) Locate(uns *unstructured.Unstructured) (*Info, error) {
+	return g.get(uns, false)
+}
+
+// get is Get, and with withCredentials false it is Locate: the passwordRef Secret is not read and
+// Info.Auth is nil.
+func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool) (*Info, error) {
 	if uns == nil {
 		return nil, fmt.Errorf("unstructured object is nil")
 	}
@@ -171,10 +187,23 @@ func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
 		}
 		if compositionDefinition != nil {
 			version, kind, err := getChartVersionKind(compositionDefinition)
-			if err != nil {
+			switch {
+			case err == nil:
+			case !withCredentials && errors.Is(err, errDefinitionStatusUnset):
+				// Locate, which a composition's Delete uses (#419). The labels name this definition
+				// exactly (name, namespace, GVR); with no status there is nothing to check them
+				// against. A definition with no status never became Available, so no version
+				// migration can be in flight for isVersionMigrationHandover to protect. Failing here
+				// instead deadlocked: the definition's Delete waits for its compositions, and the
+				// composition's Delete needed this status, which a definition deleted before its
+				// first status write never gets. Get (Create/Update) still requires it.
+				g.logger.Debug("Composition definition has no status yet; trusting the composition's labels to locate it for teardown",
+					"compositionDefinitionName", cdInfo.Name, "compositionDefinitionNamespace", cdInfo.Namespace)
+				break
+			default:
 				return nil, fmt.Errorf("error getting chart version and kind from composition definition '%s' in namespace '%s': %w", cdInfo.Name, cdInfo.Namespace, err)
 			}
-			if version != uns.GetLabels()[compositionMeta.CompositionVersionLabel] || kind != uns.GetKind() {
+			if err == nil && (version != uns.GetLabels()[compositionMeta.CompositionVersionLabel] || kind != uns.GetKind()) {
 				g.logger.Warn("Labels do not match composition definition", "compositionDefinitionName", cdInfo.Name, "compositionDefinitionNamespace", cdInfo.Namespace, "gvr", gvr.String(), "expectedVersion", uns.GetLabels()[compositionMeta.CompositionVersionLabel], "foundVersion", version, "expectedKind", uns.GetKind(), "foundKind", kind)
 				compositionDefinition = nil
 			}
@@ -226,7 +255,7 @@ func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
 	}
 
 	var password string
-	if passwordRef != nil {
+	if passwordRef != nil && withCredentials {
 		password, err = GetSecret(context.Background(), g.dynamicClient, SecretKeySelector{
 			Name:      passwordRef["name"],
 			Namespace: passwordRef["namespace"],
@@ -250,13 +279,10 @@ func (g *dynamicGetter) Get(uns *unstructured.Unstructured) (*Info, error) {
 	}
 
 	return &Info{
-		URL:     packageUrl,
-		Version: packageVersion,
-		Repo:    repo,
-		Auth: &Auth{
-			Username: username,
-			Password: password,
-		},
+		URL:                   packageUrl,
+		Version:               packageVersion,
+		Repo:                  repo,
+		Auth:                  authOrNil(withCredentials, username, password),
 		InsecureSkipTLSverify: insecureSkipTLSverify,
 		CompositionDefinitionInfo: &CompositionDefinitionInfo{
 			Name:      compositionDefinition.GetName(),
@@ -422,13 +448,18 @@ func (g *dynamicGetter) searchCompositionDefinition(gvr schema.GroupVersionResou
 	return compositionDefinition, nil
 }
 
+// errDefinitionStatusUnset marks a CompositionDefinition whose status core-provider has not written
+// yet (no status.apiVersion / status.kind): it never became Available. Distinct from a status that is
+// present but malformed, which stays a hard error.
+var errDefinitionStatusUnset = errors.New("the composition definition's status is not set yet")
+
 func getChartVersionKind(el *unstructured.Unstructured) (string, string, error) {
 	apiversion, ok, err := unstructured.NestedString(el.UnstructuredContent(), "status", "apiVersion")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to resolve 'status.apiVersion': %w", err)
 	}
 	if !ok {
-		return "", "", fmt.Errorf("missing 'status.apiVersion'")
+		return "", "", fmt.Errorf("missing 'status.apiVersion': %w", errDefinitionStatusUnset)
 	}
 	versionSplit := strings.Split(apiversion, "/")
 	if len(versionSplit) != 2 {
@@ -439,9 +470,17 @@ func getChartVersionKind(el *unstructured.Unstructured) (string, string, error) 
 		return "", "", fmt.Errorf("failed to resolve 'status.kind': %w", err)
 	}
 	if !ok {
-		return "", "", fmt.Errorf("missing 'status.kind'")
+		return "", "", fmt.Errorf("missing 'status.kind': %w", errDefinitionStatusUnset)
 	}
 
 	version := versionSplit[1]
 	return version, kind, nil
+}
+
+// authOrNil is the registry credentials, or nil for Locate, which reads none.
+func authOrNil(withCredentials bool, username, password string) *Auth {
+	if !withCredentials {
+		return nil
+	}
+	return &Auth{Username: username, Password: password}
 }

@@ -28,11 +28,12 @@ func TestAuthnMappingNameAndGroup(t *testing.T) {
 
 func TestRenderAuthnServiceAccountMapping(t *testing.T) {
 	opts := DeployOptions{
-		GVR:            schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
-		Namespace:      "apps",
-		RBACFolderPath: "testdata",
-		ApiRefName:     "status-sources",
-		AuthnNamespace: "krateo-system",
+		GVR:                 schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
+		Namespace:           "apps",
+		ControllerNamespace: "apps",
+		RBACFolderPath:      "testdata",
+		ApiRefName:          "status-sources",
+		AuthnNamespace:      "krateo-system",
 	}
 	obj, err := renderAuthnServiceAccountMapping(opts, "fireworksapps-v1-0-0", "apps")
 	if err != nil {
@@ -63,7 +64,8 @@ func TestRenderAuthnServiceAccountMapping(t *testing.T) {
 // The mapping must contribute to the digest only when an apiRef is declared, so existing
 // (non-apiRef) compositions keep their digests and toggling apiRef triggers a redeploy.
 func TestHashAuthnServiceAccountMapping_GatedByApiRef(t *testing.T) {
-	base := DeployOptions{Namespace: "apps", AuthnNamespace: "krateo-system"}
+	base := DeployOptions{
+		ControllerNamespace: "test-ns", Namespace: "apps", AuthnNamespace: "krateo-system"}
 
 	h1 := hasher.NewFNVObjectHash()
 	if err := hashAuthnServiceAccountMapping(base, "sa", &h1); err != nil {
