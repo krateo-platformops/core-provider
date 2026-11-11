@@ -1793,6 +1793,8 @@ func TestController(t *testing.T) {
 		}
 
 		return ctx
+	}).Assess("TraceActPlacement", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		return assessTraceActPlacement(ctx, t, cfg, handler, c)
 	}).Feature()
 
 	testenv.Test(t, f)
