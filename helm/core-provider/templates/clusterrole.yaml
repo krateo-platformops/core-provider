@@ -34,6 +34,19 @@ rules:
   - deployments
   verbs:
   - '*'
+# #393. provider-runtime's scaletozero helper reads and patches a composition controller's SCALE
+# subresource. The rule above does not cover it: RBAC matches a subresource only by its own name
+# (or "*"), and without this the helper's scale GET is a 403, which by its contract changes nothing,
+# so an opted-in controller would silently never scale. Only get and patch: the helper does nothing
+# else to the scale. Asserted by TestControllerClusterRoleGrantsTheScaleToZeroHelper (rbacguard),
+# because the calls are made inside provider-runtime and the AST guard cannot see them.
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  verbs:
+  - get
+  - patch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
