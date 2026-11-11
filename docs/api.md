@@ -34,6 +34,8 @@ The input: "serve this chart as a Kubernetes API".
 | `statusDataTemplate[]` | `{forPath, expression, type?, schema?, preserveUnknownFields?}` | Projected status fields: `${ jq }` over `self`/`spec`/`status`/`helm`/`api`, written under `.status` at `forPath`. `type` XOR `schema` XOR `preserveUnknownFields`; validated at reconcile (reserved baseline keys rejected). |
 | `upgradePolicy` | `Automatic` \| `Manual` \| `Paused` | Instance migration on a chart-version bump. `Automatic` (default) migrates eagerly; `Manual` waits for the `krateo.io/upgrade-to-version: <version>` annotation; `Paused` freezes migration. |
 | `controller.{workers,resyncInterval}` | int / duration | Per-Kind CDC tuning; overrides the chart-global `cdc.workers`/`cdc.resyncInterval` without restarting other controllers. |
+| `controller.scaleToZero` | bool | Run this Kind's controller at 0 replicas while it has no instances, and wake it on the first one (#393). Off when unset. **Local definitions only:** set together with a remote `deploy.targetRef` it is rejected at admission (remote is #442). A controller **shared** by several definitions of the same Kind and version scales to zero only when every one of them opts in. Costs one metadata-only watch on the Kind's instances. |
+| `controller.scaleToZeroHoldDown` | duration (default `10m`) | How long the Kind must have no instances before its controller goes to 0, counted from the first time core-provider sees it empty, so a delete followed by a re-create doesn't bounce it. |
 | `controller.pool` | string (DNS-1123 label) | **Inert in this release: accepted, validated, and ignored.** Reserves the name of a shared controller pool this Kind's controller will run in; set or absent, the Kind keeps its dedicated controller, unchanged. See [the pool design](design/cdc-pooling.md). |
 
 ### `status`
@@ -48,6 +50,26 @@ kubeconfig Secret `resourceVersion`). A definition with an `apiRef` also carries
 Partial RBAC is never written. While it is `False` the definition makes no progress, so a
 version bump is held too; the running controller and its compositions are untouched. It
 clears by itself once the read-set resolves.
+
+**`ControllerActive`** (every local definition, #393) says whether anything is reconciling this
+Kind right now, so a gate branches on a condition rather than matching a reason string. Its
+reasons are shared verbatim with oasgen-provider (plumbing's `conditions` package). Messages carry
+no counts, so the condition changes only when the state does:
+
+| Controller | `Ready` | `ControllerActive` |
+|---|---|---|
+| running | `True/Available` | `True/Running` |
+| at 0, opted into `scaleToZero` | `True/ScaledToZero` "idle: no instances since <t>; wakes on the first" | `False/ScaledToZero` |
+| at 0, **not** opted in (e.g. a manual `kubectl scale`) | `False/Unavailable`: nothing reconciles the Kind | `False/Unavailable` |
+| Deployment unreadable | unchanged | `Unknown/NotObserved` |
+
+A follower definition (one sharing another's controller) keeps its own Ready and reports
+`ControllerActive` for the shared controller. While a controller is at 0 its instances get no
+status at all: the wake is the definition's `ControllerActive` going `False` → `True`. Waking
+takes the scale patch (measured ~120ms after the instance is created, on envtest) plus pod
+scheduling and start. `status.scaleToZero` records the last decision: `lastSeen` (only while the
+Kind is empty), `replicas`, `reason` (`Active`, `IdleHoldDown`, `Idle`, `Unknown`) and `heldBy`
+(sharing definitions that have not opted in).
 
 | Reason | Meaning |
 |---|---|
