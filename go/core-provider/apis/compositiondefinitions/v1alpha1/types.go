@@ -137,6 +137,11 @@ type DeploymentTarget struct {
 	TargetRef *TargetReference `json:"targetRef,omitempty"`
 }
 
+// Scale-to-zero is local-only in this release (#393, Diego 2026-11-11): a remote definition's controller
+// and its instances live on the spoke, which needs spoke watches and spoke RBAC (core-provider#442).
+// Rejected at admission so nobody believes the opt-in is active when it is not. (No quote characters in
+// the rule: gofmt's doc-comment formatter rewrites two single quotes into a typographic quote.)
+// +kubebuilder:validation:XValidation:rule="!(has(self.controller) && has(self.controller.scaleToZero) && self.controller.scaleToZero) || !(has(self.deploy) && has(self.deploy.targetRef) && size(self.deploy.targetRef.name) > 0)",message="spec.controller.scaleToZero is supported for local definitions only; for a remote spec.deploy.targetRef see core-provider#442"
 type CompositionDefinitionSpec struct {
 	// rtv1.ManagedSpec `json:",inline"`
 	Chart *ChartInfo `json:"chart,omitempty"`
@@ -504,6 +509,35 @@ type CompositionDefinitionStatus struct {
 	// Digest: the digest of the managed resources
 	// +optional
 	Digest string `json:"digest,omitempty"`
+
+	// ScaleToZero is the scale-to-zero reconciler's state for a definition that opted in (#393).
+	// Absent otherwise. Written ONLY by that reconciler, with a merge patch on this field; the
+	// definition's main reconciler reads it to report Ready and ControllerActive.
+	// +optional
+	ScaleToZero *ScaleToZeroStatus `json:"scaleToZero,omitempty"`
+}
+
+// ScaleToZeroStatus records what provider-runtime's scaletozero helper last decided for this
+// definition's controller.
+type ScaleToZeroStatus struct {
+	// LastSeen is when an instance of the Kind was last seen; the hold-down counts from it. It is the
+	// helper's Result.LastSeen, persisted because the helper keeps no state.
+	// +optional
+	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
+
+	// Replicas is the controller Deployment's replicas after the last decision: 0 when idle.
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Reason is the helper's reason for that decision: Active, IdleHoldDown, Idle or Unknown.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// HeldBy names the live definitions that share this controller and have NOT opted in. While it is
+	// non-empty the shared controller is kept running (Diego, 2026-11-11: every sharing definition
+	// must opt in).
+	// +optional
+	HeldBy []string `json:"heldBy,omitempty"`
 }
 
 //+kubebuilder:object:root=true
