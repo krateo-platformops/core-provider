@@ -24,7 +24,7 @@ func TestControllerClusterRoleGrantsTheScaleToZeroHelper(t *testing.T) {
 	for _, need := range []struct{ group, resource, verb string }{
 		{"apps", "deployments/scale", "get"},
 		{"apps", "deployments/scale", "patch"},
-		{"composition.krateo.io", "fireworksapps", "list"}, // any composition Kind: the helper lists it metadata-only
+		{"composition.krateo.io", "fireworksapps", "list"},  // any composition Kind: the helper lists it metadata-only
 		{"composition.krateo.io", "fireworksapps", "watch"}, // the wake watch
 	} {
 		if ok, _ := Grants(rules, need.group, need.resource, need.verb); !ok {
