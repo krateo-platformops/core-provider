@@ -1,6 +1,6 @@
 # Controller audit records from the cdc and core-provider (core-provider#423, AUDIT-4)
 
-Status: DRAFT for decision. Measured against core-provider `15bace0` (cdc on plumbing v1.45.0+),
+Status: Q1 and Q2 DECIDED by Diego, 2026-11-11 (see Open questions); Q3 follows Q2. Measured against core-provider `15bace0` (cdc on plumbing v1.45.0+),
 plumbing v1.48.0, audit v0.5.0 (`schema/v1.yaml`). The target is audit **v0.6.0** (snowplow,
 tagged 2026-11-11 evening), which registers the two populations below. `content_sha256` is
 optional and waits on plumbing#124.
@@ -42,7 +42,7 @@ state), maps each verdict like this:
 | `deleted` | yes | `delete` | success | |
 | `specChanged` | yes | `Verb` (`patch`, or `update` under Force) | success | |
 | `metadataOnly` | **no** | | | `metadata_only` |
-| `compareFailed` | **open question Q1** | `Verb` | success | (`compare_failed` if excluded) |
+| `compareFailed` | yes (Q1: decided) | `Verb` | success | |
 | `kept` | yes | `delete` | **denied**, `kept_resource_policy`; body `kept: resource-policy` | |
 | `deleteNotDone` | yes | `delete` | failure | |
 | `createFailed` | yes | `create` | failure | |
@@ -103,11 +103,12 @@ a kept-deletion arm.
 
 ## Open questions
 
-- **Q1 `compareFailed`.** helm applied the child, but the before/after comparison failed. Record it
+- **Q1 `compareFailed`: DECIDED, record it.** helm applied the child, but the before/after comparison failed. Record it
   (a write that may have been a spec change; fail safe toward a row), or exclude it and count
   `compare_failed`? Recommendation: **record**. An audit gap is worse than an extra row, and
   Reconcile already treats it as a change.
-- **Q2 the three silent sites.** (a) plumbing reports `[]ObjectVerdict` from Install, Upgrade and
+- **Q2 the three silent sites: DECIDED, (a).** plumbing reports the verdict from Install,
+  Upgrade and Uninstall first, then #423 records all five sites uniformly. (a) plumbing reports `[]ObjectVerdict` from Install, Upgrade and
   Uninstall before #423 emits there (recommended). (b) #423 emits from Reconcile only, and the
   three sites stay unrecorded and are listed in coverage.md as a known gap until (a).
 - **Q3 install-through-Upgrade inside Reconcile** (`ObjectsComplete=false`, `Objects` empty). With
