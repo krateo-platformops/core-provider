@@ -33,9 +33,11 @@ import (
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/maps"
+	"github.com/krateo-platformops/plumbing/tracecontext"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/meta"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/telemetry"
+	"go.opentelemetry.io/otel/trace"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
@@ -288,6 +290,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	if paused && compositionMeta.IsGracefullyPaused(mg) {
 		log.Debug("Composition is gracefully paused, skipping observe.")
 		h.eventRecorder.Event(mg, event.Normal(reasonReconciliationGracefullyPaused, "Observe", "Reconciliation is paused via the gracefully paused annotation."))
+		// unstructured-runtime#78, the cdc's half. The runtime marks its own pause annotation; this
+		// pause is the cdc's, so the cdc marks the reconcile root (the active span here) with the same
+		// shared event, and trace-based liveness reads a gracefully paused composition as paused, not
+		// as freshly reconciled. A no-op with tracing off.
+		trace.SpanFromContext(ctx).AddEvent(tracecontext.EventReconcilePaused)
 
 		// #258. RETURNED, not written. Before this the pause was invisible on the object: an
 		// already-paused composition kept whatever Ready it had, so one paused while Unavailable
@@ -395,6 +402,23 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			ResourceUpToDate: false,
 		}, nil
 	}
+
+	// unstructured-runtime#77. From here Observe APPLIES changes (derived RBAC, the stuck-release
+	// recovery, helm Reconcile), so this is where it declares its act. For the first act on a new
+	// krateo.io/traceparent value, StartAct writes the continuation marker and joins the upstream
+	// trace, so the change the frontend (or a parent composition) asked for shows in its trace.
+	// NOT earlier: a new composition's first Observe ends at the return above, having applied
+	// nothing, and the Create pass that installs is the act that must join.
+	//
+	// A non-nil error is a marker write that lost an optimistic-lock race. Nothing has been applied
+	// yet, so the pass ends here; it wraps tools.ErrStatusConflict, and the runtime requeues it
+	// quietly. ctx becomes the act's context, so children are stamped from the act step.
+	actCtx, endAct, aerr := controller.StartAct(ctx, mg, "apply")
+	if aerr != nil {
+		return controller.ExternalObservation{}, fmt.Errorf("writing the trace continuation marker before applying: %w", aerr)
+	}
+	ctx = actCtx
+	defer func() { endAct(rerr) }()
 
 	// RBAC FIRST — before any helm call, including the stuck-operation recovery below.
 	//
@@ -515,9 +539,10 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// NOT a no-op when tracing is disabled, despite what you would expect — an earlier version of
 	// this comment claimed it was, and a rollout was planned on that claim. telemetry.SetupTracing
 	// installs the W3C propagator UNCONDITIONALLY, before its disabled return, so that an inbound
-	// trace is honoured regardless of this process's export config; StartReconcileSpan extracts
-	// krateo.io/traceparent from the object into ctx either way; and OTel's no-op tracer preserves
-	// a valid REMOTE span context. So with tracing off:
+	// trace is honoured regardless of this process's export config; and the runtime keeps the
+	// object's krateo.io/traceparent in ctx either way (unstructured-runtime v1.13.0: with tracing
+	// off the reconcile root is not started, and InjectTraceparent falls back to that inbound
+	// context). So with tracing off:
 	//
 	//	object carries no traceparent  -> nothing injected, nothing stamped
 	//	object carries a traceparent   -> it IS injected and children ARE stamped
