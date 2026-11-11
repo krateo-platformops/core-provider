@@ -119,3 +119,18 @@ func TestControllerDeploymentApplyKeepsAZeroedControllerOnlyWhenOptedIn(t *testi
 		}
 	}
 }
+
+func TestChartControllerReplicasReadsTheShippedTemplate(t *testing.T) {
+	manifests := renderShippedChart(t, nil)
+	tmpl := mountedTemplate(t, manifests, "cdc-deployment.yaml", "deployment.yaml")
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"}
+	if n, err := ChartControllerReplicas(tmpl, gvr); err != nil || n != 1 {
+		t.Errorf("default chart: %d, %v; want 1", n, err)
+	}
+	// Control: the value must come from the chart, not a constant.
+	manifests3 := renderShippedChart(t, map[string]any{"cdc": map[string]any{"replicaCount": 3}})
+	tmpl3 := mountedTemplate(t, manifests3, "cdc-deployment.yaml", "deployment.yaml")
+	if n, err := ChartControllerReplicas(tmpl3, gvr); err != nil || n != 3 {
+		t.Errorf("cdc.replicaCount=3: %d, %v; want 3", n, err)
+	}
+}

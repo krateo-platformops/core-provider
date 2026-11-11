@@ -4,7 +4,11 @@ import (
 	"fmt"
 
 	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
+	"github.com/krateo-platformops/core-provider/internal/tools/objects"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // deploymentApplyOptions are the options the controller Deployment is applied with: the shared
@@ -39,4 +43,24 @@ func keepLiveReplicas(current, desired *unstructured.Unstructured) error {
 		return fmt.Errorf("the live controller Deployment's spec.replicas is a %T, not an integer", r)
 	}
 	return unstructured.SetNestedField(desired.Object, n, "spec", "replicas")
+}
+
+// ChartControllerReplicas is the replica count the shipped controller Deployment template renders:
+// the chart's cdc.replicaCount, which a scale-to-zero controller is woken to (the helper's
+// "active"). Read from the template Deploy itself renders, so the two can never disagree; a second
+// setting for the same number would be a second source of truth.
+func ChartControllerReplicas(templatePath string, gvr schema.GroupVersionResource) (int32, error) {
+	values, err := cdcDeploymentValues("scale-to-zero-probe", DeployOptions{}, nil)
+	if err != nil {
+		return 0, err
+	}
+	var dep appsv1.Deployment
+	nn := getCDCDeploymentNN(types.NamespacedName{Namespace: "probe", Name: resourceNamer(gvr.Resource, gvr.Version)})
+	if err := objects.CreateK8sObject(&dep, gvr, nn, templatePath, values...); err != nil {
+		return 0, fmt.Errorf("rendering the controller Deployment template %s: %w", templatePath, err)
+	}
+	if dep.Spec.Replicas == nil || *dep.Spec.Replicas < 1 {
+		return 0, fmt.Errorf("the controller Deployment template %s renders replicas %v; scale-to-zero needs at least 1 to wake to", templatePath, dep.Spec.Replicas)
+	}
+	return *dep.Spec.Replicas, nil
 }
