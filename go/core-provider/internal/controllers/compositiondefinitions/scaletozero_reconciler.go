@@ -327,15 +327,21 @@ func (r *scaleToZeroReconciler) definitionsOf(gvk schema.GroupVersionKind) handl
 // client.New (the helper reads live and paginates); templatePath is the shipped controller
 // Deployment template, the source of the replica count a controller is woken to.
 func SetupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, templatePath string) error {
+	return setupScaleToZero(mgr, live, log, func(gvr schema.GroupVersionResource) (int32, error) {
+		return deploy.ChartControllerReplicas(templatePath, gvr)
+	})
+}
+
+// setupScaleToZero is SetupScaleToZero with the replica source injected, so a test runs the real
+// controller without the mounted chart template.
+func setupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, active func(schema.GroupVersionResource) (int32, error)) error {
 	r := &scaleToZeroReconciler{
-		kube:  mgr.GetClient(),
-		live:  live,
-		cache: mgr.GetCache(),
-		log:   log.WithValues("controller", "scaletozero"),
-		active: func(gvr schema.GroupVersionResource) (int32, error) {
-			return deploy.ChartControllerReplicas(templatePath, gvr)
-		},
-		now: time.Now,
+		kube:   mgr.GetClient(),
+		live:   live,
+		cache:  mgr.GetCache(),
+		log:    log.WithValues("controller", "scaletozero"),
+		active: active,
+		now:    time.Now,
 	}
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("compositiondefinition-scaletozero").

@@ -32,8 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -298,4 +300,53 @@ func TestScaleToZeroEnvtest(t *testing.T) {
 			t.Errorf("replicas=%d, want untouched 0", r)
 		}
 	})
+}
+
+// THE WAKE WATCH, through a running manager: the reconciler as main starts it (SetupScaleToZero),
+// a controller held at 0 for an idle Kind, and one instance created. The helper watches nothing, so
+// without the watch nothing would ever wake it.
+func TestScaleToZeroEnvtestWakeWatch(t *testing.T) {
+	yes := true
+	e := startStzEnv(t)
+	key := e.controllerDeployment(t, 0)
+	old := time.Now().Add(-time.Hour)
+	e.definition(t, "a", &yes, "10m", &old)
+
+	cfg := e.cfg.Config
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: e.kube.Scheme(), Metrics: metricsserver.Options{BindAddress: "0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := client.New(cfg, client.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The real template path is not mounted in a test; active=1 is what the shipped chart renders
+	// (TestChartControllerReplicasReadsTheShippedTemplate).
+	if err := setupScaleToZero(mgr, live, logging.NewNopLogger(), func(schema.GroupVersionResource) (int32, error) { return 1, nil }); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = mgr.Start(ctx) }()
+
+	// CONTROL: idle and past its hold-down, it stays at 0 while there is no instance. A wake below
+	// is then the watch's doing, not something the first pass would have done anyway.
+	time.Sleep(5 * time.Second)
+	if r := e.replicas(t, key); r != 0 {
+		t.Fatalf("control: replicas=%d with no instance, want 0", r)
+	}
+
+	created := time.Now()
+	e.instance(t, "first")
+	deadline := created.Add(30 * time.Second)
+	for e.replicas(t, key) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("an instance was created and the controller was not woken within 30s (replicas=%d)", e.replicas(t, key))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Measured, not asserted beyond the 30s bound: create -> scale patched, polled every 100ms. It
+	// excludes pod scheduling and start, which envtest does not run.
+	t.Logf("wake latency (instance create -> controller scale 1): %s", time.Since(created).Truncate(10*time.Millisecond))
 }
