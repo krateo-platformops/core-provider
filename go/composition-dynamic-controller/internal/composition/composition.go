@@ -391,18 +391,6 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// DiskCache.Stop() closes an unguarded channel, so a double close panics.
 	defer hc.Close()
 
-	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
-	if err != nil {
-		return controller.ExternalObservation{}, fmt.Errorf("finding helm release: %w", err)
-	}
-	if rel == nil {
-		log.Debug("Release not found.")
-		return controller.ExternalObservation{
-			ResourceExists:   false,
-			ResourceUpToDate: false,
-		}, nil
-	}
-
 	// unstructured-runtime#77. From here Observe APPLIES changes (derived RBAC, the stuck-release
 	// recovery, helm Reconcile), so this is where it declares its act. For the first act on a new
 	// krateo.io/traceparent value, StartAct writes the continuation marker and joins the upstream
@@ -419,6 +407,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	}
 	ctx = actCtx
 	defer func() { endAct(rerr) }()
+	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
+	if err != nil {
+		return controller.ExternalObservation{}, fmt.Errorf("finding helm release: %w", err)
+	}
+	if rel == nil {
+		log.Debug("Release not found.")
+		return controller.ExternalObservation{
+			ResourceExists:   false,
+			ResourceUpToDate: false,
+		}, nil
+	}
 
 	// RBAC FIRST — before any helm call, including the stuck-operation recovery below.
 	//
