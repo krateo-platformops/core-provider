@@ -236,7 +236,22 @@ func (h *handler) helmCacheOpts() []helm.ClientOption {
 	if h.cachedClients == nil {
 		return nil
 	}
-	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients)}
+	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients), helm.WithMappingRetryObserver(logMappingRetry)}
+}
+
+// logMappingRetry logs, at INFO, every reset-and-retry plumbing performs when an operation fails on
+// a REST-mapping miss ("no matches for kind"). A retry only exists with the shared cache, which is
+// why this rides helmCacheOpts and reaches every helm client the handler builds.
+//
+// WHY AT INFO. On a composition-version bump the installer umbrella failed on "no matches for kind"
+// for 1-3 reconciles, twice on krateo-057 on 2026-11-11, on the Upgrade path the retry covers, with
+// the CRD already serving the version when the render ran. Two causes fit and only this line tells
+// them apart: outcome "recovered" means the shared mapper was stale and the reset fixed it (this
+// controller's cache), and "missed_again" means discovery was re-read and the apiserver still did
+// not serve the kind. It fires only on a miss, so it costs nothing at steady state.
+func logMappingRetry(ctx context.Context, r helm.MappingRetry) {
+	xcontext.Logger(ctx).Info("helm REST-mapping miss: shared mapper reset and the operation retried",
+		"operation", r.Operation, "outcome", r.Outcome, "group", r.Group, "kind", r.Kind, "searchedVersions", r.Versions)
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (observation controller.ExternalObservation, rerr error) {
