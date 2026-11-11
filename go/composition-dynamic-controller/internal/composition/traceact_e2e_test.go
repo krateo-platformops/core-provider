@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -68,6 +69,23 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 	if _, err := cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: traceNS}}, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
 		t.Fatal(err)
 	}
+	// The runtime loop runs as the controller's ServiceAccount (c, test-sa), as in production, and
+	// SetSAToken grants it compositions only in its own namespace. Grant the same in traceNS. The
+	// test's own writes below (create, then a new traceparent) run as the cluster admin, the way a
+	// user or the frontend makes them.
+	if _, err := cs.RbacV1().Roles(traceNS).Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sa-role", Namespace: traceNS},
+		Rules:      []rbacv1.PolicyRule{{APIGroups: []string{"composition.krateo.io"}, Resources: []string{"*"}, Verbs: []string{"*"}}},
+	}, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	if _, err := cs.RbacV1().RoleBindings(traceNS).Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sa-role-binding", Namespace: traceNS},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "test-sa", Namespace: namespace}},
+		RoleRef:    rbacv1.RoleRef{Kind: "Role", Name: "test-sa-role", APIGroup: "rbac.authorization.k8s.io"},
+	}, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
 
 	var obj unstructured.Unstructured
 	if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
@@ -107,7 +125,7 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 	go func() { defer close(done); _ = ctrl.Run(runCtx, 1) }()
 	defer func() { stop(); <-done }()
 
-	cli := dynamic.NewForConfigOrDie(c).Resource(gvr).Namespace(traceNS)
+	cli := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig()).Resource(gvr).Namespace(traceNS)
 	if _, err := cli.Create(ctx, &obj, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
