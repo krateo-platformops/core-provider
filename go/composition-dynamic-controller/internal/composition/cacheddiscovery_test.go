@@ -115,8 +115,10 @@ func TestHelmCacheOpts_DegradesWhenThereIsNoKubeconfig(t *testing.T) {
 	}
 }
 
-// And the positive case: with a config, the cache is built once and offered as exactly one option.
-// Discovery is lazy inside DeferredDiscoveryRESTMapper, so this does not contact an apiserver.
+// And the positive case: with a config, the cache is built once and offered, together with the
+// observer of its stale-mapping retries (logMappingRetry, plumbing v1.49.0): TWO options. A retry
+// only exists with the cache, so the two travel together. Discovery is lazy inside
+// DeferredDiscoveryRESTMapper, so this does not contact an apiserver.
 func TestHelmCacheOpts_OffersTheCacheWhenPresent(t *testing.T) {
 	cc := newHelmCachedClients(&rest.Config{Host: "https://api.example.invalid:6443"})
 	if cc == nil {
@@ -124,7 +126,7 @@ func TestHelmCacheOpts_OffersTheCacheWhenPresent(t *testing.T) {
 			"then build its own discovery mapper")
 	}
 	h := &handler{cachedClients: cc}
-	if opts := h.helmCacheOpts(); len(opts) != 1 {
-		t.Errorf("helmCacheOpts() returned %d options, want exactly 1", len(opts))
+	if opts := h.helmCacheOpts(); len(opts) != 2 {
+		t.Errorf("helmCacheOpts() returned %d options, want exactly 2 (the cache and its retry observer)", len(opts))
 	}
 }
