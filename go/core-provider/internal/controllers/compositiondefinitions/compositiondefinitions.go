@@ -1147,6 +1147,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -1545,6 +1546,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -1928,6 +1930,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
