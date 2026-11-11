@@ -1284,7 +1284,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
-	cr.SetConditions(rtv1.Available())
+	// Ready and ControllerActive from the controller Deployment's replicas (#393): a declared zero is
+	// Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running controller
+	// is Available with ControllerActive=True/Running. A remote definition keeps plain Available.
+	if ready, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
+		cr.SetConditions(ready, active)
+	} else {
+		cr.SetConditions(rtv1.Available())
+	}
 
 	return reconciler.ExternalObservation{
 		ResourceExists:   true,

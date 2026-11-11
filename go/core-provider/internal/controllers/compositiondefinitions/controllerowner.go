@@ -629,6 +629,11 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 	}
 	cr.Status.Digest = ""
 	cr.SetConditions(followerCondition(owner, gvr))
+	// A follower reports ControllerActive for the SHARED controller it runs on (#393). Its Ready stays
+	// followerCondition: #387 reads the follower marker in that message.
+	if _, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
+		cr.SetConditions(active)
+	}
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }
 
