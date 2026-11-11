@@ -394,6 +394,47 @@ jobs:
             exit 1
           fi
 
+  envtest-core-provider:
+    # core-provider's `envtest`-tagged suites, against a real kube-apiserver (#393). The
+    # scale-to-zero reconciler drives provider-runtime's scaletozero helper, whose scale-subresource
+    # GET/PATCH and paginated metadata-only LIST are apiserver behaviour: a fake client would only
+    # verify that the fake agrees with the code. Two suites today:
+    #   - TestScaleToZeroEnvtest / ...WakeWatch (internal/controllers/compositiondefinitions): the
+    #     decision states, and the wake watch through a running manager;
+    #   - TestKeepLiveReplicasEnvtest (internal/tools/deploy): a controller scaled to 0 survives the
+    #     definition's full re-apply when opted in, and is restored when not.
+    # Both FAIL (not skip) without KUBEBUILDER_ASSETS; the skip guard below is belt and braces.
+    name: envtest (real apiserver, core-provider)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      # The same pinned tool as the cdc job: it only downloads apiserver/etcd assets, so the pin is
+      # about this runner's toolchain, not about core-provider's controller-runtime version.
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
+      - name: Run the core-provider envtest suite
+        working-directory: go/core-provider
+        run: |
+          set -euo pipefail
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.36.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS"
+          go test -tags envtest -count=1 -timeout 20m -v -run 'Envtest' ./... 2>&1 | tee /tmp/envtest.log
+          if grep -q -- "--- SKIP" /tmp/envtest.log; then
+            echo "::error::an envtest test SKIPPED - this job exists to run them"
+            grep -- "--- SKIP" /tmp/envtest.log
+            exit 1
+          fi
+          # Denominator: a -run filter that matches nothing exits 0 having run nothing.
+          n=$(grep -c -- "^--- PASS: Test.*Envtest" /tmp/envtest.log || true)
+          if [ "$n" -lt 3 ]; then
+            echo "::error::only $n top-level envtest tests passed, expected at least 3 - the filter or the build tag is not matching"
+            exit 1
+          fi
+          echo "ran $n top-level envtest tests"
+
   lint-docs:
     # THE canonical documentation-conformance check (the Krateo Documentation Standard):
     # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.

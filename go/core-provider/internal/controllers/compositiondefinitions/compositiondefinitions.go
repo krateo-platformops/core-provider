@@ -1147,6 +1147,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -1283,7 +1284,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
-	cr.SetConditions(rtv1.Available())
+	// Ready and ControllerActive from the controller Deployment's replicas (#393): a declared zero is
+	// Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running controller
+	// is Available with ControllerActive=True/Running. A remote definition keeps plain Available.
+	if ready, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
+		cr.SetConditions(ready, active)
+	} else {
+		cr.SetConditions(rtv1.Available())
+	}
 
 	return reconciler.ExternalObservation{
 		ResourceExists:   true,
@@ -1545,6 +1553,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -1928,6 +1937,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
+		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
