@@ -165,10 +165,17 @@ type DeployOptions struct {
 	// nil fields within, are omitted from the Deployment template render so the template's
 	// chart-global defaults apply — existing definitions render byte-identically.
 	Controller *definitionsv1alpha1.ControllerConfig
-	// Replicas, when set, is rendered as the controller Deployment's spec.replicas instead of the chart
-	// value. Set only for a definition that opted into scale-to-zero (#393), from the replicas the
-	// scaletozero helper last decided, so that this full apply and the helper never disagree.
-	Replicas *int32
+	// KeepLiveReplicas makes this apply leave the controller Deployment's spec.replicas as it is live,
+	// for a definition that opted into scale-to-zero (#393). provider-runtime's scaletozero helper is
+	// then the ONLY writer of replicas, which it requires: the apply is a full Get -> Update, and
+	// rendering any value would overwrite the helper's. The live value is copied inside the update
+	// loop (objectclient FromCurrent), so a 409 from the helper's concurrent scale re-reads and copies
+	// again, and the kept value is never older than the object replaced. Rendering a persisted
+	// decision instead left a window in which a stale 0 could be written over a controller the
+	// helper had just woken (#393 design note). On create there is no live value, and the chart's
+	// replicaCount is rendered. When false (not opted in, or opted out), the chart value is rendered
+	// and applied, which also wakes a controller that was at 0.
+	KeepLiveReplicas bool
 }
 
 func resourceNamer(resourceName string, chartVersion string) string {
@@ -556,7 +563,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
-	err = kubecli.Apply(ctx, opts.DynClient, deploymentGVR, &dep, applyOpts)
+	err = kubecli.Apply(ctx, opts.DynClient, deploymentGVR, &dep, deploymentApplyOptions(applyOpts, opts))
 	if err != nil {
 		log.Error(err, "installing deployment")
 		return "", err

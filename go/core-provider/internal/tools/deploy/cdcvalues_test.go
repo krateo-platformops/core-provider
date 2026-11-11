@@ -74,37 +74,3 @@ func TestShippedControllerDeployment_CarriesTheConfigChecksum(t *testing.T) {
 		t.Errorf("without a checksum the annotation must be absent, got %q", v)
 	}
 }
-
-// #393. A scale-to-zero definition renders the helper's replicas, including 0; every other one renders
-// the chart value, exactly as before.
-func TestShippedControllerDeployment_RendersReplicasOnlyWhenGiven(t *testing.T) {
-	manifests := renderShippedChart(t, nil)
-	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v0-13-23", Resource: "kubernetesclusters"}
-	nn := types.NamespacedName{Namespace: "krateo-system", Name: resourceNamer(gvr.Resource, gvr.Version)}
-	tmpl := mountedTemplate(t, manifests, "cdc-deployment.yaml", "deployment.yaml")
-	render := func(replicas *int32) int32 {
-		t.Helper()
-		values, err := cdcDeploymentValues("sa", DeployOptions{Replicas: replicas}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var dep appsv1.Deployment
-		if err := objects.CreateK8sObject(&dep, gvr, getCDCDeploymentNN(nn), tmpl, values...); err != nil {
-			t.Fatalf("stage 2: %v", err)
-		}
-		if dep.Spec.Replicas == nil {
-			t.Fatal("spec.replicas not rendered")
-		}
-		return *dep.Spec.Replicas
-	}
-	zero, two := int32(0), int32(2)
-	if got := render(&zero); got != 0 {
-		t.Errorf("Replicas=0 rendered %d; 0 must not fall back to the chart value", got)
-	}
-	if got := render(&two); got != 2 {
-		t.Errorf("Replicas=2 rendered %d", got)
-	}
-	if got := render(nil); got != 1 {
-		t.Errorf("no Replicas rendered %d, want the chart default 1", got)
-	}
-}
