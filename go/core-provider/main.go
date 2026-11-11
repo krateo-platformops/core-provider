@@ -20,6 +20,7 @@ import (
 	"github.com/krateo-platformops/plumbing/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -266,6 +267,21 @@ func run() int {
 		RemoveDanglingRBAC: *removeDanglingRBAC,
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
+		return 1
+	}
+	// #393. The scale-to-zero reconciler gets ONE live client, built once, as provider-runtime's
+	// scaletozero helper requires: it lists metadata-only with pagination, which the manager's cached
+	// client cannot do, and reading through the cache would start a metadata informer per Kind, the
+	// memory scale-to-zero exists to save. It shares the manager's scheme (client-go's, which has
+	// apps/v1 and autoscaling/v1 for the Deployment scale) and RESTMapper (lazy, so a Kind created
+	// after startup resolves on first use).
+	live, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
+	if err != nil {
+		log.Error(err, "Cannot create the scale-to-zero client")
+		return 1
+	}
+	if err := compositiondefinitions.SetupScaleToZero(mgr, live, log, compositiondefinitions.CDCtemplateDeploymentPath); err != nil {
+		log.Error(err, "Cannot setup the scale-to-zero controller")
 		return 1
 	}
 	if err := kubernetestargets.Setup(mgr, kubernetestargets.Options{
