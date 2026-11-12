@@ -240,7 +240,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// releaseName from the QUERY, never compositionMeta.GetReleaseName(composition). See the
 	// validation above: the label on the live object is not the caller's resolved name on every
 	// path, and reading it here produced a permanent retry loop (#329).
-	rel, err := h.HelmClient.Install(ctx, releaseName, compositionDefinition.Spec.Chart.Url, installCfg)
+	op, err := h.HelmClient.Install(ctx, releaseName, compositionDefinition.Spec.Chart.Url, installCfg)
+	var rel *helmconfig.Release
+	if op != nil {
+		rel = op.Release // plumbing v1.50.0: Install returns an OperationResult
+	}
 	if err != nil {
 		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),

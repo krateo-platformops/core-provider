@@ -984,10 +984,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release already exists, upgrading instead of installing.")
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-				return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
+				op, err := hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
 					ActionConfig: actionConfig,
 					MaxHistory:   helmMaxHistory,
 				})
+				return releaseOf(op), err
 			})
 		})
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
@@ -1001,9 +1002,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	} else {
 		rel, err = helmPhase(log, "install", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
-				return hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
+				op, err := hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
 					ActionConfig: actionConfig,
 				})
+				return releaseOf(op), err
 			})
 		})
 		if err != nil {
@@ -1496,10 +1498,11 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
 		return helmMetrics.TimedUninstall(func() error {
-			return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
+			_, err := hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
 				IgnoreNotFound: true,
 				Timeout:        helmOperationTimeout,
 			})
+			return err
 		})
 	})
 	if err != nil {
