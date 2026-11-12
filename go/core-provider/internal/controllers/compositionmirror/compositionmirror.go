@@ -79,6 +79,8 @@ const (
 // Options configures the compositionmirror reconciler.
 type Options struct {
 	ControllerOptions controller.Options
+	// Audit records the mirror's writes (core-provider#423); nil records nothing.
+	Audit *auditrec.Recorder
 }
 
 // Setup wires the reflector into the manager. It watches CompositionDefinitions statically; each
@@ -86,6 +88,7 @@ type Options struct {
 // created at runtime), so a hub Composition edit reflects immediately instead of at the next resync.
 func Setup(mgr ctrl.Manager, o Options) error {
 	r := &Reconciler{
+		audit:      o.Audit,
 		hub:        mgr.GetClient(),
 		hubDynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
 		cfgWatch:   dynamicwatch.NewRegistry(mgr.GetCache()),
@@ -105,6 +108,8 @@ func Setup(mgr ctrl.Manager, o Options) error {
 
 // Reconciler mirrors the hub Composition instances of a remote CompositionDefinition onto its spokes.
 type Reconciler struct {
+	// audit records this controller's writes (core-provider#423); nil records nothing.
+	audit      *auditrec.Recorder
 	hub        client.Client
 	hubDynamic dynamic.Interface
 	// newSpoke builds a spoke's dynamic client from a target name. It is the injection seam for fan-out:
@@ -127,6 +132,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	if err := r.hub.Get(ctx, req.NamespacedName, cd); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
+	// core-provider#423: every write this reconcile makes (mirror, hub delete) is recorded with the
+	// definition as its cause.
+	ctx = auditrec.WithScope(ctx, r.audit, auditrec.CauseOfDefinition(cd))
 
 	// Teardown first: on delete, remove the hub Composition instances this CD's type owns, then release
 	// our finalizer. Handled before the remote check so the finalizer can never get stuck (even if the

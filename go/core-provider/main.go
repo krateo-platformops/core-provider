@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"log"
 	"log/slog"
 	"os"
@@ -260,7 +261,17 @@ func run() int {
 		log.Error(err, "Cannot add APIs to scheme")
 		return 1
 	}
+	// core-provider#423: one controller audit record per write that changed what an object holds.
+	auditRecorder, hasActor, err := auditrec.New(mgr.GetConfig())
+	if err != nil {
+		log.Error(err, "Cannot create the audit recorder")
+		return 1
+	}
+	if !hasActor {
+		log.Info("POD_NAMESPACE or POD_SERVICE_ACCOUNT is unset: audit records will name no actor and be marked incomplete")
+	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
+		Audit:              auditRecorder,
 		ControllerOptions:  o,
 		Metrics:            telemetryMetrics,
 		Pluralizer:         pluralizer.New(false),
@@ -291,6 +302,7 @@ func run() int {
 		return 1
 	}
 	if err := compositionmirror.Setup(mgr, compositionmirror.Options{
+		Audit:             auditRecorder,
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup composition mirror controller")
