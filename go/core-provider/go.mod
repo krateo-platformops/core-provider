@@ -13,7 +13,7 @@ require (
 	github.com/itchyny/gojq v0.12.17
 	github.com/krateo-platformops/audit v0.11.0
 	github.com/krateo-platformops/plumbing v1.57.0
-	github.com/krateo-platformops/provider-runtime v1.15.0
+	github.com/krateo-platformops/provider-runtime v1.18.0
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
