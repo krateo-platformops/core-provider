@@ -222,3 +222,38 @@ func statusOf(err error) int {
 	}
 	return 0
 }
+
+// scope is one reconcile's recorder and cause, carried in the context the way the reconcile's logger
+// is (contexttools.LoggerFromCtx): the write sites are many functions deep, and the cause is the
+// CompositionDefinition that reconcile is for.
+type scope struct {
+	r     *Recorder
+	cause audit.CauseRef
+}
+
+type scopeKey struct{}
+
+// WithScope returns ctx carrying r and cause for every write recorded under it.
+func WithScope(ctx context.Context, r *Recorder, cause audit.CauseRef) context.Context {
+	return context.WithValue(ctx, scopeKey{}, scope{r: r, cause: cause})
+}
+
+func scopeFrom(ctx context.Context) (scope, bool) {
+	s, ok := ctx.Value(scopeKey{}).(scope)
+	return s, ok && s.r != nil
+}
+
+// RecordApply records one Apply under ctx's scope. Without a scope it records nothing: a write made
+// outside a reconcile that set one (a test, a bootstrap) has no cause to name.
+func RecordApply(ctx context.Context, action string, t Target, res objectclient.ApplyResult, err error) {
+	if s, ok := scopeFrom(ctx); ok {
+		s.r.Apply(ctx, action, t, res, err, s.cause)
+	}
+}
+
+// RecordDelete records one Uninstall under ctx's scope.
+func RecordDelete(ctx context.Context, action string, t Target, res objectclient.UninstallResult, err error) {
+	if s, ok := scopeFrom(ctx); ok {
+		s.r.Delete(ctx, action, t, res, err, s.cause)
+	}
+}

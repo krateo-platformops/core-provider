@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,7 +222,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 		return fmt.Errorf("hasher is required")
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-	_, err := kubecli.Apply(ctx, dyn, clusterRoleGVR, &clusterrole, applyOpts)
+	_, err := applyRecorded(ctx, dyn, clusterRoleGVR, "ClusterRole", auditrec.ActionRBACApply, &clusterrole, applyOpts)
 	if err != nil {
 		log.Error(err, "installing clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 		return err
@@ -233,7 +234,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 	}
 	log.Debug("ClusterRole successfully hashed", "name", clusterrole.Name, "namespace", clusterrole.Namespace, "digest", hsh.GetHash())
 
-	_, err = kubecli.Apply(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, applyOpts)
+	_, err = applyRecorded(ctx, dyn, clusterRoleBindingGVR, "ClusterRoleBinding", auditrec.ActionRBACApply, &clusterrolebinding, applyOpts)
 	if err != nil {
 		log.Error(err, "installing clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 		return err
@@ -244,7 +245,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 	}
 	log.Debug("ClusterRoleBinding successfully installed", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace, "digest", hsh.GetHash())
 
-	_, err = kubecli.Apply(ctx, dyn, roleGVR, &role, applyOpts)
+	_, err = applyRecorded(ctx, dyn, roleGVR, "Role", auditrec.ActionRBACApply, &role, applyOpts)
 	if err != nil {
 		log.Error(err, "installing role", "name", role.Name, "namespace", role.Namespace)
 		return err
@@ -255,7 +256,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 	}
 	log.Debug("Role successfully installed", "name", role.Name, "namespace", role.Namespace, "digest", hsh.GetHash())
 
-	_, err = kubecli.Apply(ctx, dyn, roleBindingGVR, &rolebinding, applyOpts)
+	_, err = applyRecorded(ctx, dyn, roleBindingGVR, "RoleBinding", auditrec.ActionRBACApply, &rolebinding, applyOpts)
 	if err != nil {
 		log.Error(err, "installing rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 		return err
@@ -267,7 +268,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 
 	log.Debug("RoleBinding successfully installed", "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 
-	_, err = kubecli.Apply(ctx, dyn, serviceAccountGVR, &sa, applyOpts)
+	_, err = applyRecorded(ctx, dyn, serviceAccountGVR, "ServiceAccount", auditrec.ActionRBACApply, &sa, applyOpts)
 	if err != nil {
 		log.Error(err, "installing serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
 		return err
@@ -372,14 +373,14 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 		log.Debug("Keeping shared cluster-scoped RBAC: another definition still uses this controller version",
 			"clusterrole", clusterrole.Name, "clusterrolebinding", clusterrolebinding.Name)
 	} else {
-		_, err := kubecli.Uninstall(ctx, dyn, clusterRoleGVR, &clusterrole, kubecli.UninstallOptions{})
+		_, err := uninstallRecorded(ctx, dyn, clusterRoleGVR, "ClusterRole", auditrec.ActionRBACDelete, &clusterrole, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "Error uninstalling clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 			return err
 		}
 		log.Debug("ClusterRole successfully uninstalled", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 
-		_, err = kubecli.Uninstall(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, kubecli.UninstallOptions{})
+		_, err = uninstallRecorded(ctx, dyn, clusterRoleBindingGVR, "ClusterRoleBinding", auditrec.ActionRBACDelete, &clusterrolebinding, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "Error uninstalling clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 			return err
@@ -389,14 +390,14 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 
 	var err error
 	if !keepGrant {
-		_, err = kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
+		_, err = uninstallRecorded(ctx, dyn, roleGVR, "Role", auditrec.ActionRBACDelete, &role, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
 			return err
 		}
 		log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
 
-		_, err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
+		_, err = uninstallRecorded(ctx, dyn, roleBindingGVR, "RoleBinding", auditrec.ActionRBACDelete, &rolebinding, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 			return err
@@ -404,7 +405,7 @@ func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterr
 		log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 	}
 
-	_, err = kubecli.Uninstall(ctx, dyn, serviceAccountGVR, &sa, kubecli.UninstallOptions{})
+	_, err = uninstallRecorded(ctx, dyn, serviceAccountGVR, "ServiceAccount", auditrec.ActionRBACDelete, &sa, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
 		return err
@@ -446,7 +447,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		_, err = kubecli.Apply(ctx, opts.DynClient, roleGVR, &role, applyOpts)
+		_, err = applyRecorded(ctx, opts.DynClient, roleGVR, "Role", auditrec.ActionRBACApply, &role, applyOpts)
 		if err != nil {
 			log.Error(err, "installing role")
 			return "", err
@@ -470,7 +471,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		_, err = kubecli.Apply(ctx, opts.DynClient, roleBindingGVR, &rolebinding, applyOpts)
+		_, err = applyRecorded(ctx, opts.DynClient, roleBindingGVR, "RoleBinding", auditrec.ActionRBACApply, &rolebinding, applyOpts)
 		if err != nil {
 			log.Error(err, "installing rolebinding")
 			return "", err
@@ -802,7 +803,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 			return err
 		}
 
-		_, err = kubecli.Uninstall(ctx, opts.DynamicClient, roleGVR, &role, kubecli.UninstallOptions{})
+		_, err = uninstallRecorded(ctx, opts.DynamicClient, roleGVR, "Role", auditrec.ActionRBACDelete, &role, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling role")
 			return err
@@ -816,7 +817,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 			return err
 		}
 
-		_, err = kubecli.Uninstall(ctx, opts.DynamicClient, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
+		_, err = uninstallRecorded(ctx, opts.DynamicClient, roleBindingGVR, "RoleBinding", auditrec.ActionRBACDelete, &rolebinding, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling rolebinding")
 			return err
