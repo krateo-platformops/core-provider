@@ -496,7 +496,7 @@ func reflectInstances(ctx context.Context, p reflectParams) error {
 		for _, inst := range insts {
 			desired[inst.GetName()] = struct{}{}
 
-			if err := mirrorDown(ctx, spokeRes, inst, p.apiVersion, p.kind, p.namespace); err != nil {
+			if _, err := mirrorDown(ctx, spokeRes, inst, p.apiVersion, p.kind, p.namespace); err != nil {
 				return fmt.Errorf("mirroring %s/%s to spoke %q: %w", p.namespace, inst.GetName(), target, err)
 			}
 
@@ -580,13 +580,27 @@ func mirrorLabels(hubInst *unstructured.Unstructured) map[string]string {
 	return labels
 }
 
-// mirrorDown creates-or-updates the spoke Composition from its hub counterpart. The hub is the source
-// of truth for spec (hub wins on drift); the mirror is stamped with the management label so GC can
-// recognise it.
-func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst *unstructured.Unstructured, apiVersion, kind, namespace string) error {
+// mirrorWrite is the write mirrorDown sent to the spoke, if any.
+type mirrorWrite string
+
+const (
+	mirrorCreated   mirrorWrite = "created"
+	mirrorUpdated   mirrorWrite = "updated"
+	mirrorUnchanged mirrorWrite = "unchanged" // the mirror already matched: no request was sent
+)
+
+// mirrorDown creates-or-updates the spoke Composition from its hub counterpart, and reports which
+// write it sent. The hub is the source of truth for spec (hub wins on drift); the mirror is stamped
+// with the management label so GC can recognise it.
+//
+// A mirror that already carries the hub's labels, the management marker and the hub's spec is left
+// alone: no Update is sent (core-provider#423). It used to Update on every resync, so "the mirror
+// changed" meant nothing and every resync was a write, which an audit record per write would have
+// turned into one row per instance per resync.
+func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst *unstructured.Unstructured, apiVersion, kind, namespace string) (mirrorWrite, error) {
 	spec, _, err := unstructured.NestedMap(hubInst.Object, "spec")
 	if err != nil {
-		return fmt.Errorf("reading hub spec: %w", err)
+		return "", fmt.Errorf("reading hub spec: %w", err)
 	}
 
 	live, err := spokeRes.Get(ctx, hubInst.GetName(), metav1.GetOptions{})
@@ -599,13 +613,15 @@ func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst
 		mirror.SetLabels(mirrorLabels(hubInst))
 		if spec != nil {
 			if err := unstructured.SetNestedMap(mirror.Object, spec, "spec"); err != nil {
-				return fmt.Errorf("setting mirror spec: %w", err)
+				return "", fmt.Errorf("setting mirror spec: %w", err)
 			}
 		}
-		_, err := spokeRes.Create(ctx, mirror, metav1.CreateOptions{})
-		return err
+		if _, err := spokeRes.Create(ctx, mirror, metav1.CreateOptions{}); err != nil {
+			return "", err
+		}
+		return mirrorCreated, nil
 	} else if err != nil {
-		return fmt.Errorf("reading spoke mirror: %w", err)
+		return "", fmt.Errorf("reading spoke mirror: %w", err)
 	}
 
 	// Sync the hub's labels onto the mirror (hub wins for keys it sets) and ensure the management
@@ -614,24 +630,50 @@ func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst
 	// instance's CompositionDefinition against, so the mirror carries them directly rather than
 	// relying on the projected admission policy or the cdc's unique-kind fallback. Then push the
 	// desired spec (hub wins on drift).
-	labels := live.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
+	liveLabels := live.GetLabels()
+	labels := make(map[string]string, len(liveLabels)+len(hubInst.GetLabels())+1)
+	for k, v := range liveLabels {
+		labels[k] = v
 	}
 	for k, v := range hubInst.GetLabels() {
 		labels[k] = v
 	}
 	labels[managedByLabel] = managedByValue
+
+	liveSpec, liveHasSpec, err := unstructured.NestedMap(live.Object, "spec")
+	if err != nil {
+		return "", fmt.Errorf("reading spoke mirror spec: %w", err)
+	}
+	specSame := (spec == nil && !liveHasSpec) || (spec != nil && liveHasSpec && reflect.DeepEqual(spec, liveSpec))
+	if specSame && labelsEqual(labels, liveLabels) {
+		return mirrorUnchanged, nil
+	}
+
 	live.SetLabels(labels)
 	if spec != nil {
 		if err := unstructured.SetNestedMap(live.Object, spec, "spec"); err != nil {
-			return fmt.Errorf("updating mirror spec: %w", err)
+			return "", fmt.Errorf("updating mirror spec: %w", err)
 		}
 	} else {
 		unstructured.RemoveNestedField(live.Object, "spec")
 	}
-	_, err = spokeRes.Update(ctx, live, metav1.UpdateOptions{})
-	return err
+	if _, err := spokeRes.Update(ctx, live, metav1.UpdateOptions{}); err != nil {
+		return "", err
+	}
+	return mirrorUpdated, nil
+}
+
+// labelsEqual is map equality where a nil and an empty label set are the same.
+func labelsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // mirrorStatusUp copies the spoke Composition's status onto the hub Composition. The hub instance is
