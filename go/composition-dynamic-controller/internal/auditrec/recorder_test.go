@@ -68,7 +68,8 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// counts sums MetricUnrecorded by reason (and MetricIncompleteOperations under "incomplete").
+// counts sums MetricExcluded by reason, MetricChildrenNotAttempted under "not_attempted" and
+// MetricIncompleteOperations under "incomplete".
 func (h *harness) counts(t *testing.T) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -84,9 +85,11 @@ func (h *harness) counts(t *testing.T) map[string]int64 {
 			}
 			for _, dp := range sum.DataPoints {
 				switch m.Name {
-				case MetricUnrecorded:
+				case MetricExcluded:
 					r, _ := dp.Attributes.Value("reason")
 					out[r.AsString()] += dp.Value
+				case MetricChildrenNotAttempted:
+					out["not_attempted"] += dp.Value
 				case MetricIncompleteOperations:
 					out["incomplete"] += dp.Value
 				}
@@ -180,11 +183,11 @@ func TestRecordAccountsForEveryChild(t *testing.T) {
 
 	got := h.counts(t)
 	want := map[string]int64{
-		ExcludedMetadataOnly:   1,
-		UnrecordedUnchanged:    3, // 6 in the release, 3 with an in-release verdict
-		UnrecordedHook:         2,
-		UnrecordedNotAttempted: 1,
-		"incomplete":           1,
+		ExcludedMetadataOnly: 1,
+		ExcludedUnchanged:    3, // 6 in the release, 3 with an in-release verdict
+		ExcludedHook:         2,
+		"not_attempted":      1,
+		"incomplete":         1,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -204,7 +207,7 @@ func TestUnchangedReconcileIsCountedNotRecorded(t *testing.T) {
 	if n := len(h.rec.Records()); n != 0 {
 		t.Fatalf("records = %d, want 0", n)
 	}
-	if got := h.counts(t); got[UnrecordedUnchanged] != 1 || got["incomplete"] != 0 {
+	if got := h.counts(t); got[ExcludedUnchanged] != 1 || got["incomplete"] != 0 {
 		t.Errorf("counts = %v, want unchanged=1 and no incomplete", got)
 	}
 }
@@ -219,8 +222,8 @@ func TestUnknownReleaseCountsNoUnchanged(t *testing.T) {
 	if n := len(h.rec.Records()); n != 1 {
 		t.Fatalf("records = %d, want 1 (the failed create)", n)
 	}
-	if got := h.counts(t); got[UnrecordedUnchanged] != 0 {
-		t.Errorf("unchanged = %d, want 0 when the release is unknown", got[UnrecordedUnchanged])
+	if got := h.counts(t); got[ExcludedUnchanged] != 0 {
+		t.Errorf("unchanged = %d, want 0 when the release is unknown", got[ExcludedUnchanged])
 	}
 }
 

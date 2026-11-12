@@ -3,6 +3,8 @@ package composition
 import (
 	"time"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
+
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 )
@@ -63,4 +65,26 @@ func releaseOf(op *helmconfig.OperationResult) *helmconfig.Release {
 		return nil
 	}
 	return op.Release
+}
+
+// reconcileRelease is the release a Reconcile left, or nil when it returned no result.
+func reconcileRelease(res *helmconfig.ReconcileResult) *helmconfig.Release {
+	if res == nil {
+		return nil
+	}
+	return res.Release
+}
+
+// childrenLeft is how many children rel names, for the audit's unchanged count
+// (core-provider#423), or -1 when it is not known: the operation failed, left no release, or its
+// manifest could not be decoded. -1 counts nothing unchanged rather than guessing.
+func childrenLeft(rel *helmconfig.Release, err error) int {
+	if err != nil || rel == nil {
+		return -1
+	}
+	all, _, derr := processor.DecodeMinRelease(rel)
+	if derr != nil {
+		return -1
+	}
+	return len(all)
 }

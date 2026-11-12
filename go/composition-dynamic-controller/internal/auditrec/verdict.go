@@ -24,6 +24,10 @@ const (
 	ActionUpgrade   = "helm.upgrade"
 	ActionReconcile = "helm.reconcile"
 	ActionUninstall = "helm.uninstall"
+	// ActionRollback is a rollback's writes: Observe's clearing of a release stuck pending past the
+	// grace, and Delete's. A rollback is not an upgrade, so it has its own literal (snowplow,
+	// 2026-11-12).
+	ActionRollback = "helm.rollback"
 )
 
 // Excluded-write reasons: a verdict the installer#413 predicate drops is COUNTED by reason, never

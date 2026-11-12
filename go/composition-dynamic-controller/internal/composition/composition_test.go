@@ -4,6 +4,10 @@
 package composition
 
 import (
+	"github.com/krateo-platformops/audit"
+	"github.com/krateo-platformops/audit/audittest"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
+
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -135,6 +139,11 @@ func TestMain(m *testing.M) {
 
 func TestController(t *testing.T) {
 	var handler controller.ExternalClient
+	// #423: every audit record the handler writes, for the whole test. Steps read the rows whose
+	// cause_ref is their composition.
+	auditSink := audittest.NewRecorder(t)
+	// The children the install recorded, for the Delete step's differential.
+	var installedChildren map[string]bool
 	// var labelselector labels.Selector
 	var c *rest.Config
 	f := features.New("Setup").
@@ -254,6 +263,7 @@ func TestController(t *testing.T) {
 				SaNamespace:       altNamespace,
 				SafeReleaseName:   true,
 				Mapper:            mapper,
+				Audit:             newTestAudit(t, auditSink, cfg.Client().RESTConfig(), focusResource(t)),
 			})
 			resli, err := decoder.DecodeAllFiles(ctx, os.DirFS(filepath.Join(testdataPath, "compositiondefinitions")), "*.yaml")
 			if err != nil {
@@ -328,6 +338,21 @@ func TestController(t *testing.T) {
 			t.Error("Handling observation.", "error", err)
 			return ctx
 		}
+
+		// #423: the install recorded one row per child it created, as the composition's cause.
+		rows := auditRowsFor(t, auditSink, u.GetUID())
+		if len(rows) == 0 {
+			t.Fatalf("#423: the install created the composition's children but recorded no audit row")
+		}
+		installedChildren = map[string]bool{}
+		for _, r := range rows {
+			if r.action != auditrec.ActionInstall || r.verb != "create" || r.outcome != audit.OutcomeSuccess || r.uid == "" {
+				t.Errorf("#423: install row %+v, want helm.install/create/success with the server's uid", r)
+			}
+			installedChildren[r.key()] = true
+		}
+		assertRowsMatchCluster(ctx, t, cfg.Client().RESTConfig(), rows)
+		t.Logf("#423: the install recorded %d rows: %s", len(rows), rowNames(rows))
 		return ctx
 	}).Assess("Update", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		r, err := resources.New(cfg.Client().RESTConfig())
@@ -618,7 +643,12 @@ func TestController(t *testing.T) {
 		// Warm-up: whatever the earlier assessments left unconverged gets written here, not below.
 		settled := observe("warm-up")
 		time.Sleep(1100 * time.Millisecond)
+		auditSink.Reset()
 		idle := observe("idle pass")
+		// #423: an idle reconcile wrote no child, so it records nothing.
+		if rows := auditRowsFor(t, auditSink, idle.GetUID()); len(rows) != 0 {
+			t.Errorf("#423: an idle reconcile recorded %d audit rows: %s", len(rows), rowNames(rows))
+		}
 		if idle.GetResourceVersion() != settled.GetResourceVersion() {
 			t.Errorf("an idle reconcile wrote the composition: resourceVersion %s -> %s.\nbefore: %s\nafter:  %s",
 				settled.GetResourceVersion(), idle.GetResourceVersion(), statusOf(settled), statusOf(idle))
@@ -868,10 +898,30 @@ func TestController(t *testing.T) {
 		// stepped around it rather than asserting on it. The route it avoided is now covered
 		// by "SelfHeal: the full Observe->Update route writes ONE revision" below.
 		u, _ = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		auditSink.Reset()
 		observation, err := handler.Observe(ctx, u)
 		if err != nil {
 			t.Fatalf("observe after out-of-band delete: %v", err)
 		}
+		// #423: the heal's recreate of the child is recorded once, as a reconcile's create with the
+		// server's uid. Every row the heal wrote is checked against the cluster: the heal may also
+		// converge other children (here it prunes a FocusConfig of the same name), and each of
+		// those is a real write too.
+		healRows := auditRowsFor(t, auditSink, u.GetUID())
+		var recreated int
+		for _, r := range healRows {
+			if r.action != auditrec.ActionReconcile {
+				t.Errorf("#423: heal row %+v, want action helm.reconcile", r)
+			}
+			if r.name == childName && r.resource == "datapresentationazures" && r.verb == "create" && r.outcome == audit.OutcomeSuccess {
+				recreated++
+			}
+		}
+		if recreated != 1 {
+			t.Errorf("#423: the recreated child must be recorded exactly once as a create, got %d in [%s]", recreated, rowNames(healRows))
+		}
+		assertRowsMatchCluster(ctx, t, cfg.Client().RESTConfig(), healRows)
+		t.Logf("#423: the heal recorded %d rows: %s", len(healRows), rowNames(healRows))
 		if observation.ResourceUpToDate {
 			t.Errorf("expected Observe to report drift (ResourceUpToDate=false) after child deletion, got up-to-date")
 		}
@@ -914,6 +964,11 @@ func TestController(t *testing.T) {
 			if !obs.ResourceUpToDate {
 				t.Errorf("steady-state reconcile #%d unexpectedly reported drift", i)
 			}
+		}
+		// #423: re-recording the inventory and the steady reconciles wrote no child, so the heal's row
+		// is still the only one.
+		if rows := auditRowsFor(t, auditSink, u.GetUID()); len(rows) != len(healRows) {
+			t.Errorf("#423: after the heal, Update and 3 steady reconciles recorded [%s], want only the heal's %d rows", rowNames(rows), len(healRows))
 		}
 		revSteady := latestRevision()
 		t.Logf("[selfheal-delete] latest revision after 3 steady reconciles: %d (was %d)", revSteady, revAfterHeal)
@@ -1745,10 +1800,30 @@ func TestController(t *testing.T) {
 			return ctx
 		}
 
+		auditSink.Reset()
 		err = handler.Delete(ctx, u)
 		if err != nil {
 			t.Error("Deleting composition.", "error", err)
 			return ctx
+		}
+		// #423: the uninstall recorded a delete row per child it removed, and the child the install
+		// created is among them (the differential: install and uninstall read the same child).
+		delRows := auditRowsFor(t, auditSink, u.GetUID())
+		deleted := map[string]bool{}
+		for _, r := range delRows {
+			if r.action != auditrec.ActionUninstall || r.verb != "delete" {
+				t.Errorf("#423: uninstall row %+v, want helm.uninstall/delete", r)
+			}
+			deleted[r.key()] = true
+		}
+		assertRowsMatchCluster(ctx, t, cfg.Client().RESTConfig(), delRows)
+		if len(installedChildren) == 0 {
+			t.Error("#423: precondition: the Create step recorded no installed child to compare with")
+		}
+		for name := range installedChildren {
+			if !deleted[name] {
+				t.Errorf("#423: the install recorded %s, the uninstall did not: [%s]", name, rowNames(delRows))
+			}
 		}
 
 		u, err = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})

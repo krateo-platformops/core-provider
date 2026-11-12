@@ -17,25 +17,28 @@ const (
 	PreviewLabelValue = "preview-sandbox"
 )
 
-// The counters. Every child of an operation is either recorded, or counted here by reason, so an
-// absent record is never ambiguous between "nothing to record" and "not recorded".
+// The counters. Every child of an operation is recorded, deliberately excluded (counted by reason),
+// or never attempted (counted on its own), so an absent record is never ambiguous.
 const (
-	// MetricUnrecorded counts the children of an operation that got no record, by reason.
-	MetricUnrecorded = "composition_audit_unrecorded_total"
+	// MetricExcluded counts the children of an operation the audit deliberately records no row
+	// for, by reason: metadata_only, unchanged, hook.
+	MetricExcluded = "composition_audit_excluded_total"
+	// MetricChildrenNotAttempted counts the children an operation never reached: helm stopped at a
+	// failed create, so no request was sent. They are not writes, so the audit records none
+	// (snowplow, 2026-11-12: the failed create that stopped helm is the record). This is
+	// operational state, not an audit gap.
+	MetricChildrenNotAttempted = "composition_children_not_attempted_total"
 	// MetricIncompleteOperations counts the operations whose verdicts may not name every child
 	// written (plumbing's ObjectsComplete=false), by action: their records may be short.
 	MetricIncompleteOperations = "composition_audit_incomplete_operations_total"
 )
 
-// Unrecorded reasons, beside ExcludedMetadataOnly.
+// Excluded reasons, beside ExcludedMetadataOnly.
 const (
-	// UnrecordedUnchanged: a child the operation left as it was. Not a write.
-	UnrecordedUnchanged = "unchanged"
-	// UnrecordedHook: a hook write (helm.sh/hook). Hooks are not release children.
-	UnrecordedHook = "hook"
-	// UnrecordedNotAttempted: a child the operation never reached; no request was sent. The audit
-	// schema (v0.9.0) has no key that states the count on a record, so it is counted here only.
-	UnrecordedNotAttempted = "not_attempted"
+	// ExcludedUnchanged: a child the operation left as it was. Not a write.
+	ExcludedUnchanged = "unchanged"
+	// ExcludedHook: a hook write (helm.sh/hook). Hooks are not release children.
+	ExcludedHook = "hook"
 )
 
 // Operation is what one helm operation reported, in the shape plumbing's two result types share.
@@ -76,19 +79,25 @@ type NamespaceLabels func(ctx context.Context, name string) (map[string]string, 
 type Recorder struct {
 	// resource is the plural of the composition kind this cdc reconciles (its -resource flag), the
 	// cause_ref.resource of every record.
-	resource   string
-	emitter    *audit.Emitter
-	namespaces NamespaceLabels
-	unrecorded metric.Int64Counter
-	incomplete metric.Int64Counter
+	resource     string
+	emitter      *audit.Emitter
+	namespaces   NamespaceLabels
+	excluded     metric.Int64Counter
+	notAttempted metric.Int64Counter
+	incomplete   metric.Int64Counter
 }
 
 // NewRecorder builds a Recorder for the compositions of resource (the plural), emitting on emitter
 // and counting on mp.
 func NewRecorder(resource string, emitter *audit.Emitter, mp metric.MeterProvider, namespaces NamespaceLabels) (*Recorder, error) {
 	m := mp.Meter(Scope)
-	unrecorded, err := m.Int64Counter(MetricUnrecorded,
-		metric.WithDescription("Children of a helm operation that got no audit record, by reason: metadata_only, unchanged, hook, not_attempted."))
+	excluded, err := m.Int64Counter(MetricExcluded,
+		metric.WithDescription("Children of a helm operation the audit deliberately records no row for, by reason: metadata_only, unchanged, hook."))
+	if err != nil {
+		return nil, err
+	}
+	notAttempted, err := m.Int64Counter(MetricChildrenNotAttempted,
+		metric.WithDescription("Children a helm operation never reached (no request sent: helm stopped at a failed create), by action."))
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +106,7 @@ func NewRecorder(resource string, emitter *audit.Emitter, mp metric.MeterProvide
 	if err != nil {
 		return nil, err
 	}
-	return &Recorder{resource: resource, emitter: emitter, namespaces: namespaces, unrecorded: unrecorded, incomplete: incomplete}, nil
+	return &Recorder{resource: resource, emitter: emitter, namespaces: namespaces, excluded: excluded, notAttempted: notAttempted, incomplete: incomplete}, nil
 }
 
 // Record writes one record per recorded verdict of op, every one with the composition mg as its
@@ -123,11 +132,13 @@ func (r *Recorder) Record(ctx context.Context, op Operation, mg *unstructured.Un
 	}
 	if op.ReleaseChildren >= 0 {
 		if n := op.ReleaseChildren - len(inRelease); n > 0 {
-			r.count(ctx, op.Action, UnrecordedUnchanged, n)
+			r.count(ctx, op.Action, ExcludedUnchanged, n)
 		}
 	}
-	r.count(ctx, op.Action, UnrecordedHook, op.HooksExcluded)
-	r.count(ctx, op.Action, UnrecordedNotAttempted, op.NotAttempted)
+	r.count(ctx, op.Action, ExcludedHook, op.HooksExcluded)
+	if op.NotAttempted > 0 {
+		r.notAttempted.Add(ctx, int64(op.NotAttempted), metric.WithAttributes(attribute.String("action", op.Action)))
+	}
 	if !op.Complete {
 		r.incomplete.Add(ctx, 1, metric.WithAttributes(attribute.String("action", op.Action)))
 	}
@@ -137,7 +148,7 @@ func (r *Recorder) count(ctx context.Context, action, reason string, n int) {
 	if n <= 0 {
 		return
 	}
-	r.unrecorded.Add(ctx, int64(n), metric.WithAttributes(attribute.String("action", action), attribute.String("reason", reason)))
+	r.excluded.Add(ctx, int64(n), metric.WithAttributes(attribute.String("action", action), attribute.String("reason", reason)))
 }
 
 // preview is the child's krateo.audit.preview, read once per Namespace per operation. A
