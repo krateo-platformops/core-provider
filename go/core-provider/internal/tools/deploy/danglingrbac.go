@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"regexp"
 	"sort"
 	"strings"
@@ -199,7 +200,9 @@ func RemoveDanglingControllerBindings(ctx context.Context, dyn dynamic.Interface
 		if d.Kind == "ClusterRoleBinding" {
 			gvr = clusterRoleBindingGVR
 		}
-		if derr := dyn.Resource(gvr).Namespace(d.Namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+		derr := dyn.Resource(gvr).Namespace(d.Namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
+		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.Kind, Namespace: d.Namespace, Name: d.Name}, "", derr)
+		if derr != nil && !apierrors.IsNotFound(derr) {
 			errs = append(errs, fmt.Errorf("deleting %s: %w", d, derr))
 			continue
 		}
@@ -237,7 +240,9 @@ func RemoveDanglingControllerBindings(ctx context.Context, dyn dynamic.Interface
 		if _, helm := role.GetAnnotations()[helmReleaseNameAnnotation]; helm {
 			continue
 		}
-		if derr := dyn.Resource(gvr).Namespace(ns).Delete(ctx, d.RoleRefName, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+		derr := dyn.Resource(gvr).Namespace(ns).Delete(ctx, d.RoleRefName, metav1.DeleteOptions{})
+		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.RoleRefKind, Namespace: ns, Name: d.RoleRefName}, string(role.GetUID()), derr)
+		if derr != nil && !apierrors.IsNotFound(derr) {
 			errs = append(errs, fmt.Errorf("deleting %s: %w", key, derr))
 			continue
 		}

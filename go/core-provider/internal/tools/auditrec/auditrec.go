@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Scope is the logger's instrumentation scope: the core-provider population of the audit schema.
@@ -287,4 +288,20 @@ func RecordUpdate(ctx context.Context, action string, t Target, before, after *u
 	if s, ok := scopeFrom(ctx); ok {
 		s.r.apply(ctx, action, t, UpdateResult(before, after, err), err, s.cause, knownChanged)
 	}
+}
+
+// RecordDeleteSent records a Delete a site sent itself, by name; err is the apiserver's answer. A
+// NotFound means someone else removed it first: not this controller's write, no record. uid is the
+// object's when the site read it, "" when it deleted by name alone (object_ref.uid is then omitted,
+// as the schema allows for an object that isn't known).
+func RecordDeleteSent(ctx context.Context, action string, t Target, uid string, err error) {
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	var before *unstructured.Unstructured
+	if uid != "" {
+		before = &unstructured.Unstructured{Object: map[string]interface{}{}}
+		before.SetUID(types.UID(uid))
+	}
+	RecordDelete(ctx, action, t, objectclient.UninstallResult{Op: objectclient.UninstallDeleted, Before: before}, err)
 }

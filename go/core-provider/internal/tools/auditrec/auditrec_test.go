@@ -325,3 +325,33 @@ func TestNoScopeRecordsNothing(t *testing.T) {
 		t.Errorf("control: records = %d under a scope, want 1", n)
 	}
 }
+
+// A Delete a site sent by name: accepted is a record, refused is a failure, NotFound is someone
+// else's (no record).
+func TestRecordDeleteSent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		want    int
+		outcome string
+	}{
+		{"accepted", nil, 1, audit.OutcomeSuccess},
+		{"refused", forbidden, 1, audit.OutcomeFailure},
+		{"already gone", apierrors.NewNotFound(schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "roles"}, "r"), 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			RecordDeleteSent(WithScope(context.Background(), h.r, cause), ActionRBACDelete, roleT, "u9", tc.err)
+			recs := h.rec.Records()
+			if len(recs) != tc.want {
+				t.Fatalf("records = %d, want %d", len(recs), tc.want)
+			}
+			if tc.want == 1 {
+				if str(recs[0], "krateo.audit.outcome") != tc.outcome || str(recs[0], "krateo.audit.object_ref.uid") != "u9" {
+					t.Errorf("outcome %q uid %q", str(recs[0], "krateo.audit.outcome"), str(recs[0], "krateo.audit.object_ref.uid"))
+				}
+				audittest.AssertConformant(t, audit.WriterController, recs[0])
+			}
+		})
+	}
+}

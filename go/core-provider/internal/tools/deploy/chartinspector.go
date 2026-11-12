@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"net/url"
 	"os"
 	"strconv"
@@ -289,8 +290,17 @@ func referencedConfig(ps *corev1.PodSpec) (cms []string, secrets []string) {
 // (the caller ref-counts). Idempotent — a NotFound on any object is ignored. The referenced
 // ConfigMap shares the chart-inspector name, so it is removed with the namespaced set.
 func DeleteProjectedChartInspector(ctx context.Context, spoke client.Client, coords ChartInspectorCoords) error {
+	// core-provider#423: the RBAC kinds of the set are recorded (rbac.delete); the Service,
+	// Deployment and ConfigMap are not in AUDIT-4's scope.
+	rbacGVR := map[string]schema.GroupVersionResource{
+		"ClusterRole": clusterRoleGVR, "ClusterRoleBinding": clusterRoleBindingGVR, "ServiceAccount": serviceAccountGVR,
+	}
 	del := func(obj client.Object, what string) error {
-		if err := spoke.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		err := spoke.Delete(ctx, obj)
+		if gvr, ok := rbacGVR[what]; ok {
+			auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: what, Namespace: obj.GetNamespace(), Name: obj.GetName()}, string(obj.GetUID()), err)
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting chart-inspector %s: %w", what, err)
 		}
 		return nil
