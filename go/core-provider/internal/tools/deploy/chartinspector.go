@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"net/url"
 	"os"
 	"strconv"
@@ -105,7 +106,7 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 	stripServerMetadata(&sa.ObjectMeta)
 	sa.Secrets = nil
 	sa.ImagePullSecrets = nil
-	if _, err := kubecli.Apply(ctx, spokeDynamic, serviceAccountGVR, sa, kubecli.ApplyOptions{}); err != nil {
+	if _, err := applyRecorded(ctx, spokeDynamic, serviceAccountGVR, "ServiceAccount", auditrec.ActionRBACApply, sa, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("projecting chart-inspector ServiceAccount: %w", err)
 	}
 
@@ -121,12 +122,12 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 		}
 		cr.TypeMeta = metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole"}
 		stripServerMetadata(&cr.ObjectMeta)
-		if _, err := kubecli.Apply(ctx, spokeDynamic, clusterRoleGVR, cr, kubecli.ApplyOptions{}); err != nil {
+		if _, err := applyRecorded(ctx, spokeDynamic, clusterRoleGVR, "ClusterRole", auditrec.ActionRBACApply, cr, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting chart-inspector ClusterRole: %w", err)
 		}
 		crb.TypeMeta = metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding"}
 		stripServerMetadata(&crb.ObjectMeta)
-		if _, err := kubecli.Apply(ctx, spokeDynamic, clusterRoleBindingGVR, crb, kubecli.ApplyOptions{}); err != nil {
+		if _, err := applyRecorded(ctx, spokeDynamic, clusterRoleBindingGVR, "ClusterRoleBinding", auditrec.ActionRBACApply, crb, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting chart-inspector ClusterRoleBinding: %w", err)
 		}
 	}
@@ -215,7 +216,7 @@ func projectPodRefs(ctx context.Context, mgmt client.Client, spoke client.Client
 		}
 		sec.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}
 		stripServerMetadata(&sec.ObjectMeta)
-		if _, err := kubecli.Apply(ctx, spokeDynamic, secretGVR, sec, kubecli.ApplyOptions{}); err != nil {
+		if _, err := applyRecorded(ctx, spokeDynamic, secretGVR, "Secret", auditrec.ActionSecretApply, sec, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting referenced Secret %q: %w", name, err)
 		}
 	}

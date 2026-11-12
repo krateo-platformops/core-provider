@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"sync"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/authn"
@@ -144,11 +145,11 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 		return nil
 	}
 
-	if _, err := kubecli.Apply(ctx, dyn, clusterRoleGVR, cr, applyOpts); err != nil {
+	if _, err := applyRecorded(ctx, dyn, clusterRoleGVR, "ClusterRole", auditrec.ActionRBACApply, cr, applyOpts); err != nil {
 		log.Error(err, "installing apiRef ClusterRole", "name", cr.Name)
 		return fmt.Errorf("installing apiRef ClusterRole: %w", err)
 	}
-	if _, err := kubecli.Apply(ctx, dyn, clusterRoleBindingGVR, crb, applyOpts); err != nil {
+	if _, err := applyRecorded(ctx, dyn, clusterRoleBindingGVR, "ClusterRoleBinding", auditrec.ActionRBACApply, crb, applyOpts); err != nil {
 		log.Error(err, "installing apiRef ClusterRoleBinding", "name", crb.Name)
 		return fmt.Errorf("installing apiRef ClusterRoleBinding: %w", err)
 	}
