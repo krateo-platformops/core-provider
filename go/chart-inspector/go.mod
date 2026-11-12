@@ -7,8 +7,8 @@ toolchain go1.26.10
 require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/krateo-platformops/core-provider v0.0.0-20260803144138-97785b777edd
-	github.com/krateo-platformops/plumbing v1.52.0
-	github.com/krateo-platformops/provider-runtime v1.15.0
+	github.com/krateo-platformops/plumbing v1.57.0
+	github.com/krateo-platformops/provider-runtime v1.18.0
 	github.com/krateo-platformops/unstructured-runtime v1.7.5
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag/v2 v2.0.0-rc4
