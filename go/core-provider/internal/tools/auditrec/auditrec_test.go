@@ -256,3 +256,72 @@ func TestNilRecorderIsANoop(t *testing.T) {
 	r.Apply(context.Background(), ActionRBACApply, roleT, objectclient.ApplyResult{Op: objectclient.ApplyCreated}, nil, cause)
 	r.Delete(context.Background(), ActionRBACDelete, roleT, objectclient.UninstallResult{Op: objectclient.UninstallDeleted}, nil, cause)
 }
+
+// RecordUpdate, for sites that send their own Update. A migration whose read (through the narrower
+// target version) already lacks the fields its write discards shows only a label change between the
+// objects it holds; its fieldloss report says content changed, so knownChanged records it. Control:
+// the same write without knownChanged is excluded as metadata-only.
+func TestRecordUpdate(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v0-3-48", Resource: "keystones"}
+	tg := Target{GVR: gvr, Kind: "Keystone", Namespace: "plain-ns", Name: "keystone"}
+	comp := func(rv, version string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "composition.krateo.io/v0-3-48", "kind": "Keystone",
+			"spec": map[string]interface{}{"replicas": int64(1)}}}
+		u.SetNamespace("plain-ns")
+		u.SetName("keystone")
+		u.SetUID("u3")
+		u.SetResourceVersion(rv)
+		u.SetLabels(map[string]string{"krateo.io/composition-version": version})
+		return u
+	}
+	for _, tc := range []struct {
+		name          string
+		before, after *unstructured.Unstructured
+		err           error
+		known         bool
+		wantRecords   int
+		wantOutcome   string
+		wantExcluded  string
+	}{
+		{"a pruning rewrite: label-only objects, but the report says fields were discarded", comp("10", "v0-3-47"), comp("11", "v0-3-48"), nil, true, 1, audit.OutcomeSuccess, ""},
+		{"control: the same write, no report: metadata only", comp("10", "v0-3-47"), comp("11", "v0-3-48"), nil, false, 0, "", ExcludedMetadataOnly},
+		{"resourceVersion unmoved: unchanged", comp("10", "v0-3-48"), comp("10", "v0-3-48"), nil, false, 0, "", ExcludedUnchanged},
+		{"refused", comp("10", "v0-3-47"), nil, forbidden, false, 1, audit.OutcomeFailure, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			ctx := WithScope(context.Background(), h.r, cause)
+			RecordUpdate(ctx, ActionCompositionMigrate, tg, tc.before, tc.after, tc.err, tc.known)
+			recs := h.rec.Records()
+			if len(recs) != tc.wantRecords {
+				t.Fatalf("records = %d, want %d (excluded %v)", len(recs), tc.wantRecords, h.excluded(t))
+			}
+			if tc.wantRecords == 1 {
+				if got := str(recs[0], "krateo.audit.outcome"); got != tc.wantOutcome {
+					t.Errorf("outcome %q, want %q", got, tc.wantOutcome)
+				}
+				if str(recs[0], "krateo.action") != ActionCompositionMigrate || str(recs[0], "krateo.audit.verb") != "update" {
+					t.Errorf("action %q verb %q", str(recs[0], "krateo.action"), str(recs[0], "krateo.audit.verb"))
+				}
+				audittest.AssertConformant(t, audit.WriterController, recs[0])
+			}
+			if tc.wantExcluded != "" && h.excluded(t)[tc.wantExcluded] != 1 {
+				t.Errorf("excluded = %v, want %s=1", h.excluded(t), tc.wantExcluded)
+			}
+		})
+	}
+}
+
+// No scope on the context: a write outside a reconcile that set one records nothing.
+func TestNoScopeRecordsNothing(t *testing.T) {
+	h := newHarness(t)
+	RecordApply(context.Background(), ActionRBACApply, roleT, objectclient.ApplyResult{Op: objectclient.ApplyCreated, After: role("u1", "1", "get")}, nil)
+	if n := len(h.rec.Records()); n != 0 {
+		t.Errorf("records = %d without a scope, want 0", n)
+	}
+	// Control: the same call under a scope records.
+	RecordApply(WithScope(context.Background(), h.r, cause), ActionRBACApply, roleT, objectclient.ApplyResult{Op: objectclient.ApplyCreated, After: role("u1", "1", "get")}, nil)
+	if n := len(h.rec.Records()); n != 1 {
+		t.Errorf("control: records = %d under a scope, want 1", n)
+	}
+}

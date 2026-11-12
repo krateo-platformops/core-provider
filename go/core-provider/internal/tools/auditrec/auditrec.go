@@ -90,6 +90,12 @@ func NewRecorder(emitter *audit.Emitter, mp metric.MeterProvider, namespaces Nam
 //	unchanged                        counted unchanged
 //	refused (error, Op created|updated)  create|update / failure, with the apiserver's status code
 func (r *Recorder) Apply(ctx context.Context, action string, t Target, res objectclient.ApplyResult, err error, cause audit.CauseRef) {
+	r.apply(ctx, action, t, res, err, cause, false)
+}
+
+// apply is Apply; knownChanged says the caller knows the write changed content (a migration's
+// fieldloss report), which content.Differs over the objects it holds cannot see.
+func (r *Recorder) apply(ctx context.Context, action string, t Target, res objectclient.ApplyResult, err error, cause audit.CauseRef, knownChanged bool) {
 	if r == nil || res.Op == "" {
 		return
 	}
@@ -109,7 +115,7 @@ func (r *Recorder) Apply(ctx context.Context, action string, t Target, res objec
 		changed, cerr := content.Differs(object(res.Before), object(res.After), audit.AuthorizationAnnotations())
 		// A comparison that can't be made is a write whose effect is unknown: recorded, as the cdc
 		// records compareFailed (Q1). An unrecorded write is what AUDIT-4 exists to prevent.
-		if cerr == nil && !changed {
+		if !knownChanged && cerr == nil && !changed {
 			r.count(ctx, action, ExcludedMetadataOnly)
 			return
 		}
@@ -255,5 +261,30 @@ func RecordApply(ctx context.Context, action string, t Target, res objectclient.
 func RecordDelete(ctx context.Context, action string, t Target, res objectclient.UninstallResult, err error) {
 	if s, ok := scopeFrom(ctx); ok {
 		s.r.Delete(ctx, action, t, res, err, s.cause)
+	}
+}
+
+// UpdateResult is what an Update a site sends itself (not through objectclient) did, in
+// objectclient's terms: the read object it replaced, and what the apiserver returned. An unmoved
+// resourceVersion is an Update the apiserver short-circuited: nothing was persisted (the same rule
+// objectclient applies). On error the write was sent and refused.
+func UpdateResult(before, after *unstructured.Unstructured, err error) objectclient.ApplyResult {
+	if err != nil {
+		return objectclient.ApplyResult{Op: objectclient.ApplyUpdated, Before: before}
+	}
+	op := objectclient.ApplyUpdated
+	if before != nil && after != nil && before.GetResourceVersion() == after.GetResourceVersion() {
+		op = objectclient.ApplyUnchanged
+	}
+	return objectclient.ApplyResult{Op: op, Before: before, After: after}
+}
+
+// RecordUpdate records an Update a site sent itself. knownChanged is true when the site knows the
+// write changed content though the objects it holds can't show it: a migration that rewrites a
+// composition through a narrower version discards fields its own read (through that version) was
+// already missing, so its fieldloss report, not content.Differs, is the authority (core-provider#188).
+func RecordUpdate(ctx context.Context, action string, t Target, before, after *unstructured.Unstructured, err error, knownChanged bool) {
+	if s, ok := scopeFrom(ctx); ok {
+		s.r.apply(ctx, action, t, UpdateResult(before, after, err), err, s.cause, knownChanged)
 	}
 }
