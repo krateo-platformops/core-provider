@@ -298,7 +298,7 @@ func DeleteProjectedChartInspector(ctx context.Context, spoke client.Client, coo
 	del := func(obj client.Object, what string) error {
 		err := spoke.Delete(ctx, obj)
 		if gvr, ok := rbacGVR[what]; ok {
-			auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: what, Namespace: obj.GetNamespace(), Name: obj.GetName()}, string(obj.GetUID()), err)
+			auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: what, Namespace: obj.GetNamespace(), Name: obj.GetName(), Namespaces: auditrec.LabelsFromClient(spoke)}, string(obj.GetUID()), err)
 		}
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting chart-inspector %s: %w", what, err)

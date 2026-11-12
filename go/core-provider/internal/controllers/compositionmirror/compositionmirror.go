@@ -262,7 +262,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cd *compositiondefinit
 				}
 				// nil desired set: no mirror is wanted now, so garbageCollect removes every managed one
 				// (and only those — never an instance authored directly on the spoke).
-				if err := garbageCollect(tctx, spoke.Resource(gvr).Namespace(cd.Namespace), gvr, nil, r.log); err != nil {
+				if err := garbageCollect(tctx, spoke.Resource(gvr).Namespace(cd.Namespace), gvr, auditrec.LabelsFrom(spoke), nil, r.log); err != nil {
 					return reconcile.Result{}, fmt.Errorf("compositionmirror: tearing down spoke %q mirrors for %s/%s: %w", target, cd.Namespace, cd.Name, err)
 				}
 			}
@@ -285,7 +285,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cd *compositiondefinit
 					r.log.Debug("compositionmirror: sweep-only spoke unreachable at teardown, skipping", "cd", cd.Name, "target", target, "error", err)
 					continue
 				}
-				if err := garbageCollect(tctx, spoke.Resource(gvr).Namespace(cd.Namespace), gvr, nil, r.log); err != nil {
+				if err := garbageCollect(tctx, spoke.Resource(gvr).Namespace(cd.Namespace), gvr, auditrec.LabelsFrom(spoke), nil, r.log); err != nil {
 					r.log.Debug("compositionmirror: sweep-only teardown GC failed, skipping", "cd", cd.Name, "target", target, "error", err)
 				}
 			}
@@ -362,7 +362,7 @@ func deleteAllHubCompositions(ctx context.Context, hubDyn dynamic.Interface, gvr
 		name := list.Items[i].GetName()
 		err := res.Delete(ctx, name, metav1.DeleteOptions{})
 		auditrec.RecordDeleteSent(ctx, auditrec.ActionCompositionHubDelete,
-			auditrec.Target{GVR: gvr, Kind: list.Items[i].GetKind(), Namespace: ns, Name: name}, string(list.Items[i].GetUID()), err)
+			auditrec.Target{GVR: gvr, Kind: list.Items[i].GetKind(), Namespace: ns, Name: name, Namespaces: auditrec.LabelsFrom(hubDyn)}, string(list.Items[i].GetUID()), err)
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting hub composition %q: %w", name, err)
 		}
@@ -501,7 +501,7 @@ func reflectInstances(ctx context.Context, p reflectParams) error {
 		for _, inst := range insts {
 			desired[inst.GetName()] = struct{}{}
 
-			if _, err := mirrorDown(ctx, spokeRes, p.gvr, inst, p.apiVersion, p.kind, p.namespace); err != nil {
+			if _, err := mirrorDown(ctx, spokeRes, p.gvr, auditrec.LabelsFrom(spoke), inst, p.apiVersion, p.kind, p.namespace); err != nil {
 				return fmt.Errorf("mirroring %s/%s to spoke %q: %w", p.namespace, inst.GetName(), target, err)
 			}
 
@@ -515,7 +515,7 @@ func reflectInstances(ctx context.Context, p reflectParams) error {
 
 		// desired may be empty (sweep-only target, or the default with no instances): garbageCollect then
 		// removes every managed mirror on that spoke — exactly the orphan we are sweeping for.
-		if err := garbageCollect(ctx, spokeRes, p.gvr, desired, p.log); err != nil {
+		if err := garbageCollect(ctx, spokeRes, p.gvr, auditrec.LabelsFrom(spoke), desired, p.log); err != nil {
 			if authoritative {
 				return fmt.Errorf("garbage-collecting spoke %q: %w", target, err)
 			}
@@ -602,8 +602,8 @@ const (
 // alone: no Update is sent (core-provider#423). It used to Update on every resync, so "the mirror
 // changed" meant nothing and every resync was a write, which an audit record per write would have
 // turned into one row per instance per resync.
-func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, gvr schema.GroupVersionResource, hubInst *unstructured.Unstructured, apiVersion, kind, namespace string) (mirrorWrite, error) {
-	t := auditrec.Target{GVR: gvr, Kind: kind, Namespace: namespace, Name: hubInst.GetName()} // core-provider#423: composition.mirror
+func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, gvr schema.GroupVersionResource, spokeLabels auditrec.NamespaceLabels, hubInst *unstructured.Unstructured, apiVersion, kind, namespace string) (mirrorWrite, error) {
+	t := auditrec.Target{GVR: gvr, Kind: kind, Namespace: namespace, Name: hubInst.GetName(), Namespaces: spokeLabels} // core-provider#423: composition.mirror
 	spec, _, err := unstructured.NestedMap(hubInst.Object, "spec")
 	if err != nil {
 		return "", fmt.Errorf("reading hub spec: %w", err)
@@ -724,7 +724,7 @@ func mirrorStatusUp(ctx context.Context, hubRes, spokeRes dynamic.ResourceInterf
 // garbageCollect deletes spoke mirrors this reflector owns (management label) that are no longer
 // present on the hub. The label is re-checked client-side so the set-difference is correct even if
 // the API server does not apply the label selector.
-func garbageCollect(ctx context.Context, spokeRes dynamic.ResourceInterface, gvr schema.GroupVersionResource, desired map[string]struct{}, log logging.Logger) error {
+func garbageCollect(ctx context.Context, spokeRes dynamic.ResourceInterface, gvr schema.GroupVersionResource, spokeLabels auditrec.NamespaceLabels, desired map[string]struct{}, log logging.Logger) error {
 	managed, err := spokeRes.List(ctx, metav1.ListOptions{LabelSelector: managedByLabel + "=" + managedByValue})
 	if err != nil {
 		return fmt.Errorf("listing managed spoke mirrors: %w", err)
@@ -741,7 +741,7 @@ func garbageCollect(ctx context.Context, spokeRes dynamic.ResourceInterface, gvr
 		err := spokeRes.Delete(ctx, name, metav1.DeleteOptions{})
 		// core-provider#423: composition.mirror, verb delete.
 		auditrec.RecordDeleteSent(ctx, auditrec.ActionCompositionMirror,
-			auditrec.Target{GVR: gvr, Kind: item.GetKind(), Namespace: item.GetNamespace(), Name: name}, string(item.GetUID()), err)
+			auditrec.Target{GVR: gvr, Kind: item.GetKind(), Namespace: item.GetNamespace(), Name: name, Namespaces: spokeLabels}, string(item.GetUID()), err)
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting orphaned spoke mirror %q: %w", name, err)
 		}

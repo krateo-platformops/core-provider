@@ -379,7 +379,7 @@ func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr 
 		// core-provider#423: composition.migrate. A rewrite that discards fields changed content even
 		// when this read (through the target version) already lacked them: rep says so.
 		auditrec.RecordUpdate(ctx, auditrec.ActionCompositionMigrate,
-			auditrec.Target{GVR: gvr, Kind: u.GetKind(), Namespace: namespace, Name: name}, before, after, err, !rep.Empty())
+			auditrec.Target{GVR: gvr, Kind: u.GetKind(), Namespace: namespace, Name: name, Namespaces: auditrec.LabelsFrom(dyn)}, before, after, err, !rep.Empty())
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Debug("Composition disappeared during version update, skipping", "composition", compositionName, "gvr", gvr.String())

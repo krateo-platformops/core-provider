@@ -201,7 +201,7 @@ func RemoveDanglingControllerBindings(ctx context.Context, dyn dynamic.Interface
 			gvr = clusterRoleBindingGVR
 		}
 		derr := dyn.Resource(gvr).Namespace(d.Namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
-		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.Kind, Namespace: d.Namespace, Name: d.Name}, "", derr)
+		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.Kind, Namespace: d.Namespace, Name: d.Name, Namespaces: auditrec.LabelsFrom(dyn)}, "", derr)
 		if derr != nil && !apierrors.IsNotFound(derr) {
 			errs = append(errs, fmt.Errorf("deleting %s: %w", d, derr))
 			continue
@@ -241,7 +241,7 @@ func RemoveDanglingControllerBindings(ctx context.Context, dyn dynamic.Interface
 			continue
 		}
 		derr := dyn.Resource(gvr).Namespace(ns).Delete(ctx, d.RoleRefName, metav1.DeleteOptions{})
-		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.RoleRefKind, Namespace: ns, Name: d.RoleRefName}, string(role.GetUID()), derr)
+		auditrec.RecordDeleteSent(ctx, auditrec.ActionRBACDelete, auditrec.Target{GVR: gvr, Kind: d.RoleRefKind, Namespace: ns, Name: d.RoleRefName, Namespaces: auditrec.LabelsFrom(dyn)}, string(role.GetUID()), derr)
 		if derr != nil && !apierrors.IsNotFound(derr) {
 			errs = append(errs, fmt.Errorf("deleting %s: %w", key, derr))
 			continue

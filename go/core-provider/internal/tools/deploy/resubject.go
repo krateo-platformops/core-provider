@@ -117,7 +117,7 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 			after, err := opts.DynamicClient.Resource(kind.gvr).Namespace(obj.GetNamespace()).
 				Update(ctx, &obj, metav1.UpdateOptions{})
 			auditrec.RecordUpdate(ctx, auditrec.ActionRBACApply,
-				auditrec.Target{GVR: kind.gvr, Kind: obj.GetKind(), Namespace: obj.GetNamespace(), Name: obj.GetName()}, before, after, err, false)
+				auditrec.Target{GVR: kind.gvr, Kind: obj.GetKind(), Namespace: obj.GetNamespace(), Name: obj.GetName(), Namespaces: auditrec.LabelsFrom(opts.DynamicClient)}, before, after, err, false)
 			if err != nil {
 				// Keep going: one composition's binding failing to update must not leave the rest
 				// of the fleet stale. The joined error fails the reconcile, which retries the sweep.

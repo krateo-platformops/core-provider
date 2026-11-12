@@ -12,7 +12,11 @@ package auditrec
 import (
 	"context"
 	"errors"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"net/http"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/krateo-platformops/audit"
 	"github.com/krateo-platformops/plumbing/kubeutil/content"
@@ -59,6 +63,32 @@ type Target struct {
 	Kind      string
 	Namespace string
 	Name      string
+	// Namespaces reads the preview label from the cluster the object lives on, when that is not
+	// the Recorder's own (a spoke). nil uses the Recorder's reader. The schema has the writer read
+	// the target's Namespace from apiserver state; a spoke object's Namespace is on the spoke.
+	Namespaces NamespaceLabels
+}
+
+// LabelsFrom reads Namespace labels through dyn: the reader for a target on dyn's cluster.
+func LabelsFrom(dyn dynamic.Interface) NamespaceLabels {
+	return func(ctx context.Context, name string) (map[string]string, error) {
+		ns, err := dyn.Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return ns.GetLabels(), nil
+	}
+}
+
+// LabelsFromClient reads Namespace labels through a controller-runtime client.
+func LabelsFromClient(c client.Client) NamespaceLabels {
+	return func(ctx context.Context, name string) (map[string]string, error) {
+		var ns corev1.Namespace
+		if err := c.Get(ctx, client.ObjectKey{Name: name}, &ns); err != nil {
+			return nil, err
+		}
+		return ns.GetLabels(), nil
+	}
 }
 
 // NamespaceLabels reads a Namespace's labels from the cluster the object lives on.
@@ -173,7 +203,7 @@ func (r *Recorder) emit(ctx context.Context, action, verb string, t Target, id i
 		Kind:       t.Kind,
 		ObjectName: t.Name,
 		ObjectUID:  id.uid,
-		Preview:    r.preview(ctx, t.Namespace),
+		Preview:    r.preview(ctx, t),
 		Cause:      cause,
 	}
 	// The generation and resourceVersion the authority returned, on a successful non-delete write.
@@ -189,14 +219,18 @@ func (r *Recorder) count(ctx context.Context, action, reason string) {
 
 // preview is the target's krateo.audit.preview: false for a cluster-scoped object; from its
 // Namespace's label otherwise; Unknown (omitted and marked) when the Namespace can't be read.
-func (r *Recorder) preview(ctx context.Context, ns string) audit.Preview {
-	if ns == "" {
+func (r *Recorder) preview(ctx context.Context, t Target) audit.Preview {
+	if t.Namespace == "" {
 		return audit.PreviewFalse
 	}
-	if r.namespaces == nil {
+	read := r.namespaces
+	if t.Namespaces != nil {
+		read = t.Namespaces
+	}
+	if read == nil {
 		return audit.PreviewUnknown
 	}
-	labels, err := r.namespaces(ctx, ns)
+	labels, err := read(ctx, t.Namespace)
 	if err != nil {
 		return audit.PreviewUnknown
 	}

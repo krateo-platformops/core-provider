@@ -93,7 +93,7 @@ func TestMirrorDownWritesOnlyWhatDiffers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spoke := newFakeDyn(tc.spoke...)
 			creates, updates := spokeWrites(spoke)
-			got, err := mirrorDown(ctx, spoke.Resource(testGVR).Namespace(testNamespace), testGVR, tc.hub, testAPIVersion, testKind, testNamespace)
+			got, err := mirrorDown(ctx, spoke.Resource(testGVR).Namespace(testNamespace), testGVR, nil, tc.hub, testAPIVersion, testKind, testNamespace)
 			if err != nil {
 				t.Fatal(err)
 			}
