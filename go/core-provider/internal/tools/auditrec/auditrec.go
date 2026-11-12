@@ -36,10 +36,11 @@ const Scope = "github.com/krateo-platformops/core-provider/audit"
 // The krateo.action literals (snowplow, 2026-11-12): one per controller action, shared with every
 // writer that performs the same action; the object is in object_ref and the verb in the verb key.
 const (
-	ActionRBACApply            = "rbac.apply"  // Role, RoleBinding, ClusterRole, ClusterRoleBinding, ServiceAccount
-	ActionRBACDelete           = "rbac.delete" // the same kinds, torn down
-	ActionSecretApply          = "secret.apply"
-	ActionSecretDelete         = "secret.delete"
+	ActionRBACApply   = "rbac.apply"  // Role, RoleBinding, ClusterRole, ClusterRoleBinding, ServiceAccount
+	ActionRBACDelete  = "rbac.delete" // the same kinds, torn down
+	ActionSecretApply = "secret.apply"
+	// secret.delete is not declared: no core-provider site deletes a credential Secret, and a
+	// literal with no emit site would read as coverage that doesn't exist (snowplow, 2026-11-12).
 	ActionAuthnMappingApply    = "authn.mapping.apply"
 	ActionCompositionMirror    = "composition.mirror"
 	ActionCompositionHubDelete = "composition.hub.delete"
