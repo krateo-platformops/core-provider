@@ -3,6 +3,7 @@ package composition
 import (
 	"time"
 
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 )
 
@@ -52,4 +53,14 @@ func helmPhaseErr(log logging.Logger, phase, release string, fn func() error) er
 		return struct{}{}, fn()
 	})
 	return err
+}
+
+// releaseOf is the release an Install or Upgrade left (plumbing v1.50.0 returns an OperationResult,
+// whose per-child verdicts are core-provider#423's to read), or nil when the operation returned
+// none: a failed operation can return a result with no release.
+func releaseOf(op *helmconfig.OperationResult) *helmconfig.Release {
+	if op == nil {
+		return nil
+	}
+	return op.Release
 }

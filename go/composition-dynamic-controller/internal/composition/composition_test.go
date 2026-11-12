@@ -1464,7 +1464,7 @@ func TestController(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm client: %v", err)
 		}
-		if err := hc.Uninstall(ctx, second, &helmconfig.UninstallConfig{IgnoreNotFound: true}); err != nil {
+		if _, err := hc.Uninstall(ctx, second, &helmconfig.UninstallConfig{IgnoreNotFound: true}); err != nil {
 			t.Fatalf("uninstalling %q: %v", second, err)
 		}
 		patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, compositionMeta.ReleaseNameLabel, adopted)
