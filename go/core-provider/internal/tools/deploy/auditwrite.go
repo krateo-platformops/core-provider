@@ -12,14 +12,12 @@ import (
 )
 
 // applyRecorded applies obj and records the write under action (core-provider#423), in the scope
-// the reconcile put on ctx. A dry run persists nothing and records nothing.
+// the reconcile put on ctx. A dry run is reported ApplyDryRun and the recorder excludes it by op.
 func applyRecorded(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, kind, action string, obj client.Object, opts kubecli.ApplyOptions) (objectclient.ApplyResult, error) {
 	// Preview is read through dyn: the cluster this write goes to, hub or spoke.
 	t := auditrec.Target{GVR: gvr, Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName(), Namespaces: auditrec.LabelsFrom(dyn)}
 	res, err := kubecli.Apply(ctx, dyn, gvr, obj, opts)
-	if len(opts.DryRun) == 0 {
-		auditrec.RecordApply(ctx, action, t, res, err)
-	}
+	auditrec.RecordApply(ctx, action, t, res, err)
 	return res, err
 }
 
@@ -27,8 +25,6 @@ func applyRecorded(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupV
 func uninstallRecorded(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, kind, action string, obj client.Object, opts kubecli.UninstallOptions) (objectclient.UninstallResult, error) {
 	t := auditrec.Target{GVR: gvr, Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName(), Namespaces: auditrec.LabelsFrom(dyn)}
 	res, err := kubecli.Uninstall(ctx, dyn, gvr, obj, opts)
-	if len(opts.DryRun) == 0 {
-		auditrec.RecordDelete(ctx, action, t, res, err)
-	}
+	auditrec.RecordDelete(ctx, action, t, res, err)
 	return res, err
 }

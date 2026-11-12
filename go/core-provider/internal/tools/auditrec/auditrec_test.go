@@ -355,3 +355,27 @@ func TestRecordDeleteSent(t *testing.T) {
 		})
 	}
 }
+
+// snowplow (2026-11-12): a dry run is not a write. A dry-run apply (created or updated, changed or
+// not, refused) and a dry-run uninstall each record nothing, by their op alone: there is no caller
+// flag any more.
+func TestDryRunRecordsNothing(t *testing.T) {
+	h := newHarness(t)
+	ctx := WithScope(context.Background(), h.r, cause)
+	for _, res := range []objectclient.ApplyResult{
+		{Op: objectclient.ApplyDryRun, After: role("u1", "1", "get")},
+		{Op: objectclient.ApplyDryRun, Before: role("u1", "10", "get"), After: role("u1", "10", "get", "list")},
+	} {
+		RecordApply(ctx, ActionRBACApply, roleT, res, nil)
+	}
+	RecordApply(ctx, ActionRBACApply, roleT, objectclient.ApplyResult{Op: objectclient.ApplyDryRun}, forbidden)
+	RecordDelete(ctx, ActionRBACDelete, roleT, objectclient.UninstallResult{Op: objectclient.UninstallDryRun, Before: role("u1", "10", "get")}, nil)
+	if n := len(h.rec.Records()); n != 0 {
+		t.Fatalf("dry runs recorded %d rows, want 0", n)
+	}
+	// Control: the same apply as a real update records.
+	RecordApply(ctx, ActionRBACApply, roleT, objectclient.ApplyResult{Op: objectclient.ApplyUpdated, Before: role("u1", "10", "get"), After: role("u1", "11", "get", "list")}, nil)
+	if n := len(h.rec.Records()); n != 1 {
+		t.Fatalf("control: a real update recorded %d rows, want 1", n)
+	}
+}

@@ -128,7 +128,9 @@ func (r *Recorder) Apply(ctx context.Context, action string, t Target, res objec
 // apply is Apply; knownChanged says the caller knows the write changed content (a migration's
 // fieldloss report), which content.Differs over the objects it holds cannot see.
 func (r *Recorder) apply(ctx context.Context, action string, t Target, res objectclient.ApplyResult, err error, cause audit.CauseRef, knownChanged bool) {
-	if r == nil || res.Op == "" {
+	// No write was sent, or a dry run: validated and not persisted (objectclient v1.60.0's
+	// ApplyDryRun), so not a write. The predicate excludes it by its op, not by a caller's flag.
+	if r == nil || res.Op == "" || res.Op == objectclient.ApplyDryRun {
 		return
 	}
 	verb := "update"
@@ -155,7 +157,8 @@ func (r *Recorder) apply(ctx context.Context, action string, t Target, res objec
 	r.emit(ctx, action, verb, t, objectOf(res.After), audit.OutcomeSuccess, 0, cause)
 }
 
-// Delete records one objectclient.Uninstall of t. An absent object is no write of ours: no record.
+// Delete records one objectclient.Uninstall of t. An absent object is no write of ours, and a dry
+// run (UninstallDryRun) is not a write: neither is recorded.
 func (r *Recorder) Delete(ctx context.Context, action string, t Target, res objectclient.UninstallResult, err error, cause audit.CauseRef) {
 	if r == nil || res.Op != objectclient.UninstallDeleted {
 		return
