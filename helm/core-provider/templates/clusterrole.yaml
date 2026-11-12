@@ -34,6 +34,15 @@ rules:
   - deployments
   verbs:
   - '*'
+# core-provider#423 (AUDIT-4): an audit record's krateo.audit.preview is the target Namespace's
+# krateo.io/purpose label, read by the writer from apiserver state (audit schema). Read-only, get
+# only: no list, no watch, no write. Without it the record is still written, marked preview-unknown.
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
 # #393. provider-runtime's scaletozero helper reads and patches a composition controller's SCALE
 # subresource. The rule above does not cover it: RBAC matches a subresource only by its own name
 # (or "*"), and without this the helper's scale GET is a 403, which by its contract changes nothing,

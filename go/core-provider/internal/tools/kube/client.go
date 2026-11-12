@@ -17,19 +17,25 @@ import (
 // error): obj's GroupVersionKind must be set (as it already is for objects rendered from a YAML template,
 // or built as a Go struct literal with TypeMeta set explicitly) since gvr cannot be inferred from a
 // dynamic-client call the way client.Client's REST mapper would.
-func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts ApplyOptions) error {
+//
+// It returns objectclient's report of the write (created, updated, or an Update the apiserver
+// persisted nothing for; on error, the write the final attempt sent): core-provider#423 records
+// one audit row per real change from it. A caller with no use for it discards it.
+func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts ApplyOptions) (objectclient.ApplyResult, error) {
 	u, err := toUnstructured(obj)
 	if err != nil {
-		return err
+		return objectclient.ApplyResult{}, err
 	}
-	if err := objectclient.Apply(ctx, dyn, gvr, u, opts); err != nil {
-		return err
+	res, err := objectclient.Apply(ctx, dyn, gvr, u, opts)
+	if err != nil {
+		return res, err
 	}
-	return fromUnstructured(u, obj)
+	return res, fromUnstructured(u, obj)
 }
 
-// Uninstall deletes obj by namespace/name. IsNotFound-tolerant (via objectclient.Uninstall).
-func Uninstall(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts UninstallOptions) error {
+// Uninstall deletes obj by namespace/name. IsNotFound-tolerant (via objectclient.Uninstall), and
+// reports whether it deleted (UninstallDeleted) or found nothing (UninstallAbsent).
+func Uninstall(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts UninstallOptions) (objectclient.UninstallResult, error) {
 	return objectclient.Uninstall(ctx, dyn, gvr, obj.GetNamespace(), obj.GetName(), opts)
 }
 

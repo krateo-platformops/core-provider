@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,8 @@ type Options struct {
 	// controller's absent ServiceAccount (#414). False (the default) is a dry run: they are found and
 	// logged, and nothing is deleted.
 	RemoveDanglingRBAC bool
+	// Audit records the controller's writes (core-provider#423); nil records nothing.
+	Audit *auditrec.Recorder
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -167,6 +170,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			pluralizer: o.Pluralizer,
 
 			removeDanglingRBAC: o.RemoveDanglingRBAC,
+			audit:              o.Audit,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -340,6 +344,7 @@ type connector struct {
 	pluralizer pluralizerlib.PluralizerInterface
 
 	removeDanglingRBAC bool
+	audit              *auditrec.Recorder
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -351,6 +356,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
 	ext := &external{
+		audit:       c.audit,
 		mgmt:        c.kube,
 		mgmtDynamic: c.dynamic,
 		apiReader:   c.apiReader,
@@ -387,6 +393,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 }
 
 type external struct {
+	// audit records this reconcile's writes (core-provider#423); nil records nothing.
+	audit *auditrec.Recorder
 	// mgmt is the management-cluster client: it holds the CompositionDefinition
 	// resource, the chart/credentials secrets, and is where status is persisted.
 	mgmt client.Client
@@ -724,7 +732,7 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, cr *composition
 	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
-	if err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
@@ -860,6 +868,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if !ok {
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 	// core-provider's own observe span, a child of provider-runtime's reconcile/observe spans since
 	// v1.14 (#395): the runtime opens the Server-kind root (linked to any krateo.io/traceparent), so
 	// this one is Internal. The log handler bridges the active span's trace_id/span_id onto records
@@ -1456,7 +1466,7 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
 	// crdclient.Get.
 	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-	if err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
 	}
 	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
@@ -1468,6 +1478,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "create")
@@ -1667,6 +1679,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "update")
@@ -2066,6 +2080,8 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "delete")
 	ctx = contexttools.CtxWithLogger(ctx, log)
@@ -2189,7 +2205,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 			for i := range ul.Items {
 				log.Debug("Deleting composition", "name", ul.Items[i].GetName(), "namespace", ul.Items[i].GetNamespace())
-				err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
+				_, err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
 				if err != nil {
 					return err
 				}

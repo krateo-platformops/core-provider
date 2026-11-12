@@ -73,7 +73,7 @@ func TestKeepLiveReplicasEnvtest(t *testing.T) {
 			return &dep
 		}
 		// First apply: the controller as Deploy creates it (chart replicas 1).
-		if err := kubecli.Apply(ctx, dyn, deploymentGVR, render("v1"), deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
+		if _, err := kubecli.Apply(ctx, dyn, deploymentGVR, render("v1"), deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
 			t.Fatal(err)
 		}
 		// The helper scales it to 0 through the scale subresource, exactly as scaletozero.Reconcile does.
@@ -83,7 +83,7 @@ func TestKeepLiveReplicasEnvtest(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The definition's full re-apply (an Update: the template changed).
-		if err := kubecli.Apply(ctx, dyn, deploymentGVR, render("v2"), deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
+		if _, err := kubecli.Apply(ctx, dyn, deploymentGVR, render("v2"), deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
 			t.Fatal(err)
 		}
 		got := &appsv1.Deployment{}

@@ -113,7 +113,7 @@ func TestApply(t *testing.T) {
 
 		rescp := res.DeepCopy()
 
-		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
+		_, err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply clusterrole: %v", err)
 		}
@@ -124,7 +124,7 @@ func TestApply(t *testing.T) {
 			t.Fatalf("failed to hash clusterrole: %v", err)
 		}
 
-		err = Apply(ctx, dyn, gvr, rescp, ApplyOptions{DryRun: []string{"All"}})
+		_, err = Apply(ctx, dyn, gvr, rescp, ApplyOptions{DryRun: []string{"All"}})
 		if err != nil {
 			t.Fatalf("failed to apply clusterrole: %v", err)
 		}
@@ -201,13 +201,13 @@ func TestUninstall(t *testing.T) {
 		rescp := res.DeepCopy()
 
 		// Apply the resource first to ensure it exists
-		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
+		_, err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply deployment: %v", err)
 		}
 
 		// Uninstall the resource
-		err = Uninstall(ctx, dyn, gvr, rescp, UninstallOptions{})
+		_, err = Uninstall(ctx, dyn, gvr, rescp, UninstallOptions{})
 		if err != nil {
 			t.Fatalf("failed to uninstall deployment: %v", err)
 		}
@@ -278,7 +278,7 @@ func TestGet(t *testing.T) {
 		rescp := res.DeepCopy()
 
 		// Apply the resource first to ensure it exists
-		err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
+		_, err = Apply(ctx, dyn, gvr, res, ApplyOptions{})
 		if err != nil {
 			t.Fatalf("failed to apply deployment: %v", err)
 		}

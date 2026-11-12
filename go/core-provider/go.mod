@@ -11,15 +11,18 @@ require (
 	github.com/google/cel-go v0.29.2
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.17
-	github.com/krateo-platformops/plumbing v1.48.0
-	github.com/krateo-platformops/provider-runtime v1.15.0
+	github.com/krateo-platformops/audit v0.13.0
+	github.com/krateo-platformops/plumbing v1.60.0
+	github.com/krateo-platformops/provider-runtime v1.18.0
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
 	go.opentelemetry.io/otel/log v1.47.0
+	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/log v1.47.0
+	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	gopkg.in/yaml.v2 v2.4.0
 	helm.sh/helm/v3 v3.20.2
@@ -110,8 +113,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.45.0 // indirect
-	go.opentelemetry.io/otel/metric v1.47.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect

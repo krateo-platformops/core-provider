@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"net"
 	"net/http"
 	"time"
@@ -340,6 +341,7 @@ func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr 
 		if err != nil {
 			return struct{}{}, fmt.Errorf("error getting composition %s: %w", compositionName, err)
 		}
+		before := u.DeepCopy() // core-provider#423: the version this rewrite replaces
 
 		labelmap, ok, err := unstructured.NestedStringMap(u.Object, "metadata", "labels")
 		if err != nil {
@@ -373,7 +375,12 @@ func updateCompositionWithRetry(ctx context.Context, dyn dynamic.Interface, gvr 
 			}
 		}
 
-		if _, err := dyn.Resource(gvr).Namespace(namespace).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
+		after, err := dyn.Resource(gvr).Namespace(namespace).Update(ctx, u, metav1.UpdateOptions{})
+		// core-provider#423: composition.migrate. A rewrite that discards fields changed content even
+		// when this read (through the target version) already lacked them: rep says so.
+		auditrec.RecordUpdate(ctx, auditrec.ActionCompositionMigrate,
+			auditrec.Target{GVR: gvr, Kind: u.GetKind(), Namespace: namespace, Name: name, Namespaces: auditrec.LabelsFrom(dyn)}, before, after, err, !rep.Empty())
+		if err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Debug("Composition disappeared during version update, skipping", "composition", compositionName, "gvr", gvr.String())
 				return struct{}{}, nil
