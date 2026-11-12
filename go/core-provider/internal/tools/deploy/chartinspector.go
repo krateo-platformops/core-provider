@@ -92,7 +92,7 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 		ObjectMeta: metav1.ObjectMeta{Name: coords.Namespace},
 	}
-	if err := kubecli.Apply(ctx, spokeDynamic, namespaceGVR, ns, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, spokeDynamic, namespaceGVR, ns, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("ensuring chart-inspector namespace %q on target: %w", coords.Namespace, err)
 	}
 
@@ -105,7 +105,7 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 	stripServerMetadata(&sa.ObjectMeta)
 	sa.Secrets = nil
 	sa.ImagePullSecrets = nil
-	if err := kubecli.Apply(ctx, spokeDynamic, serviceAccountGVR, sa, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, spokeDynamic, serviceAccountGVR, sa, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("projecting chart-inspector ServiceAccount: %w", err)
 	}
 
@@ -121,12 +121,12 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 		}
 		cr.TypeMeta = metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole"}
 		stripServerMetadata(&cr.ObjectMeta)
-		if err := kubecli.Apply(ctx, spokeDynamic, clusterRoleGVR, cr, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, spokeDynamic, clusterRoleGVR, cr, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting chart-inspector ClusterRole: %w", err)
 		}
 		crb.TypeMeta = metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding"}
 		stripServerMetadata(&crb.ObjectMeta)
-		if err := kubecli.Apply(ctx, spokeDynamic, clusterRoleBindingGVR, crb, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, spokeDynamic, clusterRoleBindingGVR, crb, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting chart-inspector ClusterRoleBinding: %w", err)
 		}
 	}
@@ -145,7 +145,7 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 	dep.TypeMeta = metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"}
 	stripServerMetadata(&dep.ObjectMeta)
 	dep.Status = appsv1.DeploymentStatus{}
-	if err := kubecli.Apply(ctx, spokeDynamic, deploymentGVR, dep, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, spokeDynamic, deploymentGVR, dep, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("projecting chart-inspector Deployment: %w", err)
 	}
 
@@ -163,7 +163,7 @@ func ProjectChartInspector(ctx context.Context, mgmt client.Client, spoke client
 	for i := range svc.Spec.Ports {
 		svc.Spec.Ports[i].NodePort = 0
 	}
-	if err := kubecli.Apply(ctx, spokeDynamic, serviceGVR, svc, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, spokeDynamic, serviceGVR, svc, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("projecting chart-inspector Service: %w", err)
 	}
 	return nil
@@ -201,7 +201,7 @@ func projectPodRefs(ctx context.Context, mgmt client.Client, spoke client.Client
 		}
 		cm.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"}
 		stripServerMetadata(&cm.ObjectMeta)
-		if err := kubecli.Apply(ctx, spokeDynamic, configMapGVR, cm, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, spokeDynamic, configMapGVR, cm, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting referenced ConfigMap %q: %w", name, err)
 		}
 	}
@@ -215,7 +215,7 @@ func projectPodRefs(ctx context.Context, mgmt client.Client, spoke client.Client
 		}
 		sec.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}
 		stripServerMetadata(&sec.ObjectMeta)
-		if err := kubecli.Apply(ctx, spokeDynamic, secretGVR, sec, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, spokeDynamic, secretGVR, sec, kubecli.ApplyOptions{}); err != nil {
 			return fmt.Errorf("projecting referenced Secret %q: %w", name, err)
 		}
 	}

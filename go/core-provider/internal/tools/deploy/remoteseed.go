@@ -66,7 +66,7 @@ func SeedRemoteTarget(ctx context.Context, kube client.Client, dyn dynamic.Inter
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 		ObjectMeta: metav1.ObjectMeta{Name: opts.Namespace},
 	}
-	if err := kubecli.Apply(ctx, dyn, namespaceGVR, ns, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, dyn, namespaceGVR, ns, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("ensuring target namespace %q: %w", opts.Namespace, err)
 	}
 
@@ -75,7 +75,7 @@ func SeedRemoteTarget(ctx context.Context, kube client.Client, dyn dynamic.Inter
 	if err := yaml.Unmarshal(compositionDefinitionCRDBytes, crd); err != nil {
 		return fmt.Errorf("decoding embedded compositiondefinitions CRD: %w", err)
 	}
-	if err := kubecli.Apply(ctx, dyn, crdGVR, crd, kubecli.ApplyOptions{}); err != nil {
+	if _, err := kubecli.Apply(ctx, dyn, crdGVR, crd, kubecli.ApplyOptions{}); err != nil {
 		return fmt.Errorf("installing compositiondefinitions CRD on target: %w", err)
 	}
 	if err := waitCRDServed(ctx, dyn, compositionDefinitionGVR, 30*time.Second); err != nil {

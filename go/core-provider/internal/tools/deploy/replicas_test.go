@@ -103,7 +103,7 @@ func TestControllerDeploymentApplyKeepsAZeroedControllerOnlyWhenOptedIn(t *testi
 
 		desired := render()
 		desired.Annotations = map[string]string{"marker": "new"}
-		if err := kubecli.Apply(ctx, dyn, deploymentGVR, desired, deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
+		if _, err := kubecli.Apply(ctx, dyn, deploymentGVR, desired, deploymentApplyOptions(kubecli.ApplyOptions{}, DeployOptions{KeepLiveReplicas: c.keep})); err != nil {
 			t.Fatalf("keep=%v: %v", c.keep, err)
 		}
 		got, err := dyn.Resource(deploymentGVR).Namespace(nn.Namespace).Get(ctx, nn.Name, metav1.GetOptions{})

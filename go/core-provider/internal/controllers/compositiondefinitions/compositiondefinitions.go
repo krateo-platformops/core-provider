@@ -724,7 +724,7 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, cr *composition
 	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
-	if err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
@@ -1456,7 +1456,7 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
 	// crdclient.Get.
 	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-	if err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
 	}
 	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
@@ -2189,7 +2189,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 			for i := range ul.Items {
 				log.Debug("Deleting composition", "name", ul.Items[i].GetName(), "namespace", ul.Items[i].GetNamespace())
-				err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
+				_, err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
 				if err != nil {
 					return err
 				}
