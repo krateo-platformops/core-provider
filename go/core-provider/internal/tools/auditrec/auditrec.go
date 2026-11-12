@@ -146,7 +146,10 @@ func (r *Recorder) apply(ctx context.Context, action string, t Target, res objec
 		r.count(ctx, action, ExcludedUnchanged)
 		return
 	case objectclient.ApplyUpdated:
-		changed, cerr := content.Differs(object(res.Before), object(res.After), audit.AuthorizationAnnotations())
+		// The authorization-bearing annotations AND labels count as content (audit v0.13.0): a write
+		// that changes only who may do what is a change.
+		changed, cerr := content.DiffersWith(object(res.Before), object(res.After), content.Keys{
+			Annotations: audit.AuthorizationAnnotations(), Labels: audit.AuthorizationLabels()})
 		// A comparison that can't be made is a write whose effect is unknown: recorded, as the cdc
 		// records compareFailed (Q1). An unrecorded write is what AUDIT-4 exists to prevent.
 		if !knownChanged && cerr == nil && !changed {

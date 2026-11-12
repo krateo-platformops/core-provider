@@ -379,3 +379,30 @@ func TestDryRunRecordsNothing(t *testing.T) {
 		t.Fatalf("control: a real update recorded %d rows, want 1", n)
 	}
 }
+
+// audit v0.13.0: an update that changes only an authorization-bearing label changes content, so it
+// is recorded; one that changes only an undeclared label is metadata.
+func TestAuthorizationLabelIsContent(t *testing.T) {
+	labelled := func(rv string, l map[string]string) *unstructured.Unstructured {
+		u := role("u1", rv, "get")
+		u.SetLabels(l)
+		return u
+	}
+	for _, tc := range []struct {
+		name          string
+		before, after map[string]string
+		want          int
+	}{
+		{"a declared label changed", map[string]string{"authn.krateo.io/principal": "alice"}, map[string]string{"authn.krateo.io/principal": "bob"}, 1},
+		{"an undeclared label changed (control)", map[string]string{"app.kubernetes.io/part-of": "a"}, map[string]string{"app.kubernetes.io/part-of": "b"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.r.Apply(context.Background(), ActionRBACApply, roleT,
+				objectclient.ApplyResult{Op: objectclient.ApplyUpdated, Before: labelled("10", tc.before), After: labelled("11", tc.after)}, nil, cause)
+			if n := len(h.rec.Records()); n != tc.want {
+				t.Errorf("records = %d, want %d", n, tc.want)
+			}
+		})
+	}
+}
