@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"github.com/krateo-platformops/audit"
 	"time"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
@@ -87,4 +88,17 @@ func childrenLeft(rel *helmconfig.Release, err error) int {
 		return -1
 	}
 	return len(all)
+}
+
+// upgradeConfig is the UpgradeConfig every cdc helm upgrade and reconcile sends: ac, the history
+// bound, and the audit schema's authorization annotations and labels as content to the verdicts, so a
+// child write that changes only who may do what is recorded, not counted metadata_only
+// (core-provider#465). One constructor, so no site can omit them.
+func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
+	return &helmconfig.UpgradeConfig{
+		ActionConfig:       ac,
+		MaxHistory:         helmMaxHistory,
+		ContentAnnotations: audit.AuthorizationAnnotations(),
+		ContentLabels:      audit.AuthorizationLabels(),
+	}
 }

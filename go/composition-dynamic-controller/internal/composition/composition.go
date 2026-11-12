@@ -619,26 +619,23 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	}
 
 	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
-		return hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-			ActionConfig: &helmconfig.ActionConfig{
-				ChartVersion:          pkg.Version,
-				ChartName:             pkg.Repo,
-				Username:              pkg.Auth.Username,
-				Password:              pkg.Auth.Password,
-				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-				Values:                values,
-				PostRenderer:          postrenderLabels,
-				// Adopt an existing child object rather than aborting the whole release when it carries
-				// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
-				// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
-				// into the current release: invalid ownership metadata") and wedges the platform (D1,
-				// 2026-07-08); with it the release takes ownership, self-healing the conflict.
-				TakeOwnership: true,
-				// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
-				Timeout: helmOperationTimeout,
-			},
-			MaxHistory: helmMaxHistory,
-		})
+		return hc.Reconcile(ctx, releaseName, pkg.URL, upgradeConfig(&helmconfig.ActionConfig{
+			ChartVersion:          pkg.Version,
+			ChartName:             pkg.Repo,
+			Username:              pkg.Auth.Username,
+			Password:              pkg.Auth.Password,
+			InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+			Values:                values,
+			PostRenderer:          postrenderLabels,
+			// Adopt an existing child object rather than aborting the whole release when it carries
+			// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
+			// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
+			// into the current release: invalid ownership metadata") and wedges the platform (D1,
+			// 2026-07-08); with it the release takes ownership, self-healing the conflict.
+			TakeOwnership: true,
+			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
+			Timeout: helmOperationTimeout,
+		}))
 	})
 	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
@@ -995,10 +992,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release already exists, upgrading instead of installing.")
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-				op, err := hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-					ActionConfig: actionConfig,
-					MaxHistory:   helmMaxHistory,
-				})
+				op, err := hc.Upgrade(ctx, releaseName, pkg.URL, upgradeConfig(actionConfig))
 				h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionUpgrade, op, childrenLeft(releaseOf(op), err)), mg)
 				return releaseOf(op), err
 			})
@@ -1214,20 +1208,17 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	var reconcileRes *helmconfig.ReconcileResult
 	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-				ActionConfig: &helmconfig.ActionConfig{
-					ChartVersion:          pkg.Version,
-					ChartName:             pkg.Repo,
-					Username:              pkg.Auth.Username,
-					Password:              pkg.Auth.Password,
-					InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-					Values:                values,
-					PostRenderer:          postrenderLabels,
-					TakeOwnership:         true,
-					Timeout:               helmOperationTimeout, // #410
-				},
-				MaxHistory: helmMaxHistory,
-			})
+			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, upgradeConfig(&helmconfig.ActionConfig{
+				ChartVersion:          pkg.Version,
+				ChartName:             pkg.Repo,
+				Username:              pkg.Auth.Username,
+				Password:              pkg.Auth.Password,
+				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+				Values:                values,
+				PostRenderer:          postrenderLabels,
+				TakeOwnership:         true,
+				Timeout:               helmOperationTimeout, // #410
+			}))
 			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {
