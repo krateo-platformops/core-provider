@@ -145,6 +145,14 @@ func TestRecordAccountsForEveryChild(t *testing.T) {
 		if r.Body().AsString() != "" {
 			t.Errorf("%s: the body is a closed set and this site writes none, got %q", n.AsString(), r.Body().AsString())
 		}
+		// The collector routes to the audit table (krateo_audit, 365 days) ONLY on event name
+		// "audit" (filter/audit-only); anything else lands in otel_logs (7 days).
+		if r.EventName() != "audit" {
+			t.Errorf("%s: LogRecord EventName = %q, want \"audit\" (the collector's audit route)", n.AsString(), r.EventName())
+		}
+		if ev, _ := attr(r, "event.name"); ev.AsString() != "audit" {
+			t.Errorf("%s: event.name = %q, want \"audit\"", n.AsString(), ev.AsString())
+		}
 		if u, _ := attr(r, "krateo.audit.cause_ref.uid"); u.AsString() != "00000000-0000-4000-8000-0000000000c1" {
 			t.Errorf("%s: cause_ref.uid = %q, want the composition's", n.AsString(), u.AsString())
 		}
