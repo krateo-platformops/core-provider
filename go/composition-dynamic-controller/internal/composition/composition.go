@@ -19,6 +19,7 @@ import (
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/rbacgen"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
@@ -140,6 +141,9 @@ type HandlerOptions struct {
 	// keyed ".api" projection source. nil disables apiRef resolution (the ".api" source is
 	// simply absent and api-dependent mappings degrade individually).
 	APIResolver APIResolver
+	// Audit writes one controller audit record per child each helm operation writes
+	// (core-provider#423). nil records nothing.
+	Audit *auditrec.Recorder
 }
 
 // APIResolver resolves the apiRef's RESTAction (via snowplow, under the CDC's authn identity)
@@ -161,6 +165,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		mapper:             opts.Mapper,
 		statusDataTemplate: opts.StatusDataTemplate,
 		apiResolver:        opts.APIResolver,
+		audit:              opts.Audit,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
 	}
 }
@@ -191,6 +196,8 @@ type handler struct {
 	chartInspectorUrl string
 	saName            string
 	saNamespace       string
+	// audit records every helm child write (core-provider#423); nil records nothing.
+	audit *auditrec.Recorder
 	// Feature flag to disable random suffix in Helm release names. This is highly discouraged as it can lead to release name collisions, but it can be useful for certain complex charts that have issues with long release names.
 	safeReleaseName bool
 	// statusDataTemplate are the declarative ${ jq } status projections from the
@@ -503,11 +510,13 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
 		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
+			op, err := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
 				Timeout:        helmOperationTimeout,
 			})
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
+			return releaseOf(op), err
 		})
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
@@ -631,6 +640,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			MaxHistory: helmMaxHistory,
 		})
 	})
+	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 	if err != nil {
 		retErr := fmt.Errorf("reconciling helm chart: %w", err)
 		condition := condition.Unavailable()
@@ -988,6 +999,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 					ActionConfig: actionConfig,
 					MaxHistory:   helmMaxHistory,
 				})
+				h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionUpgrade, op, childrenLeft(releaseOf(op), err)), mg)
 				return releaseOf(op), err
 			})
 		})
@@ -1005,6 +1017,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				op, err := hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
 					ActionConfig: actionConfig,
 				})
+				h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionInstall, op, childrenLeft(releaseOf(op), err)), mg)
 				return releaseOf(op), err
 			})
 		})
@@ -1215,6 +1228,8 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				},
 				MaxHistory: helmMaxHistory,
 			})
+			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -1455,11 +1470,13 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
 		if _, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
+			op, err := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
 				MaxHistory:     helmMaxHistory,
 				ReleaseVersion: rel.Revision,
 				Timeout:        helmOperationTimeout,
 			})
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
+			return releaseOf(op), err
 		}); rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
@@ -1498,10 +1515,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
 		return helmMetrics.TimedUninstall(func() error {
-			_, err := hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
+			op, err := hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
 				IgnoreNotFound: true,
 				Timeout:        helmOperationTimeout,
 			})
+			// An uninstall leaves no release, so no child is counted unchanged (-1).
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionUninstall, op, -1), mg)
 			return err
 		})
 	})
