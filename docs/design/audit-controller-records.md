@@ -1,6 +1,7 @@
 # Controller audit records from the cdc and core-provider (core-provider#423, AUDIT-4)
 
-Status: Q1 and Q2 DECIDED by Diego, 2026-11-11 (see Open questions); Q3 follows Q2. Measured against core-provider `15bace0` (cdc on plumbing v1.45.0+),
+Status: Q1 and Q2 DECIDED by Diego, 2026-11-11 (see Open questions); Q3 follows Q2. Updated
+2026-11-12 after implementation: see "Changes since the decision" at the end. Measured against core-provider `15bace0` (cdc on plumbing v1.45.0+),
 plumbing v1.48.0, audit v0.5.0 (`schema/v1.yaml`). The target is audit **v0.6.0** (snowplow,
 tagged 2026-11-11 evening), which registers the two populations below. `content_sha256` is
 optional and waits on plumbing#124.
@@ -43,16 +44,18 @@ state), maps each verdict like this:
 | `specChanged` | yes | `Verb` (`patch`, or `update` under Force) | success | |
 | `metadataOnly` | **no** | | | `metadata_only` |
 | `compareFailed` | yes (Q1: decided) | `Verb` | success | |
-| `kept` | yes | `delete` | **denied**, `kept_resource_policy`; body `kept: resource-policy` | |
+| `kept` | yes | `delete` | **denied**, `kept_resource_policy`; no body (the reason is the key, audit schema.md "Kept deletions") | |
 | `deleteNotDone` | yes | `delete` | failure | |
 | `createFailed` | yes | `create` | failure | |
 | `updateFailed` | yes | `Verb` | failure | |
 | `deleteUnknown` | yes | `delete` | failure (nobody can say it happened) | |
 | (absent: unchanged child) | no | | | `unchanged` |
 
-`ObjectsNotAttempted > 0` (helm stopped at a failed create) gives ONE reconcile-level failure record
-that states the count in a closed-set field. It is not one record per unattempted child, since no
-request was sent for them.
+`ObjectsNotAttempted > 0` (helm stopped at a failed create) gives **no record** (snowplow,
+2026-11-12): a child helm never sent a request for is not a write, and the failed create that
+stopped helm is the record. The count goes to `composition_children_not_attempted_total{action}`,
+operational state rather than an audit gap. (This replaces "one reconcile-level failure record with
+the count in a closed-set field": audit v0.9.0 has no such key, and snowplow declined to add one.)
 
 The body is a closed set chosen by the emit site, never `err.Error()`, helm's joined error, or any
 field value. `ObjectVerdict` already carries names and the resource only.
@@ -113,3 +116,22 @@ a kept-deletion arm.
   three sites stay unrecorded and are listed in coverage.md as a known gap until (a).
 - **Q3 install-through-Upgrade inside Reconcile** (`ObjectsComplete=false`, `Objects` empty). With
   (a), plumbing fills it the same way. With (b), it is a known gap too.
+
+## Changes since the decision (2026-11-12, implementation)
+
+- **Seven write sites, not five.** Rollback writes children too, at Observe (clearing a release
+  stuck pending past the grace) and Delete (clearing a stuck uninstall). Its action literal is
+  `helm.rollback` (snowplow, 2026-11-12). Rollback reported no verdict; plumbing#139/#140 (v1.53.0)
+  makes it return an `OperationResult`.
+- **Reconcile's two Upgrade paths.** The real Upgrade after a detected change kept only its release;
+  v1.53.0 folds its verdicts into `ReconcileResult` (plus a new `HooksExcluded`). The
+  no-stored-release path ("install-through-Upgrade", Q3) **never installed**: helm's Upgrade action
+  does not install, so it failed on every chart. v1.53.0 makes it a real Install, so Q3 is moot.
+- **Counters** (scope `.../composition-dynamic-controller/audit`):
+  `composition_audit_excluded_total{action,reason}` with reason `metadata_only` | `unchanged` |
+  `hook`; `composition_children_not_attempted_total{action}`;
+  `composition_audit_incomplete_operations_total{action}` (an operation whose verdicts may be
+  short). `unchanged` is counted only when the release the operation left is known.
+- **Preview** is read from the child's Namespace on the cluster helm writes to, once per Namespace
+  per operation; unreadable (deleted included) is Unknown and marked, never false.
+- **Schema** is audit v0.9.0.
