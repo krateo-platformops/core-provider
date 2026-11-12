@@ -679,17 +679,21 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 // right after a new version is appended the apiserver churns the CRD status (acceptedNames /
 // per-version established conditions) and a non-retrying Update would lose the resourceVersion race.
 // Driven to completion by the matching check in Observe.
-func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) error {
-	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gvr, selfName, selfNamespace)
+func (e *external) pruneStaleServedVersions(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) error {
+	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace)
 	if err != nil {
 		return err
 	}
+	// #454: only a version that has stayed eligible for the grace window is pruned; the rest wait in
+	// status.servedVersionsPendingPrune, each on its own clock (prunesDue).
+	due := applyPruneGrace(cr, prunable, time.Now())
 	// INFO (not Debug) so the prune decision is visible in the engine's default log level (#103).
 	e.log.Info("served-version prune evaluation", "gvr", gvr.String(), "current", gvk.Version,
-		"prunable", prunable, "kept", kept)
-	if len(prunable) == 0 {
+		"prunable", prunable, "due", due, "grace", servedVersionPruneGrace.String(), "kept", kept)
+	if len(due) == 0 {
 		return nil
 	}
+	prunable = due
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return fmt.Errorf("fetching CRD for prune: %w", err)
@@ -1235,11 +1239,19 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// after migration completes (its gates key off stale COMPOSITIONS, status hash and digest, never
 	// the set of stale served VERSIONS) before Update ever prunes, so stale served versions would
 	// accumulate forever (#103). Same predicate on both sides => no Observe<->Update ping-pong.
-	if prunable, _, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace); perr != nil {
+	//
+	// #454: and only once a version has stayed eligible for the grace window. Observe is where each
+	// version's clock starts (it runs every poll, and the runtime persists status on the up-to-date
+	// path too), so a young version leaves the definition up to date and is pruned on a later pass.
+	// Update applies the SAME prunesDue, so the two sides still agree.
+	prunable, _, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace)
+	if perr != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
-	} else if len(prunable) > 0 {
-		log.Debug("Stale served versions pending prune", "versions", prunable)
-		markUpdatePending(cr, fmt.Sprintf("stale served versions pending prune: %v", prunable))
+	}
+	if pending, pruneDue, msg := observePruneDecision(cr, prunable, time.Now()); pending {
+		log.Debug("Stale served versions due for prune", "versions", pruneDue,
+			"waiting", len(cr.Status.ServedVersionsPendingPrune)-len(pruneDue))
+		markUpdatePending(cr, msg)
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1801,7 +1813,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// instance carries its label is dead weight in the CRD's spec.versions (#103) — and a stale
 	// served endpoint a client can pick that silently prunes fields written through it. Best-effort:
 	// a failure is logged and retried on the next reconcile; it never blocks the reconcile.
-	if err := e.pruneStaleServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace); err != nil {
+	if err := e.pruneStaleServedVersions(ctx, cr, gvk, gvr); err != nil {
 		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 

@@ -515,6 +515,24 @@ type CompositionDefinitionStatus struct {
 	// definition's main reconciler reads it to report Ready and ControllerActive.
 	// +optional
 	ScaleToZero *ScaleToZeroStatus `json:"scaleToZero,omitempty"`
+
+	// ServedVersionsPendingPrune records, per served version of this definition's CRD that has
+	// become prune-eligible (no definition references it, no instance is labelled with it, no stored
+	// helm revision names it), when it first became so (#454). A version is pruned only after it has
+	// stayed eligible for the grace window, so a render that read the CRD before the prune never
+	// looks the version up after it. Each version has its own clock: a batch released at once by a
+	// helm history rotation is N independent windows. A version that stops being eligible is
+	// dropped from the list. Written by the definition's own reconciler, in Observe.
+	// +optional
+	ServedVersionsPendingPrune []PendingPrune `json:"servedVersionsPendingPrune,omitempty"`
+}
+
+// PendingPrune is one served version waiting out the prune grace window (#454).
+type PendingPrune struct {
+	// Version is the served version, e.g. v0-1-42.
+	Version string `json:"version"`
+	// EligibleSince is when this reconciler first saw the version prune-eligible.
+	EligibleSince metav1.Time `json:"eligibleSince"`
 }
 
 // ScaleToZeroStatus records what provider-runtime's scaletozero helper last decided for this

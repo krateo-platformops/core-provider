@@ -71,6 +71,16 @@ scheduling and start. `status.scaleToZero` records the last decision: `lastSeen`
 Kind is empty), `replicas`, `reason` (`Active`, `IdleHoldDown`, `Idle`, `Unknown`) and `heldBy`
 (sharing definitions that have not opted in).
 
+**`status.servedVersionsPendingPrune`** (#454) lists the served versions of the Kind's CRD that
+have become prune-eligible (no definition references them, no instance carries their label, no
+stored helm revision names them), each with `eligibleSince`. A version is removed from the CRD only
+after it has stayed eligible for **5 minutes**, each version on its own clock. A chart that renders
+against the CRDs (the installer umbrella lists them, then `lookup`s each served version) therefore
+never looks up a version pruned mid-render: before this, a prune landing in that gap failed the
+whole render, and through chart-inspector's same render left `RBACComplete` unevaluated. While a
+version waits, the definition stays up to date; it is pruned on the first reconcile after its
+window. The window is 4x the slowest Installer reconcile pass measured on krateo-057 (74.5s).
+
 | Reason | Meaning |
 |---|---|
 | `RESTActionNotFound` | snowplow says the RESTAction does not exist |
