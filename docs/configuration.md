@@ -87,8 +87,8 @@ Two `cdc.env` variables let a composition controller slow ITSELF down when its o
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `COMPOSITION_CONTROLLER_SATURATION_ENABLED` | `false` | Bound reconciles by the container's cgroup v2 `cpu.pressure` ("some avg10"). Local capacity starts at 1, ramps +1 per 2s to `workers` until the first cut, halves while pressure is over the threshold, and then recovers +1 per clean 30s. |
-| `COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD` | `0` (runtime default 50, provisional) | Percentage over which the controller counts as saturated. Out of range (outside 0-100) fails startup. |
+| `COMPOSITION_CONTROLLER_SATURATION_ENABLED` | `false` | Bound reconciles by the container's cgroup v2 `cpu.pressure`: the share of the last 10s window in which some task waited for CPU, from its cumulative "some total" counter. Local capacity starts at 1 and ramps +1 per 2s to `workers`. Pressure over the threshold for a whole 10s window halves it (minimum 1, at most once per window), and it then ramps +1 per 2s again (unstructured-runtime v1.16.0, #82). |
+| `COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD` | `0` (runtime default 50, provisional) | Percentage of the 10s window over which (strictly greater) the controller counts as saturated. Out of range (outside 0-100) fails startup. |
 
 Low capacity behaves like fewer workers: a worker takes a slot before it takes work, so the queue's
 order is the order work runs in, and a spec change goes ahead of a resync. Nothing is written on the
@@ -96,7 +96,11 @@ object, because the controller's own saturation is not a state of the object. Wi
 `cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota.
 
 **Measured cost, and why it is off by default** (unstructured-runtime#66, core-provider 2.13.73, GKE,
-one cdc at a 250m CPU limit, 64 compositions): with the rule on at threshold 50, draining took
+one cdc at a 250m CPU limit, 64 compositions). This measured the rule BEFORE unstructured-runtime
+v1.16.0: a cut on every 1s sample of "some avg10" and recovery +1 per clean 30s, which #82 replaced
+because avg10 kept one stall over the threshold for several samples and cut several times. The
+current rule has NOT been re-measured yet; these numbers are the old rule's. With that rule on at
+threshold 50, draining took
 **1.42x** as long as with it off in steady state and **1.52x** on a restart into a backlog. In return
 the controller held CPU pressure near the threshold (peak avg10 PSI 50-58) and left 7-10% of its quota
 unused, where with the rule off it ran throttled. That is n=3 per arm, on one node, one load shape and
