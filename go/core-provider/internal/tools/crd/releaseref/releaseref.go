@@ -1,6 +1,17 @@
 // Package releaseref answers one question, for the served-version prune path: does a helm release
-// revision that helm will READ still reference a given apiVersion in its STORED MANIFEST? (#305,
-// #471)
+// revision that helm will READ still declare an object of a given Kind at a given apiVersion in its
+// STORED MANIFEST? (#305, #471, #486)
+//
+// # Why the Kind is part of the question (#486)
+//
+// helm maps each stored document by its group, version AND kind ("no matches for kind
+// \"BaremetalHost\" in version ..."), so pruning a version from one Kind's CRD can only strand a
+// document of THAT Kind. Every composition CRD shares the composition.krateo.io group and its
+// versions are chart versions, so different Kinds collide on the apiVersion all the time: on
+// krateo-057 OtelCollectorTailSampling v0-1-2 stayed served because installer-platform's deployed
+// revision declared ClickhouseOperator, KrateoMarketplaceCatalog and ModelConfigs at
+// composition.krateo.io/v0-1-2. Matching the apiVersion alone held five CRDs' stale versions there,
+// with zero instances on any of them.
 //
 // # Which revisions count (#471)
 //
@@ -63,9 +74,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -92,8 +105,8 @@ const (
 // helm's own check keeps it correct instead.
 var magicGzip = []byte{0x1f, 0x8b, 0x08}
 
-// Reference is one release revision whose stored manifest names the apiVersion, with enough
-// identity to put in a log line an operator can act on.
+// Reference is one release revision whose stored manifest declares the asked Kind at the
+// apiVersion, with enough identity to put in a log line an operator can act on.
 type Reference struct {
 	// SecretNamespace/SecretName locate the release revision itself.
 	SecretNamespace string
@@ -102,8 +115,9 @@ type Reference struct {
 	// history`.
 	Release  string
 	Revision int
-	// Kinds are the kinds declared at the apiVersion in this manifest, deduplicated and ordered as
-	// first encountered. This is what makes the refusal diagnosable rather than merely a veto.
+	// Kinds are ALL the kinds declared at the apiVersion in this manifest (the asked Kind among
+	// them), deduplicated and ordered as first encountered. This is what makes the refusal
+	// diagnosable rather than merely a veto.
 	Kinds []string
 }
 
@@ -141,8 +155,10 @@ type manifestObject struct {
 }
 
 // ReferencingReleases returns every helm release revision helm will read (each release's latest and
-// last deployed revision, #471) whose stored manifest declares at least one object at apiVersion
-// (e.g. "composition.krateo.io/v0-6-1"). Every release Secret is still DECODED, superseded ones
+// last deployed revision, #471) whose stored manifest declares at least one object of gvk's Kind at
+// gvk's apiVersion (e.g. BaremetalHost at "composition.krateo.io/v0-6-1"). A document of another
+// Kind at the same apiVersion does not count (#486). Every release Secret is still DECODED,
+// superseded ones
 // included: which revision is latest or deployed is only known from all of them, and an undecodable
 // one is an error, as before.
 //
@@ -150,13 +166,14 @@ type manifestObject struct {
 // condition under which a caller may prune. Any error means "could not determine" and the caller
 // MUST NOT prune.
 //
-// apiVersion must be the full group/version string. An empty apiVersion returns an error rather
-// than matching nothing: a caller that computed an empty version has a bug, and answering
+// Group, Version and Kind must all be set. An empty one returns an error rather than matching
+// nothing: a caller that computed an empty group, version or kind has a bug, and answering
 // "unreferenced" would turn that bug into a deletion.
-func ReferencingReleases(ctx context.Context, c client.Client, apiVersion string) ([]Reference, error) {
-	if strings.TrimSpace(apiVersion) == "" {
-		return nil, fmt.Errorf("empty apiVersion: refusing to report on an unspecified version")
+func ReferencingReleases(ctx context.Context, c client.Client, gvk schema.GroupVersionKind) ([]Reference, error) {
+	if strings.TrimSpace(gvk.Group) == "" || strings.TrimSpace(gvk.Version) == "" || strings.TrimSpace(gvk.Kind) == "" {
+		return nil, fmt.Errorf("incomplete GroupVersionKind %q: refusing to report on an unspecified version or kind", gvk.String())
 	}
+	apiVersion := gvk.GroupVersion().String()
 	if c == nil {
 		return nil, fmt.Errorf("nil client: cannot determine whether %s is referenced", apiVersion)
 	}
@@ -215,8 +232,8 @@ func ReferencingReleases(ctx context.Context, c client.Client, apiVersion string
 			return nil, fmt.Errorf("scanning manifest of release secret %s/%s: %w",
 				sec.Namespace, sec.Name, err)
 		}
-		if len(kinds) == 0 {
-			continue
+		if !slices.Contains(kinds, gvk.Kind) {
+			continue // nothing, or only other Kinds, at this apiVersion: helm maps those by their own Kind (#486)
 		}
 		refs = append(refs, Reference{
 			SecretNamespace: sec.Namespace,

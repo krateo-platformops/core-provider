@@ -661,7 +661,12 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 		// The trade is deliberate and asymmetric: a lingering served version costs a little schema
 		// surface, a stranded revision costs the composition entirely. So an error here keeps the
 		// version rather than pruning it.
-		refs, relErr := releaseref.ReferencingReleases(ctx, e.kube, gvk.Group+"/"+v.Name)
+		//
+		// The Kind is part of the question (#486): helm maps a stored document by its own Kind, so a
+		// revision declaring ANOTHER composition Kind at this apiVersion (they all share the group, and
+		// versions are chart versions) cannot be stranded by pruning this Kind's version.
+		refs, relErr := releaseref.ReferencingReleases(ctx, e.kube,
+			schema.GroupVersionKind{Group: gvk.Group, Version: v.Name, Kind: gvk.Kind})
 		if relErr != nil {
 			return nil, nil, fmt.Errorf("checking helm releases referencing version %s: %w", v.Name, relErr)
 		}
