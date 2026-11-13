@@ -634,7 +634,10 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 			continue // an instance still carries this version's label
 		}
 		// A HELM RELEASE REVISION may still NAME this version in its stored manifest (#305), and
-		// neither term above can see that.
+		// neither term above can see that. Only a revision helm will read counts: each release's
+		// latest and last deployed revision (#471, Diego 2026-11-13); a superseded older one is read
+		// only by a manual `helm rollback`, and counting it held every old version until history
+		// rotated. See package releaseref.
 		//
 		// A PARENT composition's chart renders CHILD composition CRs, so the parent's stored
 		// manifest names the child's served version. helm must read that manifest back to compute a
@@ -692,6 +695,7 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, cr *composition
 	if err != nil {
 		return err
 	}
+	cr.Status.ServedVersionsHeld = heldVersions(kept) // #471, as Observe records it
 	// #454: only a version that has stayed eligible for the grace window is pruned; the rest wait in
 	// status.servedVersionsPendingPrune, each on its own clock (prunesDue).
 	due := applyPruneGrace(cr, prunable, time.Now())
@@ -1254,10 +1258,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// version's clock starts (it runs every poll, and the runtime persists status on the up-to-date
 	// path too), so a young version leaves the definition up to date and is pruned on a later pass.
 	// Update applies the SAME prunesDue, so the two sides still agree.
-	prunable, _, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace)
+	prunable, kept, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace)
 	if perr != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
 	}
+	// #471: what is held, and why, on the definition itself, beside the versions waiting out the grace.
+	cr.Status.ServedVersionsHeld = heldVersions(kept)
 	if pending, pruneDue, msg := observePruneDecision(cr, prunable, time.Now()); pending {
 		log.Debug("Stale served versions due for prune", "versions", pruneDue,
 			"waiting", len(cr.Status.ServedVersionsPendingPrune)-len(pruneDue))

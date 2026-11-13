@@ -3,6 +3,7 @@ package compositiondefinitions
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -70,4 +71,23 @@ func observePruneDecision(cr *compositiondefinitionsv1alpha1.CompositionDefiniti
 		return false, nil, ""
 	}
 	return true, due, fmt.Sprintf("stale served versions pending prune: %v", due)
+}
+
+// heldVersions turns prunableServedVersions' keep reasons ("<version>:<reason>", or
+// "ALL:<reason>" when every version is held) into the status record (#471), sorted by version so an
+// unchanged hold writes an unchanged status.
+func heldVersions(kept []string) []compositiondefinitionsv1alpha1.HeldVersion {
+	if len(kept) == 0 {
+		return nil
+	}
+	out := make([]compositiondefinitionsv1alpha1.HeldVersion, 0, len(kept))
+	for _, k := range kept {
+		v, reason, _ := strings.Cut(k, ":")
+		if v == "ALL" {
+			v = "*"
+		}
+		out = append(out, compositiondefinitionsv1alpha1.HeldVersion{Version: v, Reason: reason})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	return out
 }

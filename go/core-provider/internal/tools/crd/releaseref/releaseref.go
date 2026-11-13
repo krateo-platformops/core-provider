@@ -1,5 +1,19 @@
-// Package releaseref answers one question, for the served-version prune path: does any helm
-// release revision still reference a given apiVersion in its STORED MANIFEST? (#305)
+// Package releaseref answers one question, for the served-version prune path: does a helm release
+// revision that helm will READ still reference a given apiVersion in its STORED MANIFEST? (#305,
+// #471)
+//
+// # Which revisions count (#471)
+//
+// Only the ones helm's automatic paths read: each release's LATEST revision and its last DEPLOYED
+// revision. helm's Upgrade reads the latest and, when the latest is not deployed, the last deployed
+// one (helm v3.20.2 pkg/action/upgrade.go:209-229); Rollback reads the latest and its target, and
+// both cdc rollbacks target the latest (composition.go rollbackConfig(rel.Revision)). A SUPERSEDED
+// revision older than both is read only by a manual `helm rollback <release> <N>`. Counting it held
+// every old served version after every upgrade of a parent composition until helm history rotated,
+// which on a quiet umbrella is never (osh-s2: v0-3-49 held by revs 2 and 3, both superseded, while
+// rev 4 was latest and deployed). Diego, 2026-11-13: hold only for the latest and last deployed.
+// A manual rollback to a revision whose version was pruned then fails with helm's mapping error,
+// which is the right answer: it would recreate children at a version the Kind no longer serves.
 //
 // # Why this exists
 //
@@ -110,7 +124,15 @@ type storedRelease struct {
 	Name     string `json:"name"`
 	Version  int    `json:"version"`
 	Manifest string `json:"manifest"`
+	// Info.Status is helm's release status ("deployed", "superseded", "failed", "pending-upgrade",
+	// ...), which decides whether this revision is the release's last DEPLOYED one (#471).
+	Info struct {
+		Status string `json:"status"`
+	} `json:"info"`
 }
+
+// statusDeployed is helm's release.StatusDeployed.
+const statusDeployed = "deployed"
 
 // manifestObject is the minimum needed to compare a document's apiVersion.
 type manifestObject struct {
@@ -118,8 +140,11 @@ type manifestObject struct {
 	Kind       string `json:"kind"`
 }
 
-// ReferencingReleases returns every helm release revision whose stored manifest declares at least
-// one object at apiVersion (e.g. "composition.krateo.io/v0-6-1").
+// ReferencingReleases returns every helm release revision helm will read (each release's latest and
+// last deployed revision, #471) whose stored manifest declares at least one object at apiVersion
+// (e.g. "composition.krateo.io/v0-6-1"). Every release Secret is still DECODED, superseded ones
+// included: which revision is latest or deployed is only known from all of them, and an undecodable
+// one is an error, as before.
 //
 // An empty slice with a nil error means "no release references this version", which is the only
 // condition under which a caller may prune. Any error means "could not determine" and the caller
@@ -142,7 +167,16 @@ func ReferencingReleases(ctx context.Context, c client.Client, apiVersion string
 		return nil, fmt.Errorf("listing helm release secrets: %w", err)
 	}
 
-	var refs []Reference
+	// Decode every release first: the revisions that count are only known once all of a release's
+	// revisions are (#471).
+	type decoded struct {
+		sec *corev1.Secret
+		rel *storedRelease
+	}
+	var all []decoded
+	latest := map[string]int{}   // release key -> highest revision
+	deployed := map[string]int{} // release key -> highest deployed revision
+	key := func(ns, name string) string { return ns + "/" + name }
 	for i := range secrets.Items {
 		sec := &secrets.Items[i]
 		if sec.Type != helmReleaseSecretType {
@@ -158,6 +192,23 @@ func ReferencingReleases(ctx context.Context, c client.Client, apiVersion string
 		rel, err := decodeRelease(raw)
 		if err != nil {
 			return nil, fmt.Errorf("decoding release secret %s/%s: %w", sec.Namespace, sec.Name, err)
+		}
+		k := key(sec.Namespace, rel.Name)
+		if rel.Version > latest[k] {
+			latest[k] = rel.Version
+		}
+		if rel.Info.Status == statusDeployed && rel.Version > deployed[k] {
+			deployed[k] = rel.Version
+		}
+		all = append(all, decoded{sec, rel})
+	}
+
+	var refs []Reference
+	for _, d := range all {
+		sec, rel := d.sec, d.rel
+		k := key(sec.Namespace, rel.Name)
+		if rel.Version != latest[k] && rel.Version != deployed[k] {
+			continue // superseded and older than both: only a manual rollback reads it (#471)
 		}
 		kinds, err := kindsAtAPIVersion(rel.Manifest, apiVersion)
 		if err != nil {
