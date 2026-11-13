@@ -90,8 +90,17 @@ Two `cdc.env` variables let a composition controller slow ITSELF down when its o
 Low capacity behaves like fewer workers: a worker takes a slot before it takes work, so the queue's
 order is the order work runs in, and a spec change goes ahead of a resync. Nothing is written on the
 object, because the controller's own saturation is not a state of the object. With the default
-`cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota. The
-threshold is being measured on the cdc at sub-core and 1-core limits before it is relied on.
+`cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota.
+
+**Measured cost, and why it is off by default** (unstructured-runtime#66, core-provider 2.13.73, GKE,
+one cdc at a 250m CPU limit, 64 compositions): with the rule on at threshold 50, draining took
+**1.42x** as long as with it off in steady state and **1.52x** on a restart into a backlog. In return
+the controller held CPU pressure near the threshold (peak avg10 PSI 50-58) and left 7-10% of its quota
+unused, where with the rule off it ran throttled. That is n=3 per arm, on one node, one load shape and
+one limit. Whether the slowdown is worth it is a choice, not a measurement, so the rule stays **opt-in
+per controller** (Diego, 2026-11-12), with 50 as the documented starting threshold. The default is to
+be revisited once provider-runtime's CPU-limit cost model (#57) finishes calibration, since it targets
+the same problem.
 
 With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity` and `.saturation.input`
 show what the rule is doing. See the
