@@ -4,8 +4,11 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
@@ -14,6 +17,7 @@ import (
 	"github.com/krateo-platformops/plumbing/e2e"
 	xenv "github.com/krateo-platformops/plumbing/env"
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -227,6 +231,67 @@ func TestLookup(t *testing.T) {
 
 		return ctx
 	}).Feature()
+
+	testenv.Test(t, f)
+}
+
+// #485 through the real Deploy on a real cluster: a chart schema over the 1 MiB ConfigMap limit
+// pretty-printed (installer 0.3.635's size) deploys, and the ConfigMap the cluster stores carries
+// it compact. Before #485 this Deploy failed with "Too long: may not be more than 1048576 bytes".
+func TestDeployStoresTheSchemaCompact(t *testing.T) {
+	f := features.New("Deploy a schema over the ConfigMap limit pretty-printed").
+		Assess("Deploy", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			cli, err := client.New(cfg.Client().RESTConfig(), client.Options{})
+			if err != nil {
+				t.Fatalf("failed to create client: %v", err)
+			}
+			in := prettySchema(1059606)
+			if len(in) <= configMapDataLimit {
+				t.Fatalf("premise: the fixture must exceed the ConfigMap limit pretty-printed, it is %d B", len(in))
+			}
+			var want bytes.Buffer
+			if err := json.Compact(&want, in); err != nil {
+				t.Fatal(err)
+			}
+			opts := DeployOptions{
+				DiscoveryClient:        memory.NewMemCacheClient(discovery.NewDiscoveryClientForConfigOrDie(cfg.Client().RESTConfig())),
+				RBACFolderPath:         "testdata",
+				DeploymentTemplatePath: "testdata/deploy.yaml",
+				ConfigmapTemplatePath:  "testdata/cm.yaml",
+				JsonSchemaTemplatePath: "testdata/configmap_jsonschema.yaml",
+				JsonSchemaBytes:        in,
+				ServiceTemplatePath:    "testdata/service.yaml",
+				KubeClient:             cli,
+				DynClient:              dynamic.NewForConfigOrDie(cfg.Client().RESTConfig()),
+				Namespace:              namespace,
+				ControllerNamespace:    namespace,
+				GVR:                    schema.GroupVersionResource{Group: "compositions.krateo.io", Version: "v1alpha1", Resource: "bigschemas"},
+				Spec:                   &v1alpha1.ChartInfo{Version: "1.1.10", Repo: "fireworks-app", Url: "https://charts.krateo.io"},
+			}
+			if _, err := Deploy(context.Background(), cli, opts); err != nil {
+				t.Fatalf("Deploy with a %d B pretty-printed schema: %v", len(in), err)
+			}
+
+			var cms corev1.ConfigMapList
+			if err := cli.List(context.Background(), &cms, client.InNamespace(namespace)); err != nil {
+				t.Fatal(err)
+			}
+			found := 0
+			for _, cm := range cms.Items {
+				s, ok := cm.Data["values.schema.json"]
+				if !ok || !strings.Contains(s, "field000000") {
+					continue
+				}
+				found++
+				if s != want.String() {
+					t.Errorf("ConfigMap %s stores %d B, want json.Compact of the chart's file (%d B)", cm.Name, len(s), want.Len())
+				}
+			}
+			if found != 1 {
+				t.Errorf("found %d ConfigMaps carrying this schema in %s (of %d), want 1", found, namespace, len(cms.Items))
+			}
+			return ctx
+		}).Feature()
 
 	testenv.Test(t, f)
 }
