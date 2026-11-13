@@ -147,7 +147,7 @@ func main() {
 		"Bound reconciles by this controller's own CPU pressure (cgroup v2 cpu.pressure). Off by default.")
 	cpuPressureThreshold := flag.Float64("cpu-pressure-threshold",
 		env.Float64("COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD", 0),
-		"cpu.pressure \"some avg10\" percentage above which the controller counts as saturated. 0 = the runtime default (50, provisional). Read only with -saturation-enabled.")
+		"CPU pressure percentage (the share of the last 10s window in which some task waited for CPU, from cpu.pressure \"some total\") above which the controller counts as saturated. 0 = the runtime default (50, provisional). Read only with -saturation-enabled.")
 	gracefulShutdownTimeout := flag.Duration("graceful-shutdown-timeout",
 		env.Duration("COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT", 30*time.Second),
 		"Max time to let in-flight reconciles finish after SIGTERM before the process exits. Must be set below the pod's terminationGracePeriodSeconds. 0 disables the drain (abrupt shutdown); negative waits indefinitely.")
