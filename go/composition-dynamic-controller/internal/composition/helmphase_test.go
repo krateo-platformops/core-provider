@@ -150,3 +150,15 @@ func equalSets(a, b []string) bool {
 	}
 	return true
 }
+
+// core-provider#465: both cdc rollbacks declare the authorization metadata as content too, with the
+// revision and bounds they always sent.
+func TestRollbackConfigDeclaresAuthorizationContent(t *testing.T) {
+	cfg := rollbackConfig(7)
+	if cfg.ReleaseVersion != 7 || cfg.MaxHistory != helmMaxHistory || cfg.Timeout != helmOperationTimeout {
+		t.Errorf("revision/bounds not carried: %+v", cfg)
+	}
+	if !equalSets(cfg.ContentAnnotations, audit.AuthorizationAnnotations()) || !equalSets(cfg.ContentLabels, audit.AuthorizationLabels()) || len(cfg.ContentLabels) == 0 {
+		t.Errorf("content keys = %v / %v, want audit's two lists", cfg.ContentAnnotations, cfg.ContentLabels)
+	}
+}

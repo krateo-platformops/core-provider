@@ -102,3 +102,17 @@ func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
 		ContentLabels:      audit.AuthorizationLabels(),
 	}
 }
+
+// rollbackConfig is the RollbackConfig both cdc rollbacks send (Observe clearing a release stuck
+// past the grace, Delete clearing a stuck uninstall): the revision, the history and operation
+// bounds, and the authorization annotations and labels as content to the verdicts, as an upgrade
+// declares them (core-provider#465, plumbing v1.64.0).
+func rollbackConfig(revision int) *helmconfig.RollbackConfig {
+	return &helmconfig.RollbackConfig{
+		ReleaseVersion:     revision,
+		MaxHistory:         helmMaxHistory,
+		Timeout:            helmOperationTimeout,
+		ContentAnnotations: audit.AuthorizationAnnotations(),
+		ContentLabels:      audit.AuthorizationLabels(),
+	}
+}

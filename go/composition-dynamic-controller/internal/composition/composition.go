@@ -510,11 +510,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
 		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			op, err := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-				MaxHistory:     helmMaxHistory,
-				ReleaseVersion: rel.Revision,
-				Timeout:        helmOperationTimeout,
-			})
+			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		})
@@ -1461,11 +1457,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
 		if _, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			op, err := hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-				MaxHistory:     helmMaxHistory,
-				ReleaseVersion: rel.Revision,
-				Timeout:        helmOperationTimeout,
-			})
+			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		}); rerr != nil {
