@@ -55,7 +55,7 @@
     "nameOverride": {
       "type": "string",
       "title": "Name override",
-      "default": ""
+      "default": "core-provider"
     },
     "fullnameOverride": {
       "type": "string",
@@ -201,7 +201,15 @@
     "resources": {
       "type": "object",
       "title": "Resources",
-      "default": {}
+      "default": {
+        "requests": {
+          "cpu": "500m",
+          "memory": "512Mi"
+        },
+        "limits": {
+          "memory": "2Gi"
+        }
+      }
     },
     "autoscaling": {
       "type": "object",
@@ -356,14 +364,14 @@
             "tag": {
               "type": "string",
               "title": "Image tag",
-              "default": "0.2.0"
+              "default": ""
             }
           }
         },
         "replicaCount": {
           "type": "integer",
           "title": "Replica count",
-          "default": 1
+          "default": 2
         },
         "imagePullSecrets": {
           "type": "array",
@@ -401,7 +409,7 @@
             "maxReplicas": {
               "type": "integer",
               "title": "Maximum replicas",
-              "default": 100
+              "default": 10
             },
             "targetCPUUtilizationPercentage": {
               "type": "integer",
@@ -459,7 +467,7 @@
             "port": {
               "type": "integer",
               "title": "Service port",
-              "default": 80
+              "default": 8081
             }
           }
         },
@@ -483,7 +491,16 @@
         "resources": {
           "type": "object",
           "title": "Resources",
-          "default": {}
+          "default": {
+            "requests": {
+              "cpu": "1",
+              "memory": "512Mi"
+            },
+            "limits": {
+              "cpu": "2",
+              "memory": "1Gi"
+            }
+          }
         },
         "livenessProbe": {
           "type": "object",
@@ -502,7 +519,7 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "default": false
+              "default": true
             },
             "minAvailable": {
               "type": [
@@ -543,20 +560,16 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "type": "boolean",
-              "default": false
+              "type": "boolean"
             },
             "minReplicas": {
-              "type": "integer",
-              "default": 1
+              "type": "integer"
             },
             "maxReplicas": {
-              "type": "integer",
-              "default": 100
+              "type": "integer"
             },
             "targetCPUUtilizationPercentage": {
-              "type": "integer",
-              "default": 80
+              "type": "integer"
             },
             "targetMemoryUtilizationPercentage": {
               "type": "integer"
@@ -583,7 +596,10 @@
           },
           "default": {
             "HOME": "/tmp",
-            "COMPOSITION_CONTROLLER_DEBUG": "false"
+            "COMPOSITION_CONTROLLER_DEBUG": "false",
+            "COMPOSITION_CONTROLLER_WORKERS": "10",
+            "COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT": "30s",
+            "COMPOSITION_CONTROLLER_RESYNC_INTERVAL": "60s"
           },
           "not": {
             "anyOf": [
@@ -660,7 +676,7 @@
             "tag": {
               "type": "string",
               "title": "Image tag",
-              "default": "0.20.2"
+              "default": ""
             }
           }
         },
@@ -731,7 +747,15 @@
         "resources": {
           "type": "object",
           "title": "Resources",
-          "default": {}
+          "default": {
+            "requests": {
+              "cpu": "50m",
+              "memory": "128Mi"
+            },
+            "limits": {
+              "memory": "512Mi"
+            }
+          }
         },
         "resyncInterval": {
           "type": "string",
