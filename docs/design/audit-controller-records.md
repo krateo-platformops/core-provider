@@ -1,41 +1,52 @@
 # Controller audit records from the cdc and core-provider (core-provider#423, AUDIT-4)
 
-Status: Q1 and Q2 DECIDED by Diego, 2026-11-11 (see Open questions); Q3 follows Q2. Updated
-2026-11-12 after implementation: see "Changes since the decision" at the end. Measured against core-provider `15bace0` (cdc on plumbing v1.45.0+),
-plumbing v1.48.0, audit v0.5.0 (`schema/v1.yaml`). The target is audit **v0.6.0** (snowplow,
-tagged 2026-11-11 evening), which registers the two populations below. `content_sha256` is
-optional and waits on plumbing#124.
+Status: **design of record**, measured against core-provider `main` at 22fbe70 (release 2.13.94).
+Decisions Q1–Q3 were taken by Diego on 2026-11-11; the rest of this document describes what shipped
+(cdc in 2.13.86 via #459; core-provider's own writes in 2.13.87 via #460/#464; authorization metadata
+as content in 2.13.87 via #465/#467). Pins: cdc on audit **v0.13.0** and plumbing **v1.67.0**;
+core-provider on audit **v0.13.0** and plumbing **v1.60.0**. The action literals and coverage rows are
+registered in audit **v0.14.0** (snowplow, audit#36).
 
-## Populations (registered in audit v0.6.0)
+## Populations
 
 | Scope | Writer | Who |
 |---|---|---|
 | `github.com/krateo-platformops/composition-dynamic-controller/audit` | controller | the cdc's helm writes to a Composition's children |
-| `github.com/krateo-platformops/core-provider/audit` | controller | core-provider's `*.krateo.io` spec writes, and its RBAC and credential-Secret writes |
+| `github.com/krateo-platformops/core-provider/audit` | controller | core-provider's own writes: RBAC, credential Secrets, authn mappings, the spoke mirror, hub deletes, migration rewrites |
 
-The emitter is `audit.New(logger, audit.WithWriter(audit.WriterController), audit.WithActor("system:serviceaccount:<ns>:<name>", audit.ClassController))`.
-The cdc's ServiceAccount reaches the process through the downward API. The cdc's ServiceName is
-per-version, so populations are split by scope, never by ServiceName.
+Populations are split by scope, never by ServiceName: the cdc's ServiceName is per version.
 
-## Fields every record carries (v0.5.0, controller column)
+**Actor.** Both writers use audit's own helpers, so the rule lives in one place:
+- the cdc: `audit.ServiceAccountActor(namespace, serviceAccount)`, from its `-saNamespace` / `-saName`
+  flags (env `COMPOSITION_CONTROLLER_SA_NAMESPACE` / `_SA_NAME`; `internal/auditrec/setup.go`);
+- core-provider: `audit.ControllerActor()`, reading `POD_NAMESPACE` / `POD_SERVICE_ACCOUNT`, which the
+  core-provider Deployment sets from the downward API (`tools/auditrec/setup.go`).
 
-- required: `user.name` (the actor above), `krateo.action`, `krateo.audit.verb` (the verb SENT),
+When the identity is unset, no actor is given and every record is marked actor-incomplete, never
+guessed; the cdc also logs it at startup.
+
+## Fields every record carries (controller column)
+
+- required: `user.name` (the actor), `krateo.action`, `krateo.audit.verb` (the verb SENT),
   `krateo.audit.outcome`;
-- `krateo.audit.object_ref.*` = the CHILD written. `uid` is required only "when the object is
-  known", so a create derived without a read omits it rather than guessing;
-- `krateo.audit.cause_ref.*` = the Composition reconciled, on EVERY record of the reconcile,
-  including when the object written is the Composition itself (same uid, the reconciled
-  generation). Confirmed by snowplow, 2026-11-11;
+- `krateo.audit.object_ref.*` = the object written. `uid` only when the object is known, so a create
+  derived without a read omits it rather than guessing;
+- `krateo.audit.cause_ref.*` = what was reconciled: the Composition for the cdc, the
+  CompositionDefinition for core-provider (`auditrec.CauseOfDefinition`), on every record of the
+  reconcile;
 - `krateo.audit.denial_reason`: only `kept_resource_policy`, and only on a denied record;
-- `dry_run` is not applicable to a controller. The cdc's dry-run renders write nothing and emit
-  nothing.
+- `krateo.audit.preview`: read from the target object's Namespace on the cluster written to, once per
+  Namespace per operation; unreadable (deleted included) is Unknown and marked, never false.
+
+The body is a closed set chosen by the emit site, never `err.Error()`, helm's joined error, or any
+field value.
 
 ## The cdc: one record per child, from plumbing's per-object verdict
 
-`helm.ReconcileResult.Objects` (plumbing#106, in v1.42.0) is uncapped, one `ObjectVerdict` per child
-the merge created, deleted, changed, kept or failed on. The installer#413 predicate, with the
-2026-11-09 rulings ("creates and deletes pass the .spec test"; condition 3 on the rendered desired
-state), maps each verdict like this:
+All **seven** helm write sites report a per-object verdict (plumbing `ObjectVerdict`, uncapped):
+Observe's Reconcile and rollback, Create's Install and Upgrade, Update's Reconcile, and Delete's
+rollback and Uninstall. Action literals (`internal/auditrec`): `helm.install`, `helm.upgrade`,
+`helm.reconcile`, `helm.uninstall`, `helm.rollback`.
 
 | `ObjectVerdict.Change` | Record? | verb | outcome | excluded-counter reason |
 |---|---|---|---|---|
@@ -43,95 +54,95 @@ state), maps each verdict like this:
 | `deleted` | yes | `delete` | success | |
 | `specChanged` | yes | `Verb` (`patch`, or `update` under Force) | success | |
 | `metadataOnly` | **no** | | | `metadata_only` |
-| `compareFailed` | yes (Q1: decided) | `Verb` | success | |
-| `kept` | yes | `delete` | **denied**, `kept_resource_policy`; no body (the reason is the key, audit schema.md "Kept deletions") | |
+| `compareFailed` | yes (Q1) | `Verb` | success | |
+| `kept` | yes | `delete` | **denied**, `kept_resource_policy`; no body | |
 | `deleteNotDone` | yes | `delete` | failure | |
 | `createFailed` | yes | `create` | failure | |
 | `updateFailed` | yes | `Verb` | failure | |
 | `deleteUnknown` | yes | `delete` | failure (nobody can say it happened) | |
 | (absent: unchanged child) | no | | | `unchanged` |
+| hook object | no | | | `hook` |
 
-`ObjectsNotAttempted > 0` (helm stopped at a failed create) gives **no record** (snowplow,
-2026-11-12): a child helm never sent a request for is not a write, and the failed create that
-stopped helm is the record. The count goes to `composition_children_not_attempted_total{action}`,
-operational state rather than an audit gap. (This replaces "one reconcile-level failure record with
-the count in a closed-set field": audit v0.9.0 has no such key, and snowplow declined to add one.)
+**What counts as content.** A write that changes only metadata is `metadataOnly`, with one exception:
+the audit schema's authorization annotations and labels (`audit.AuthorizationAnnotations()`,
+`audit.AuthorizationLabels()`) are content, because changing one changes what an identity may do. The
+cdc declares both on every helm upgrade, reconcile and rollback, through single constructors
+(`upgradeConfig`, `rollbackConfig`) so no site can omit them (#465, plumbing v1.63.0/v1.64.0).
 
-The body is a closed set chosen by the emit site, never `err.Error()`, helm's joined error, or any
-field value. `ObjectVerdict` already carries names and the resource only.
+**Not attempted.** `ObjectsNotAttempted > 0` (helm stopped at a failed create) gives no record: a child
+helm never sent a request for is not a write, and the failed create that stopped helm is the record.
+The count goes to `composition_children_not_attempted_total{action}`.
 
-## The gap: three of the cdc's five helm write sites report no per-object outcome
+**Counters** (scope above): `composition_audit_excluded_total{action,reason}` with reason
+`metadata_only` | `unchanged` | `hook`; `composition_children_not_attempted_total{action}`;
+`composition_audit_incomplete_operations_total{action}` (an operation whose verdicts may not name every
+child). `unchanged` is counted only when the release the operation left is known.
 
-| Site (`internal/composition/composition.go` at 15bace0) | call | per-object verdict |
-|---|---|---|
-| Observe `:598` | `Reconcile` | **yes** (`Objects`), except on the install-through-Upgrade path (`ObjectsComplete=false`) |
-| Update `:1187` | `Reconcile` | **yes** |
-| Create `:972` | `Upgrade` | **no**: returns `*Release` (the manifest) |
-| Create `:989` | `Install` | **no**: returns `*Release` |
-| Delete `:1484` | `Uninstall` | **no**: returns `error` only |
+## core-provider: one record per write it sent
 
-Install, Upgrade and Uninstall are exactly the writes AUDIT-4 is about: a Composition's children
-being created, rewritten or removed. Without a verdict the cdc cannot know:
+Action literals (`internal/tools/auditrec`):
 
-- for **Uninstall**, which children helm deleted and which it KEPT under
-  `helm.sh/resource-policy: keep`. A kept one must be a denied record, and it is indistinguishable
-  from a deleted one without the verdict;
-- for **Upgrade**, which children it created, patched or pruned: a full release diff, unknown;
-- for **Install**, on a FAILED install, which children were created before the failure.
+| Action | Sites |
+|---|---|
+| `rbac.apply` / `rbac.delete` | deploy's ClusterRole / ClusterRoleBinding / Role / RoleBinding / ServiceAccount install and teardown; the RESTAction RBAC; chart-inspector's spoke ServiceAccount and RBAC; the binding re-subject on a version bump; the dangling-RBAC sweep; the spoke chart-inspector cleanup |
+| `secret.apply` | the CompositionDefinition's referenced Secrets projected onto a spoke |
+| `authn.mapping.apply` | the per-definition and core-provider's own `serviceaccount.authn.krateo.io` mapping |
+| `composition.mirror` | the spoke mirror's create, update and garbage-collect delete |
+| `composition.hub.delete` | hub composition deletes on CompositionDefinition teardown |
+| `composition.migrate` | the migration's rewrite of each composition through the target version |
 
-**Not a workaround:** re-reading the cluster around each call, or diffing manifests in the cdc,
-would reconstruct in the caller what helm decided, with its own matching rules. That is the
-reconstruction plumbing#106 was built to avoid for Reconcile.
+There is no `secret.delete`: no site deletes a credential Secret.
 
-**Proposal:** plumbing gains the same verdict for the other three calls, under one type. It's a
-plumbing change (owner: me), sized like #106. See question Q2.
+**Record rules,** from plumbing objectclient's write report (`ApplyResult` / `UninstallResult`) and
+`content.DiffersWith` (the same comparison as the cdc's verdicts, with the authorization annotations
+and labels as content):
 
-## core-provider sites (from the issue, paths to re-verify at implementation time)
+| What happened | What is recorded |
+|---|---|
+| created | a record |
+| updated, content changed | a record |
+| updated, metadata only | counted (`metadata_only`), no record |
+| unchanged: an Update the apiserver persisted nothing for (resourceVersion unmoved) | counted (`unchanged`), no record |
+| refused | a failure record with the apiserver's status code |
+| deleted | a record |
+| absent or NotFound: someone else's delete | nothing |
+| nothing sent | nothing |
+| dry run (any `DryRun` request, by op) | nothing |
 
-- the authn mapping `serviceaccount.authn.krateo.io` (create, update);
-- spoke mirror Composition create / update / delete, and the hub delete;
-- migration spec loss;
-- RBAC objects and credential Secrets: named exception to installer#413 condition 1, with
-  condition 2 = "rules / subjects / data changed";
-- **first, `compositionmirror.go`'s update-on-every-resync must be fixed** so that "differs from
-  the previous reconcile" means something (the issue's prerequisite).
+Counter: `core_provider_audit_excluded_total{action,reason}`. **The migration exception:** its read
+goes through the narrower target version, which already prunes the fields it discards, so the
+fieldloss report (not the objects it holds) decides that content changed, and a pruning rewrite is
+always recorded. The recorder and cause are put on the context (`auditrec.WithScope`) at the top of the
+CompositionDefinition controller's Observe, Create, Update and Delete, and of the mirror's Reconcile.
 
-## Tests (the issue's acceptance, per emit site)
+## Coverage (audit v0.14.0's rule)
 
-`audittest.NewRecorder` + `AssertConformant` for every shape (success, failure, denied);
-`AssertRequiredKeysDetected` (the falsifier); a body arm with a sentinel identity and a sentinel
-token-shaped string fed into every input the site sees; the recorded marker while a span is active
-(the cdc's reconcile root, unstructured-runtime v1.13+); an unchanged-spec arm (0 rows, counter +1);
-a kept-deletion arm.
+audit v0.14.0 counts a row as **audited** only when every outcome it lists is checked by
+`audittest.AssertConformant` on real records. Proven today: the cdc's install, heal and uninstall
+successes (`composition_test.go` via `audit_e2e_test.go`), and core-provider's deploy RBAC
+create/unchanged/update/delete on a real apiserver (`audit_envtest_test.go`). **Not yet proven**, and
+tracked on #423:
+- the cdc's **prune** record (a run that prunes nothing still passes today);
+- a **kept deletion** through the real path (only hand-built verdicts are tested);
+- an **authorization-label-only** child change recorded end to end;
+- the **failure** outcomes of the cdc uninstall row and core-provider's RBAC-set row.
 
-## Open questions
+## Decisions (Diego, 2026-11-11)
 
-- **Q1 `compareFailed`: DECIDED, record it.** helm applied the child, but the before/after comparison failed. Record it
-  (a write that may have been a spec change; fail safe toward a row), or exclude it and count
-  `compare_failed`? Recommendation: **record**. An audit gap is worse than an extra row, and
-  Reconcile already treats it as a change.
-- **Q2 the three silent sites: DECIDED, (a).** plumbing reports the verdict from Install,
-  Upgrade and Uninstall first, then #423 records all five sites uniformly. (a) plumbing reports `[]ObjectVerdict` from Install, Upgrade and
-  Uninstall before #423 emits there (recommended). (b) #423 emits from Reconcile only, and the
-  three sites stay unrecorded and are listed in coverage.md as a known gap until (a).
-- **Q3 install-through-Upgrade inside Reconcile** (`ObjectsComplete=false`, `Objects` empty). With
-  (a), plumbing fills it the same way. With (b), it is a known gap too.
+- **Q1 `compareFailed`: record it.** helm applied the child but the before/after comparison failed.
+  An audit gap is worse than an extra row, and Reconcile already treats it as a change.
+- **Q2 the silent sites: plumbing reports the verdict first.** Install, Upgrade and Uninstall (and,
+  found during implementation, Rollback) report `OperationResult` verdicts (plumbing v1.53.0), so #423
+  records every site uniformly rather than listing a gap.
+- **Q3 install-through-Upgrade inside Reconcile: moot.** helm's Upgrade action never installs, so that
+  path failed on every chart; plumbing v1.53.0 makes a Reconcile with no stored release a real Install.
 
-## Changes since the decision (2026-11-12, implementation)
+## History
 
-- **Seven write sites, not five.** Rollback writes children too, at Observe (clearing a release
-  stuck pending past the grace) and Delete (clearing a stuck uninstall). Its action literal is
-  `helm.rollback` (snowplow, 2026-11-12). Rollback reported no verdict; plumbing#139/#140 (v1.53.0)
-  makes it return an `OperationResult`.
-- **Reconcile's two Upgrade paths.** The real Upgrade after a detected change kept only its release;
-  v1.53.0 folds its verdicts into `ReconcileResult` (plus a new `HooksExcluded`). The
-  no-stored-release path ("install-through-Upgrade", Q3) **never installed**: helm's Upgrade action
-  does not install, so it failed on every chart. v1.53.0 makes it a real Install, so Q3 is moot.
-- **Counters** (scope `.../composition-dynamic-controller/audit`):
-  `composition_audit_excluded_total{action,reason}` with reason `metadata_only` | `unchanged` |
-  `hook`; `composition_children_not_attempted_total{action}`;
-  `composition_audit_incomplete_operations_total{action}` (an operation whose verdicts may be
-  short). `unchanged` is counted only when the release the operation left is known.
-- **Preview** is read from the child's Namespace on the cluster helm writes to, once per Namespace
-  per operation; unreadable (deleted included) is Unknown and marked, never false.
-- **Schema** is audit v0.9.0.
+- 2026-11-11: draft for decision (Q1–Q3).
+- 2026-11-12: cdc implementation (#459, 2.13.86): seven sites, counters, preview, audit v0.9.0.
+- 2026-11-12/13: core-provider's own writes (#460 mirror resync prerequisite, #464), audit v0.12.0's
+  actor helper; authorization metadata as content (#465/#467, plumbing v1.63.0/v1.64.0, audit v0.13.0),
+  2.13.87.
+- 2026-11-13: rewritten as the design of record against main 22fbe70 (2.13.94); coverage per audit
+  v0.14.0.
