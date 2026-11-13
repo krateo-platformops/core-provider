@@ -111,7 +111,10 @@ func unknownReadSetFields(raw []byte) []string {
 	return out
 }
 
-// response is snowplow's GET /rbac 200 body.
+// response is snowplow's GET /rbac 200 body. Only restaction and readSet are modelled. Any other
+// top-level field is ignored by design; in particular snowplow#1168's credentialGrants (credentials an
+// ADMIN must grant) must never be decoded into rules here, see
+// TestInspect_CredentialGrantsNeverReachTheReadSet.
 type response struct {
 	RESTAction struct {
 		Name      string `json:"name"`
