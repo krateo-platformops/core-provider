@@ -756,9 +756,15 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 		return podReady(obj)
 	case group == "" && obj.GetKind() == "PersistentVolumeClaim":
 		return pvcReady(obj)
+	// A CustomResourceDefinition the composition deploys DOES carry readiness (#473): its API is not
+	// served until the apiserver reports Established, and NamesAccepted=False is a name conflict that
+	// keeps it from ever being served. Before this case it fell through to existence-is-health below,
+	// so a composition reported Ready=True while its CRD was not yet usable.
+	case group == "apiextensions.k8s.io" && obj.GetKind() == "CustomResourceDefinition":
+		return crdReady(obj)
 	case isNativeGroup(group):
-		// A built-in kind we do not model (ConfigMap, Service, RBAC, CRD, ...). These carry no
-		// readiness, so existence genuinely IS health — not a gap, and not counted as one.
+		// A built-in kind we do not model (ConfigMap, Service, RBAC, ...). These carry no readiness,
+		// so existence genuinely IS health — not a gap, and not counted as one.
 		return childHealthy
 	default:
 		// A third-party CUSTOM resource. Read only what it publishes in a documented shape
@@ -1306,4 +1312,31 @@ func coverageScalars(v healthVerdict) map[string]int {
 		"healthEvaluatedChildren": evaluated,
 		"unreadableChildrenCount": len(v.unreadable),
 	}
+}
+
+// crdReady classifies a CustomResourceDefinition child (#473, Diego 2026-11-13):
+//   - NamesAccepted=False: failed. A name conflict with another CRD does not resolve by itself, so it
+//     is terminal (Unavailable), not converging.
+//   - Established=True: healthy, the API is served.
+//   - anything else (no conditions yet, Established=False or Unknown, terminating): converging
+//     (Creating). A freshly created CRD carries no conditions for a moment; that is "not yet", not
+//     "unknown", because the apiserver always writes both conditions.
+//
+// Only CRDs in a chart's templates/ reach here: helm keeps crds/ out of the release manifest, so those
+// are not in status.managed at all.
+func crdReady(obj *unstructured.Unstructured) childState {
+	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	status := map[string]string{}
+	for _, c := range conds {
+		if cm, ok := c.(map[string]any); ok {
+			status[stringField(cm, "type")] = stringField(cm, "status")
+		}
+	}
+	if status["NamesAccepted"] == "False" {
+		return childFailed
+	}
+	if status["Established"] == "True" && status["Terminating"] != "True" {
+		return childHealthy
+	}
+	return childConverging
 }
