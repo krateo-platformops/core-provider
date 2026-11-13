@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -60,10 +59,11 @@ type servedVersionAddWaits struct {
 }
 
 func (w *servedVersionAddWaits) Error() string {
-	return fmt.Sprintf("crd for '%s' does not serve this version yet: waiting for served version(s) %s "+
+	// %q, not hand-written quotes: the resource and versions come from objects read off the cluster.
+	return fmt.Sprintf("crd for %q does not serve this version yet: waiting for served version(s) %q "+
 		"to finish their %s prune grace (due %s) before adding it, so the CRD never carries more than the "+
 		"current version plus one transitional version",
-		w.gvr.String(), strings.Join(w.waiting, ", "), servedVersionPruneGrace, w.dueAt.UTC().Format(time.RFC3339))
+		w.gvr.String(), w.waiting, servedVersionPruneGrace, w.dueAt.UTC().Format(time.RFC3339))
 }
 
 // asServedVersionAddWaits reports whether err is (or wraps) the add-waits outcome.
