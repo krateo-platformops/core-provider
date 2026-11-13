@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"context"
 	"github.com/krateo-platformops/audit"
 	"time"
 
@@ -101,6 +102,15 @@ func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
 		ContentAnnotations: audit.AuthorizationAnnotations(),
 		ContentLabels:      audit.AuthorizationLabels(),
 	}
+}
+
+// reconcileConfig is upgradeConfig for a Reconcile, plus the #461 hook: before Reconcile writes a
+// revision (and only then; a steady reconcile writes nothing), record which pod started it. The
+// recording is best-effort, as plumbing requires: a lost race is logged, never an abort.
+func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context)) *helmconfig.UpgradeConfig {
+	cfg := upgradeConfig(ac)
+	cfg.BeforeRevision = record
+	return cfg
 }
 
 // rollbackConfig is the RollbackConfig both cdc rollbacks send (Observe clearing a release stuck

@@ -46,8 +46,19 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-configmap
-          {{- if or .Values.cdc.goMemLimit (include "core-provider.otlpNodeLocal" .) }}
           env:
+            # #461: this controller pod's identity, recorded as the starter of every helm operation
+            # (status.helmOperation.startedBy), so the next controller can tell an operation still in
+            # flight from one whose starter pod is gone and clear the latter's lock at once instead of
+            # after the pending grace. From the downward API, so it cannot disagree with the pod.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if include "core-provider.otlpNodeLocal" . }}
             # Node-local OTLP (core-provider.otlpNodeLocal): HOST_IP must come first, because $(VAR)
             # expands only variables defined earlier in this list. Not in the ConfigMap: envFrom
@@ -87,7 +98,6 @@ spec:
               value: {{ .Values.cdc.goMemLimit | quote }}
               {{- end }}
             {{- end }}
-          {{- end }}
           securityContext:
             {{- toYaml .Values.cdc.securityContext | nindent 12 }}
           args:

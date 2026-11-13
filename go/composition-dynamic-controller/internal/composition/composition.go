@@ -475,7 +475,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// (even rolling back a pending-rollback), which — with the reconcile re-enqueue cadence —
 		// produced an Upgrade<->Rollback thrash on the 319-resource portal composition.
 		pendingFor := time.Since(rel.Updated)
-		if pendingFor < pendingOperationGrace {
+		// #461: an operation whose starter pod no longer exists will never settle; clear it now
+		// instead of after the grace. Only on positive evidence (see orphanedOperation).
+		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn))
+		if orphan {
+			log.Info("Incomplete helm operation was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", why)
+		}
+		if pendingFor < pendingOperationGrace && !orphan {
 			// Recent => legitimately in flight. Do NOT roll it back and do NOT start a concurrent
 			// operation; report up-to-date so the in-flight op settles and the next reconcile proceeds.
 			log.Debug("Release operation in progress; waiting for it to settle.",
@@ -509,11 +516,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
+		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+			return controller.ExternalObservation{}, err
+		}
 		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
 			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		})
+		clearHelmOperationRecord(mg)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
 		}
@@ -614,8 +625,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		}, nil
 	}
 
+	// #461: record the starter pod just before a revision is written (never on a steady reconcile).
+	recordRevision := func(ctx context.Context) {
+		var rerr error
+		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
+			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
+		}
+	}
 	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
-		return hc.Reconcile(ctx, releaseName, pkg.URL, upgradeConfig(&helmconfig.ActionConfig{
+		return hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
 			ChartVersion:          pkg.Version,
 			ChartName:             pkg.Repo,
 			Username:              pkg.Auth.Username,
@@ -631,8 +649,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			TakeOwnership: true,
 			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
 			Timeout: helmOperationTimeout,
-		}))
+		}, recordRevision))
 	})
+	clearHelmOperationRecord(mg) // #461: the operation returned; the next status write drops the record
 	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 	if err != nil {
@@ -1015,6 +1034,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
 	}
+	// #461: the install or upgrade returned; the status write below drops the operation record. On the
+	// error returns above it stays, which is harmless: orphanedOperation only acts on a record that
+	// belongs to the pending revision it inspects.
+	clearHelmOperationRecord(mg)
 
 	log.Debug("Installing composition package", "package", pkg.URL)
 
@@ -1202,9 +1225,16 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	var reconcileRes *helmconfig.ReconcileResult
+	// #461: record the starter pod just before a revision is written, as Observe does.
+	recordRevision := func(ctx context.Context) {
+		var rerr error
+		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
+			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
+		}
+	}
 	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, upgradeConfig(&helmconfig.ActionConfig{
+			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
 				ChartVersion:          pkg.Version,
 				ChartName:             pkg.Repo,
 				Username:              pkg.Auth.Username,
@@ -1214,7 +1244,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				PostRenderer:          postrenderLabels,
 				TakeOwnership:         true,
 				Timeout:               helmOperationTimeout, // #410
-			}))
+			}, recordRevision))
 			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {
@@ -1224,6 +1254,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 			return res.Release, nil
 		})
 	})
+	clearHelmOperationRecord(mg) // #461
 	if err != nil {
 		return fmt.Errorf("upgrading helm chart: %w", err)
 	}
@@ -1448,7 +1479,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// and retry); past it, roll back to clear the lock, then re-drive the uninstall cleanly below.
 	if rel.Status == helmconfig.StatusUninstalling {
 		stuckFor := time.Since(rel.Updated)
-		if stuckFor < pendingOperationGrace {
+		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn)) // #461, as in Observe
+		if orphan {
+			log.Info("Stuck uninstall was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+				"stuckFor", stuckFor.String(), "reason", why)
+		}
+		if stuckFor < pendingOperationGrace && !orphan {
 			log.Debug("Release uninstall in progress; waiting for it to settle before re-driving delete.",
 				"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
 			return fmt.Errorf("waiting for an in-flight uninstall of release %s to settle (stuck for %s)",
@@ -1456,11 +1492,16 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
-		if _, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
+		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+			return err
+		}
+		_, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
 			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
-		}); rerr != nil {
+		})
+		clearHelmOperationRecord(mg)
+		if rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
 	}
