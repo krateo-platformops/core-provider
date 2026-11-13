@@ -1,3 +1,13 @@
+---
+type: Decision
+title: "Controller audit records from the cdc and core-provider (AUDIT-4)"
+description: What the composition-dynamic-controller and core-provider record as controller audit records - populations, actors, record and exclusion rules, action literals, counters and coverage - as shipped in 2.13.86-2.13.94.
+resource: ghcr.io/krateo-platformops/composition-dynamic-controller
+tags: [design, audit, cdc, core-provider]
+status: implemented
+timestamp: 2026-11-13T00:00:00Z
+---
+
 # Controller audit records from the cdc and core-provider (core-provider#423, AUDIT-4)
 
 Status: **design of record**, measured against core-provider `main` at 22fbe70 (release 2.13.94).
