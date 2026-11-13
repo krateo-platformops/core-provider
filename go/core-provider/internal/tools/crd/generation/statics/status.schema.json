@@ -77,6 +77,25 @@
     "unreadableChildrenCount": {
       "type": "integer",
       "description": "How many managed children this controller's ServiceAccount was REFUSED a read of (HTTP 403). Non-zero is a gap in the generated RBAC, not a problem with the children; the child names are in the Ready condition message."
+    },
+    "helmOperation": {
+      "type": "object",
+      "description": "The helm operation this composition's controller is running, written BEFORE every helm write that can leave the release locked pending-* (install, upgrade, a reconcile's real upgrade, rollback, uninstall) and removed when the operation returns (#461). It exists so the next controller can tell an operation still IN FLIGHT from one whose starter DIED (killed at a version handover, OOM, node loss): helm labels both pending-* and never re-labels a crash, so without this the next controller waits the full pending grace (16m) before rolling back. It is acted on only when it provably belongs to the pending revision (startedAt just before the release's LastDeployed) and its startedBy pod is NotFound; anything else keeps the grace. NO DEFAULT: absent means no operation recorded.",
+      "properties": {
+        "phase": {
+          "type": "string",
+          "description": "install, upgrade, reconcile, rollback or uninstall."
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the controller recorded the operation, immediately before calling helm."
+        },
+        "startedBy": {
+          "type": "string",
+          "description": "The name of the controller pod that started it (POD_NAME, from the downward API)."
+        }
+      }
     }
   }
 }
