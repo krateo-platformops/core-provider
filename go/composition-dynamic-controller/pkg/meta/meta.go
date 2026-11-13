@@ -50,6 +50,15 @@ const (
 	// on it and it must not widen any informer's selector.
 	AnnotationKeyOriginVersion = "krateo.io/composition-origin-version"
 
+	// AnnotationKeyTeardown on a composition's managed CHILD changes when it is deleted at teardown
+	// (core-provider#482). Set to TeardownWithRelease, the child is not pre-deleted before helm
+	// uninstall (#108's drain): helm deletes it with the release, AFTER the release's pre-delete
+	// hooks. For a child the hooks still need, such as an ExternalSecret whose target Secret a
+	// pre-delete Job reads. Any other value is ignored.
+	AnnotationKeyTeardown = "krateo.io/teardown"
+	// TeardownWithRelease is AnnotationKeyTeardown's one recognised value.
+	TeardownWithRelease = "with-release"
+
 	// AnnotationKeyHelmReleaseName is helm's own ownership annotation, present on any object helm
 	// created or adopted. On a composition it means the composition was rendered as a child of
 	// ANOTHER release — the umbrella or a parent composition — rather than created directly.

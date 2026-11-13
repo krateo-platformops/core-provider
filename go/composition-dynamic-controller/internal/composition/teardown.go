@@ -3,7 +3,10 @@ package composition
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,9 +87,24 @@ func (h *handler) drainFinalizerBoundChildren(ctx context.Context, dyn dynamic.I
 			// Already gone (NotFound) or unreadable (Forbidden / no mapping): nothing to drain.
 			continue
 		}
-		if len(obj.GetFinalizers()) == 0 {
-			// No finalizer => deletes instantly, helm can handle it in its normal sweep. Crucially
-			// this is the branch the credential Secret takes, so we never pull it out early.
+		if obj.GetAnnotations()["helm.sh/resource-policy"] == "keep" {
+			// #482: helm never deletes a kept resource, so the drain must not either. Pre-deleting it
+			// would destroy exactly what the chart asked to keep beyond the release (openstack's root
+			// openstack-credential-identity-admin ExternalSecret carries keep).
+			continue
+		}
+		if obj.GetAnnotations()[compositionMeta.AnnotationKeyTeardown] == compositionMeta.TeardownWithRelease {
+			// #482: the chart says helm deletes this child with the release, after the pre-delete
+			// hooks. An ExternalSecret whose target Secret a hook reads carries ESO's finalizer, and
+			// pre-deleting it garbage-collected the Secret before the hook ran (osh-052, glance).
+			continue
+		}
+		if !hasProviderFinalizer(obj.GetFinalizers()) {
+			// No finalizer, or only Kubernetes' own protection finalizers => nothing for a provider
+			// to clean up first. A finalizer-free child deletes instantly in helm's sweep (crucially
+			// the credential Secret, so we never pull it out early). A protection finalizer such as
+			// kubernetes.io/pvc-protection only waits for a consumer that helm itself removes, so
+			// draining it could only ever wait out the grace (#482: 5 min on a PVC in use).
 			continue
 		}
 
@@ -136,4 +154,21 @@ func pendingIDs(pending []pendingChild) string {
 func waitingForChildrenErr(pending []pendingChild, waited time.Duration) error {
 	return fmt.Errorf("waiting for %d managed child(ren) to finalize before uninstalling (%s; waiting %s)",
 		len(pending), pendingIDs(pending), waited.Truncate(time.Second))
+}
+
+// hasProviderFinalizer reports whether finalizers include one that is not Kubernetes' own: a
+// provider's "I have work to do before I can go", the case #108's drain exists for. Kubernetes'
+// built-in finalizers (kubernetes.io/*, "kubernetes", "foregroundDeletion", "orphan") protect an
+// object while something else still uses it, or govern garbage collection; none of them finishes
+// before helm uninstall removes the object's consumers (#482).
+func hasProviderFinalizer(finalizers []string) bool {
+	for _, f := range finalizers {
+		switch {
+		case strings.HasPrefix(f, "kubernetes.io/"), f == "kubernetes", f == metav1.FinalizerDeleteDependents, f == metav1.FinalizerOrphanDependents:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
