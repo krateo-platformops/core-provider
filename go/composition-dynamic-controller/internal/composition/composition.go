@@ -1385,7 +1385,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Locate, not Get (#402): Delete never fetches the chart, so it must not need the chart's
 	// credentials. With Get, a composition whose passwordRef Secret was gone (a namespace teardown
 	// that removes it first, a rotation) could never finish deleting. The definition is still read:
-	// pkg.Version decides isVersionMigrationHandover below, and guessing it would uninstall a release
+	// pkg.DefinitionVersion decides isVersionMigrationHandover below, and guessing it would uninstall a release
 	// a version migration still shares.
 	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
 	if err != nil {
@@ -1625,7 +1625,8 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 //
 // It compares this CR's own version — taken from its apiVersion (mg.GroupVersionKind().Version,
 // e.g. "v0-1-7"), which is ALWAYS present and independent of any label — against the owning
-// CompositionDefinition's current chart version. That version is pkg.Version: the getter resolves
+// CompositionDefinition's current chart version. That version is pkg.DefinitionVersion (#461: not
+// pkg.Version, which for an older version's controller is its OWN chart): the getter resolves
 // the owning CD (via the definition-ref labels when present, else a robust namespace search that
 // tolerates label skew) and reads its spec.chart.version, so this check does NOT depend on the
 // krateo.io/composition-definition-* / composition-version labels being present. Normalizing the
@@ -1680,7 +1681,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 // be resolved the package getter fails UPSTREAM (Delete returns an error and is retried) rather
 // than reaching this check.
 func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info) bool {
-	if pkg == nil || pkg.Version == "" {
+	if pkg == nil || pkg.DefinitionVersion == "" {
 		return false
 	}
 	// A handover requires something to hand over TO, and only a parent-rendered composition has
@@ -1736,7 +1737,10 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 		return false
 	}
 	// Normalize the owning CD's semver chart version ("0.1.8") to the CR's version form ("v0-1-8").
-	cdVersion := "v" + strings.ReplaceAll(pkg.Version, ".", "-")
+	// The definition's CURRENT chart version, not the chart this controller renders (#461: an older
+	// version's controller renders its own version's chart, and comparing that would read every
+	// migration as a genuine delete).
+	cdVersion := "v" + strings.ReplaceAll(pkg.DefinitionVersion, ".", "-")
 	return cdVersion != crVersion
 }
 
