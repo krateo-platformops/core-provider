@@ -525,6 +525,25 @@ type CompositionDefinitionStatus struct {
 	// dropped from the list. Written by the definition's own reconciler, in Observe.
 	// +optional
 	ServedVersionsPendingPrune []PendingPrune `json:"servedVersionsPendingPrune,omitempty"`
+
+	// ServedVersionsHeld lists, per served version of this definition's CRD that is NOT prune-eligible
+	// (other than the current version and the storage version, which are never pruned), why it is
+	// held: another definition references it, instances carry its label, or a helm revision that helm
+	// will read names it (#471). Without it a held version was visible only in a log line, and
+	// servedVersionsPendingPrune read empty while a version stayed served indefinitely. Recomputed on
+	// every Observe; empty when nothing is held. Written by the definition's own reconciler.
+	// +optional
+	ServedVersionsHeld []HeldVersion `json:"servedVersionsHeld,omitempty"`
+}
+
+// HeldVersion is one served version the prune keeps, with the reason (#471).
+type HeldVersion struct {
+	// Version is the served version, e.g. v0-3-49; "*" when every version is held because an instance
+	// carries no usable version label (the prune then refuses to remove anything).
+	Version string `json:"version"`
+	// Reason is the prune's keep reason, as logged in "served-version prune evaluation", e.g.
+	// "release-revisions=1:[openstack/umbrella(rev 4, ...)]", "instances=3", "referenced".
+	Reason string `json:"reason"`
 }
 
 // PendingPrune is one served version waiting out the prune grace window (#454).

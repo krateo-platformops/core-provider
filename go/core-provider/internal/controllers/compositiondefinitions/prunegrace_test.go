@@ -131,3 +131,27 @@ func TestObservePruneDecision(t *testing.T) {
 		t.Error("with no eligible version Observe must report up to date")
 	}
 }
+
+// #471: the keep reasons reach the status as {version, reason}, "ALL" as "*", sorted; nothing held
+// is nil (no field written), so servedVersionsHeld is empty exactly when nothing is held.
+func TestHeldVersions(t *testing.T) {
+	got := heldVersions([]string{
+		"v0-3-49:release-revisions=1:[openstack/umbrella(rev 4, secret openstack/sh.helm.release.v1.umbrella.v4, kinds Glance)]",
+		"v0-3-47:instances=2",
+		"v0-3-48:referenced",
+	})
+	want := []compositiondefinitionsv1alpha1.HeldVersion{
+		{Version: "v0-3-47", Reason: "instances=2"},
+		{Version: "v0-3-48", Reason: "referenced"},
+		{Version: "v0-3-49", Reason: "release-revisions=1:[openstack/umbrella(rev 4, secret openstack/sh.helm.release.v1.umbrella.v4, kinds Glance)]"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("heldVersions = %+v\nwant %+v", got, want)
+	}
+	if all := heldVersions([]string{"ALL:unaccounted-instances=1:[ns/x]"}); len(all) != 1 || all[0].Version != "*" || all[0].Reason != "unaccounted-instances=1:[ns/x]" {
+		t.Errorf("ALL = %+v, want version * with the reason", all)
+	}
+	if heldVersions(nil) != nil {
+		t.Error("nothing held must be nil")
+	}
+}
