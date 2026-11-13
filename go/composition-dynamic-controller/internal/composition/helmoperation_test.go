@@ -72,21 +72,88 @@ func unboundedHelmConfigs(t *testing.T, src []byte) (unbounded []string, seen in
 
 func itoa(i int) string { return strconv.Itoa(i) }
 
-// #410. Every helm config literal in the handler is bounded.
+// #410. Every helm config literal in the handler is bounded. The literals live in composition.go
+// and, since #465 put both rollbacks behind one constructor, helmphase.go's rollbackConfig.
 func TestEveryHelmOperationIsBounded(t *testing.T) {
+	var unbounded []string
+	seen := 0
+	for _, file := range []string{"composition.go", "helmphase.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, n := unboundedHelmConfigs(t, src)
+		for _, x := range u {
+			unbounded = append(unbounded, file+":"+x)
+		}
+		seen += n
+	}
+	// Denominator: one uninstall and the ActionConfigs of Observe's reconcile, Create's
+	// install/upgrade and Update's reconcile (composition.go), and rollbackConfig's one RollbackConfig
+	// (helmphase.go). Fewer means a site moved out of these files and the guard no longer covers it.
+	if seen != 5 {
+		t.Errorf("found %d helm config literals in composition.go and helmphase.go, want 5; a site moved and is no longer checked", seen)
+	}
+	if len(unbounded) > 0 {
+		t.Errorf("helm configs without Timeout: helmOperationTimeout: %v. helm treats 0 as no deadline on hooks (#410)", unbounded)
+	}
+	// Both rollbacks (Observe's stuck-release recovery, Delete's) must build their config through
+	// rollbackConfig, the bounded literal counted above; a Rollback handed anything else would be
+	// outside the guard.
 	src, err := os.ReadFile("composition.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	unbounded, seen := unboundedHelmConfigs(t, src)
-	// Denominator: two rollbacks, one uninstall, and the ActionConfigs of Observe's reconcile,
-	// Create's install/upgrade and Update's reconcile. Fewer means a site moved out of this file
-	// and the guard no longer covers it.
-	if seen != 6 {
-		t.Errorf("found %d helm config literals in composition.go, want 6; a site moved and is no longer checked", seen)
+	if got, bypass := rollbacksThroughConstructor(t, src); got != 2 || len(bypass) > 0 {
+		t.Errorf("hc.Rollback calls whose config is rollbackConfig(...): %d, want 2; bypassing it: %v", got, bypass)
 	}
-	if len(unbounded) > 0 {
-		t.Errorf("helm configs without Timeout: helmOperationTimeout: %v. helm treats 0 as no deadline on hooks (#410)", unbounded)
+}
+
+// rollbacksThroughConstructor counts X.Rollback(ctx, name, rollbackConfig(...)) calls, and returns
+// the line of every Rollback whose config argument is anything else.
+func rollbacksThroughConstructor(t *testing.T, src []byte) (n int, bypass []string) {
+	t.Helper()
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, "src.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(f, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Rollback" || len(call.Args) != 3 {
+			return true
+		}
+		if c, ok := call.Args[2].(*ast.CallExpr); ok {
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "rollbackConfig" {
+				n++
+				return true
+			}
+		}
+		bypass = append(bypass, "line "+itoa(fs.Position(call.Pos()).Line))
+		return true
+	})
+	return n, bypass
+}
+
+// The constructor counter fires on a Rollback that bypasses it (control).
+func TestRollbacksThroughConstructorFiresOnABypass(t *testing.T) {
+	src := []byte(`package composition
+func f() {
+	_, _ = hc.Rollback(ctx, n, rollbackConfig(1))
+}`)
+	if got, bypass := rollbacksThroughConstructor(t, src); got != 1 || len(bypass) != 0 {
+		t.Errorf("got %d %v, want 1 and no bypass", got, bypass)
+	}
+	bypass := []byte(`package composition
+func f() {
+	_, _ = hc.Rollback(ctx, n, &helmconfig.RollbackConfig{ReleaseVersion: 1})
+}`)
+	if got, b := rollbacksThroughConstructor(t, bypass); got != 0 || len(b) != 1 {
+		t.Errorf("bypass: counted %d, reported %v; want 0 and one bypass", got, b)
 	}
 }
 

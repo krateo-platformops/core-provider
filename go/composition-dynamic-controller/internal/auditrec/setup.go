@@ -17,10 +17,9 @@ var namespacesGVR = schema.GroupVersionResource{Version: "v1", Resource: "namesp
 // Actor is the controller's principal, system:serviceaccount:<namespace>:<name>, or "" when either
 // is unset: an unknown actor is left for the emitter to mark, never guessed.
 func Actor(saNamespace, saName string) string {
-	if saNamespace == "" || saName == "" {
-		return ""
-	}
-	return "system:serviceaccount:" + saNamespace + ":" + saName
+	// audit's own rule (v0.12.0), so the rule lives in one place: "" when either is unset or not a
+	// valid Kubernetes name.
+	return audit.ServiceAccountActor(saNamespace, saName)
 }
 
 // New builds the cdc's Recorder for the compositions of resource (the plural): records go to the
