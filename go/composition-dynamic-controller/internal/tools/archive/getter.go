@@ -231,7 +231,15 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 	// definition's current spec.chart. The informer delivers instances at the controller's own
 	// version, so uns's version is it.
 	chart, err := chartForVersion(compositionDefinition, uns.GroupVersionKind().Version)
-	if err != nil {
+	switch {
+	case err == nil:
+	case !withCredentials && errors.Is(err, errNoChartForVersion):
+		// Locate (a composition's Delete, #402/#419) never fetches the chart: it needs the
+		// definition's identity and DefinitionVersion for the migration-handover check. A version
+		// with no recorded chart must not block a deletion, so the chart is left empty here; Get,
+		// which renders, still refuses.
+		g.logger.Debug("No chart recorded for this version; Locate does not need one", "compositionDefinitionName", compositionDefinition.GetName(), "version", uns.GroupVersionKind().Version)
+	default:
 		g.logger.Debug("Resolving the chart for this controller's version", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace(), "version", uns.GroupVersionKind().Version)
 		return nil, err
 	}
@@ -240,7 +248,7 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 		return nil, fmt.Errorf("resolving 'spec.chart.version': %w", err)
 	}
 	packageUrl, repo, packageVersion := chart.url, chart.repo, chart.version
-	if packageUrl == "" {
+	if packageUrl == "" && withCredentials {
 		return nil, fmt.Errorf("missing chart url in definition for '%v' in namespace: %s", gvr, uns.GetNamespace())
 	}
 	g.logger.Debug("PackageUrl for", "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace(), "url", packageUrl, "chartVersion", packageVersion, "from", chart.source)
@@ -489,20 +497,31 @@ type resolvedChart struct {
 }
 
 // chartForVersion returns the chart the controller of ownVersion renders (#461, Diego 2026-11-13):
-//   - the definition's current version (status.apiVersion), or no status yet: spec.chart, as before;
-//   - an older version: the chart core-provider recorded for it in status.managed.versionInfo when
+//   - the definition's DESIRED version, "v" + spec.chart.version with dots as dashes (the same
+//     normalisation the CRD versions and isVersionMigrationHandover use): spec.chart;
+//   - any other version: the chart core-provider recorded for it in status.managed.versionInfo when
 //     that version was current (helpers/status.UpdateVersionInfo writes it once and preserves it).
 //     So a retiring controller keeps rendering its own chart until migration relabels the instance,
 //     and never starts a new-chart upgrade it may be killed in the middle of; and an instance held on
-//     an old version under upgradePolicy Manual or Paused stays on its version's chart.
-//   - an older version with no recorded chart: errNoChartForVersion, never a guess.
+//     an old version under upgradePolicy Manual or Paused stays on its version's chart;
+//   - any other version with no recorded chart: errNoChartForVersion, never a guess.
+//
+// "Current" is decided from spec, never from status.apiVersion. 2.13.91 used status.apiVersion, and on
+// a bump spec.chart.version moves first while core-provider writes status.apiVersion only at the end
+// of its Update: on osh-052 status still said v0-3-52 for ~40s (a conflict retry included) while spec
+// said 0.3.53, so the retiring v0-3-52 controller took the "current" branch, rendered 0.3.53, and was
+// killed mid-upgrade (#461, recurrence on 2.13.91).
 //
 // Both shapes (ChartInfo and ChartInfoProps) carry the same JSON keys, read here once. The TLS flag is
 // insecureSkipVerifyTLS, the API's key; the getter used to read "insecureSkipTLSverify", which the CRD
 // does not have, so the flag was always false (#476).
 func chartForVersion(cd *unstructured.Unstructured, ownVersion string) (resolvedChart, error) {
-	current, _, verr := getChartVersionKind(cd)
-	if verr != nil || ownVersion == "" || ownVersion == current {
+	specVersion, _, err := unstructured.NestedString(cd.UnstructuredContent(), "spec", "chart", "version")
+	if err != nil {
+		return resolvedChart{}, fmt.Errorf("resolving 'spec.chart.version': %w", err)
+	}
+	desired := "v" + strings.ReplaceAll(specVersion, ".", "-")
+	if ownVersion == "" || ownVersion == desired {
 		m, _, err := unstructured.NestedMap(cd.UnstructuredContent(), "spec", "chart")
 		if err != nil {
 			return resolvedChart{}, fmt.Errorf("resolving 'spec.chart': %w", err)
@@ -524,7 +543,7 @@ func chartForVersion(cd *unstructured.Unstructured, ownVersion string) (resolved
 		}
 		return readChart(m, "status.managed.versionInfo["+ownVersion+"].chart")
 	}
-	return resolvedChart{}, fmt.Errorf("%w: version %s (current %s)", errNoChartForVersion, ownVersion, current)
+	return resolvedChart{}, fmt.Errorf("%w: version %s (desired %s)", errNoChartForVersion, ownVersion, desired)
 }
 
 func readChart(m map[string]any, source string) (resolvedChart, error) {
