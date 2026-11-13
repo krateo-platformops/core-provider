@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -145,6 +146,28 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	dyn dynamic.Interface,
 	newcrd *apiextensionsv1.CustomResourceDefinition,
 ) (schema.GroupVersionResource, error) {
+	return ApplyOrUpdateCRDDropping(ctx, cli, dyn, newcrd, nil)
+}
+
+// ApplyOrUpdateCRDDropping is ApplyOrUpdateCRD that also removes the served versions in drop IN THE
+// SAME spec write (#484).
+//
+// Why the same write. A CRD carries every served version's full schema, and etcd refuses a request
+// over its limit (default 1.5 MiB) with "etcdserver: request is too large". Adding the new version
+// first and pruning afterwards makes the CRD briefly carry the stale version, the current one AND the
+// new one: on krateo-057 that was three ~600 KB versions of installers, and every reconcile failed at
+// the add, before the prune could run. Removing the due versions in the write that adds keeps the CRD
+// at most the current version plus the new one.
+//
+// drop must not name the version being applied (a caller that computed that has a bug, and dropping
+// it would remove the version this call exists to add); it is refused. On the create path (no CRD
+// yet) there is nothing to drop.
+func ApplyOrUpdateCRDDropping(ctx context.Context,
+	cli client.Client,
+	dyn dynamic.Interface,
+	newcrd *apiextensionsv1.CustomResourceDefinition,
+	drop map[string]bool,
+) (schema.GroupVersionResource, error) {
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
@@ -153,6 +176,9 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		Group:    newcrd.Spec.Group,
 		Version:  newcrd.Spec.Versions[0].Name,
 		Resource: newcrd.Spec.Names.Plural,
+	}
+	if drop[gvr.Version] {
+		return gvr, fmt.Errorf("refusing to drop served version %q in the write that applies it", gvr.Version)
 	}
 
 	// Surface the per-instance served version (#234B) in kubectl. Done on newcrd before any path so
@@ -213,6 +239,16 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	if generation.RestoreOrphanedVacuum(crd) {
 		log.Debug("restored the vacuum storage version orphaned in status.storedVersions",
 			"crd", crd.Name, "storedVersions", crd.Status.StoredVersions)
+		mutated = true
+	}
+
+	// #484: the prune-due versions leave in this same spec write, BEFORE the append below, so the
+	// object the apiserver receives never carries them together with the new version.
+	if removed, derr := DropVersions(ctx, cli, crd, drop); derr != nil {
+		return gvr, derr
+	} else if removed {
+		log.Info("Dropping prune-due served versions in the CRD write that adds a version",
+			"crd", crd.Name, "adding", gvr.Version, "dropped", sortedKeys(drop))
 		mutated = true
 	}
 
@@ -381,4 +417,13 @@ func registerEventually() error {
 	}
 
 	return apiextensionsscheme.AddToScheme(clientsetscheme.Scheme)
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
