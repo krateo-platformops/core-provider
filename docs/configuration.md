@@ -34,8 +34,11 @@ from.
 Default **off**: with `otel.enabled=false` the deployments emit no `OTEL_*` env and
 are byte-identical (no churn). `otel.enabled=true` streams metrics+traces
 (`otel.tracing`) to `otel.endpoint` — empty endpoint defaults to the node-local
-daemonset collector in the release namespace. Logs are always-on structured JSON
-regardless. Metric catalog:
+daemonset collector in the release namespace. Logs are always-on structured JSON on
+stderr regardless; `otel.logs=true` (default false, needs `otel.enabled`) also exports them over
+OTLP, for core-provider and every CDC alike (`OTEL_LOGS_ENABLED`). Controller **audit records**
+travel only as OTLP logs, so with `otel.logs` off no audit record reaches `krateo_audit` (#469). An
+explicit `OTEL_LOGS_ENABLED` under `env` or `cdc.env` still wins for that one process. Metric catalog:
 [`go/core-provider/telemetry/metrics-reference.md`](../go/core-provider/telemetry/metrics-reference.md).
 
 ## `apiRefRBAC.*` — authorization for `apiRef` status projection
