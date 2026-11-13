@@ -23,6 +23,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 
 	"github.com/go-logr/logr"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/authn"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/composition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/health"
@@ -393,6 +394,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// core-provider#423: one controller audit record per child each helm operation writes, as this
+	// controller's ServiceAccount (the same one core-provider sets serviceAccountName from).
+	auditRecorder, err := auditrec.New(cfg, *resourceName, *saNamespace, *saName)
+	if err != nil {
+		log.Error(err, "Creating the audit recorder")
+		os.Exit(1)
+	}
+	if auditrec.Actor(*saNamespace, *saName) == "" {
+		log.Info("COMPOSITION_CONTROLLER_SA_NAME or _NAMESPACE is unset: audit records will name no actor and be marked incomplete")
+	}
+
 	handler := composition.NewHandler(&composition.HandlerOptions{
 		Kubeconfig:         cfg,
 		Pluralizer:         pluralizer,
@@ -405,6 +417,7 @@ func main() {
 		Mapper:             mapper,
 		StatusDataTemplate: statusMappings,
 		APIResolver:        apiResolver,
+		Audit:              auditRecorder,
 	})
 
 	opts := []builder.FuncOption{

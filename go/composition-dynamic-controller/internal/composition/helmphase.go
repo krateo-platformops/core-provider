@@ -1,8 +1,13 @@
 package composition
 
 import (
+	"context"
+	"github.com/krateo-platformops/audit"
 	"time"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
+
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 )
 
@@ -52,4 +57,72 @@ func helmPhaseErr(log logging.Logger, phase, release string, fn func() error) er
 		return struct{}{}, fn()
 	})
 	return err
+}
+
+// releaseOf is the release an Install or Upgrade left (plumbing v1.50.0 returns an OperationResult,
+// whose per-child verdicts are core-provider#423's to read), or nil when the operation returned
+// none: a failed operation can return a result with no release.
+func releaseOf(op *helmconfig.OperationResult) *helmconfig.Release {
+	if op == nil {
+		return nil
+	}
+	return op.Release
+}
+
+// reconcileRelease is the release a Reconcile left, or nil when it returned no result.
+func reconcileRelease(res *helmconfig.ReconcileResult) *helmconfig.Release {
+	if res == nil {
+		return nil
+	}
+	return res.Release
+}
+
+// childrenLeft is how many children rel names, for the audit's unchanged count
+// (core-provider#423), or -1 when it is not known: the operation failed, left no release, or its
+// manifest could not be decoded. -1 counts nothing unchanged rather than guessing.
+func childrenLeft(rel *helmconfig.Release, err error) int {
+	if err != nil || rel == nil {
+		return -1
+	}
+	all, _, derr := processor.DecodeMinRelease(rel)
+	if derr != nil {
+		return -1
+	}
+	return len(all)
+}
+
+// upgradeConfig is the UpgradeConfig every cdc helm upgrade and reconcile sends: ac, the history
+// bound, and the audit schema's authorization annotations and labels as content to the verdicts, so a
+// child write that changes only who may do what is recorded, not counted metadata_only
+// (core-provider#465). One constructor, so no site can omit them.
+func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
+	return &helmconfig.UpgradeConfig{
+		ActionConfig:       ac,
+		MaxHistory:         helmMaxHistory,
+		ContentAnnotations: audit.AuthorizationAnnotations(),
+		ContentLabels:      audit.AuthorizationLabels(),
+	}
+}
+
+// reconcileConfig is upgradeConfig for a Reconcile, plus the #461 hook: before Reconcile writes a
+// revision (and only then; a steady reconcile writes nothing), record which pod started it. The
+// recording is best-effort, as plumbing requires: a lost race is logged, never an abort.
+func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context)) *helmconfig.UpgradeConfig {
+	cfg := upgradeConfig(ac)
+	cfg.BeforeRevision = record
+	return cfg
+}
+
+// rollbackConfig is the RollbackConfig both cdc rollbacks send (Observe clearing a release stuck
+// past the grace, Delete clearing a stuck uninstall): the revision, the history and operation
+// bounds, and the authorization annotations and labels as content to the verdicts, as an upgrade
+// declares them (core-provider#465, plumbing v1.64.0).
+func rollbackConfig(revision int) *helmconfig.RollbackConfig {
+	return &helmconfig.RollbackConfig{
+		ReleaseVersion:     revision,
+		MaxHistory:         helmMaxHistory,
+		Timeout:            helmOperationTimeout,
+		ContentAnnotations: audit.AuthorizationAnnotations(),
+		ContentLabels:      audit.AuthorizationLabels(),
+	}
 }

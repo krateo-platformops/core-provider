@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"path/filepath"
 
 	definitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -117,7 +118,7 @@ func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface,
 	if err != nil {
 		return err
 	}
-	if err := kubecli.Apply(ctx, dyn, authnServiceAccountGVR, obj, applyOpts); err != nil {
+	if _, err := applyRecorded(ctx, dyn, authnServiceAccountGVR, authnServiceAccountGVK.Kind, auditrec.ActionAuthnMappingApply, obj, applyOpts); err != nil {
 		log.Error(err, "installing authn ServiceAccount mapping", "name", obj.GetName(), "namespace", obj.GetNamespace())
 		return fmt.Errorf("installing authn ServiceAccount mapping: %w", err)
 	}
@@ -166,7 +167,7 @@ func ensureSelfAuthnMapping(ctx context.Context, dyn dynamic.Interface, opts Dep
 	if err != nil {
 		return fmt.Errorf("rendering core-provider authn ServiceAccount mapping: %w", err)
 	}
-	if err := kubecli.Apply(ctx, dyn, authnServiceAccountGVR, obj, applyOpts); err != nil {
+	if _, err := applyRecorded(ctx, dyn, authnServiceAccountGVR, authnServiceAccountGVK.Kind, auditrec.ActionAuthnMappingApply, obj, applyOpts); err != nil {
 		log.Error(err, "installing core-provider authn ServiceAccount mapping", "name", obj.GetName(), "namespace", obj.GetNamespace())
 		return fmt.Errorf("installing core-provider authn ServiceAccount mapping: %w", err)
 	}

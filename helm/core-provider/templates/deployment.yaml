@@ -49,6 +49,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # core-provider#423: the audit actor, read by audit.ControllerActor() (audit v0.12.0).
+            # From the downward API, so it can't disagree with the identity the pod runs as.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
             {{- if include "core-provider.otlpNodeLocal" . }}
             # Node-local OTLP (core-provider.otlpNodeLocal): HOST_IP must come first, because $(VAR)
             # expands only variables defined earlier in this list. Not in the ConfigMap: envFrom

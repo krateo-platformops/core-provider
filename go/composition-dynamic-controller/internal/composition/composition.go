@@ -19,6 +19,7 @@ import (
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/rbacgen"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
@@ -140,6 +141,9 @@ type HandlerOptions struct {
 	// keyed ".api" projection source. nil disables apiRef resolution (the ".api" source is
 	// simply absent and api-dependent mappings degrade individually).
 	APIResolver APIResolver
+	// Audit writes one controller audit record per child each helm operation writes
+	// (core-provider#423). nil records nothing.
+	Audit *auditrec.Recorder
 }
 
 // APIResolver resolves the apiRef's RESTAction (via snowplow, under the CDC's authn identity)
@@ -161,6 +165,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		mapper:             opts.Mapper,
 		statusDataTemplate: opts.StatusDataTemplate,
 		apiResolver:        opts.APIResolver,
+		audit:              opts.Audit,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
 	}
 }
@@ -191,6 +196,8 @@ type handler struct {
 	chartInspectorUrl string
 	saName            string
 	saNamespace       string
+	// audit records every helm child write (core-provider#423); nil records nothing.
+	audit *auditrec.Recorder
 	// Feature flag to disable random suffix in Helm release names. This is highly discouraged as it can lead to release name collisions, but it can be useful for certain complex charts that have issues with long release names.
 	safeReleaseName bool
 	// statusDataTemplate are the declarative ${ jq } status projections from the
@@ -236,7 +243,22 @@ func (h *handler) helmCacheOpts() []helm.ClientOption {
 	if h.cachedClients == nil {
 		return nil
 	}
-	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients)}
+	return []helm.ClientOption{helm.WithCachedClients(h.cachedClients), helm.WithMappingRetryObserver(logMappingRetry)}
+}
+
+// logMappingRetry logs, at INFO, every reset-and-retry plumbing performs when an operation fails on
+// a REST-mapping miss ("no matches for kind"). A retry only exists with the shared cache, which is
+// why this rides helmCacheOpts and reaches every helm client the handler builds.
+//
+// WHY AT INFO. On a composition-version bump the installer umbrella failed on "no matches for kind"
+// for 1-3 reconciles, twice on krateo-057 on 2026-11-11, on the Upgrade path the retry covers, with
+// the CRD already serving the version when the render ran. Two causes fit and only this line tells
+// them apart: outcome "recovered" means the shared mapper was stale and the reset fixed it (this
+// controller's cache), and "missed_again" means discovery was re-read and the apiserver still did
+// not serve the kind. It fires only on a miss, so it costs nothing at steady state.
+func logMappingRetry(ctx context.Context, r helm.MappingRetry) {
+	xcontext.Logger(ctx).Info("helm REST-mapping miss: shared mapper reset and the operation retried",
+		"operation", r.Operation, "outcome", r.Outcome, "group", r.Group, "kind", r.Kind, "searchedVersions", r.Versions)
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (observation controller.ExternalObservation, rerr error) {
@@ -453,7 +475,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// (even rolling back a pending-rollback), which — with the reconcile re-enqueue cadence —
 		// produced an Upgrade<->Rollback thrash on the 319-resource portal composition.
 		pendingFor := time.Since(rel.Updated)
-		if pendingFor < pendingOperationGrace {
+		// #461: an operation whose starter pod no longer exists will never settle; clear it now
+		// instead of after the grace. Only on positive evidence (see orphanedOperation).
+		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn))
+		if orphan {
+			log.Info("Incomplete helm operation was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", why)
+		}
+		if pendingFor < pendingOperationGrace && !orphan {
 			// Recent => legitimately in flight. Do NOT roll it back and do NOT start a concurrent
 			// operation; report up-to-date so the in-flight op settles and the next reconcile proceeds.
 			log.Debug("Release operation in progress; waiting for it to settle.",
@@ -487,13 +516,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
+		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+			return controller.ExternalObservation{}, err
+		}
 		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-				MaxHistory:     helmMaxHistory,
-				ReleaseVersion: rel.Revision,
-				Timeout:        helmOperationTimeout,
-			})
+			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
+			return releaseOf(op), err
 		})
+		clearHelmOperationRecord(mg)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
 		}
@@ -594,28 +625,35 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		}, nil
 	}
 
+	// #461: record the starter pod just before a revision is written (never on a steady reconcile).
+	recordRevision := func(ctx context.Context) {
+		var rerr error
+		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
+			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
+		}
+	}
 	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
-		return hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-			ActionConfig: &helmconfig.ActionConfig{
-				ChartVersion:          pkg.Version,
-				ChartName:             pkg.Repo,
-				Username:              pkg.Auth.Username,
-				Password:              pkg.Auth.Password,
-				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-				Values:                values,
-				PostRenderer:          postrenderLabels,
-				// Adopt an existing child object rather than aborting the whole release when it carries
-				// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
-				// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
-				// into the current release: invalid ownership metadata") and wedges the platform (D1,
-				// 2026-07-08); with it the release takes ownership, self-healing the conflict.
-				TakeOwnership: true,
-				// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
-				Timeout: helmOperationTimeout,
-			},
-			MaxHistory: helmMaxHistory,
-		})
+		return hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
+			ChartVersion:          pkg.Version,
+			ChartName:             pkg.Repo,
+			Username:              pkg.Auth.Username,
+			Password:              pkg.Auth.Password,
+			InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+			Values:                values,
+			PostRenderer:          postrenderLabels,
+			// Adopt an existing child object rather than aborting the whole release when it carries
+			// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
+			// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
+			// into the current release: invalid ownership metadata") and wedges the platform (D1,
+			// 2026-07-08); with it the release takes ownership, self-healing the conflict.
+			TakeOwnership: true,
+			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
+			Timeout: helmOperationTimeout,
+		}, recordRevision))
 	})
+	clearHelmOperationRecord(mg) // #461: the operation returned; the next status write drops the record
+	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 	if err != nil {
 		retErr := fmt.Errorf("reconciling helm chart: %w", err)
 		condition := condition.Unavailable()
@@ -969,10 +1007,9 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release already exists, upgrading instead of installing.")
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-				return hc.Upgrade(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-					ActionConfig: actionConfig,
-					MaxHistory:   helmMaxHistory,
-				})
+				op, err := hc.Upgrade(ctx, releaseName, pkg.URL, upgradeConfig(actionConfig))
+				h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionUpgrade, op, childrenLeft(releaseOf(op), err)), mg)
+				return releaseOf(op), err
 			})
 		})
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
@@ -986,15 +1023,21 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	} else {
 		rel, err = helmPhase(log, "install", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
-				return hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
+				op, err := hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
 					ActionConfig: actionConfig,
 				})
+				h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionInstall, op, childrenLeft(releaseOf(op), err)), mg)
+				return releaseOf(op), err
 			})
 		})
 		if err != nil {
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
 	}
+	// #461: the install or upgrade returned; the status write below drops the operation record. On the
+	// error returns above it stays, which is harmless: orphanedOperation only acts on a record that
+	// belongs to the pending revision it inspects.
+	clearHelmOperationRecord(mg)
 
 	log.Debug("Installing composition package", "package", pkg.URL)
 
@@ -1182,22 +1225,28 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	var reconcileRes *helmconfig.ReconcileResult
+	// #461: record the starter pod just before a revision is written, as Observe does.
+	recordRevision := func(ctx context.Context) {
+		var rerr error
+		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
+			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
+		}
+	}
 	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, &helmconfig.UpgradeConfig{
-				ActionConfig: &helmconfig.ActionConfig{
-					ChartVersion:          pkg.Version,
-					ChartName:             pkg.Repo,
-					Username:              pkg.Auth.Username,
-					Password:              pkg.Auth.Password,
-					InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-					Values:                values,
-					PostRenderer:          postrenderLabels,
-					TakeOwnership:         true,
-					Timeout:               helmOperationTimeout, // #410
-				},
-				MaxHistory: helmMaxHistory,
-			})
+			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
+				ChartVersion:          pkg.Version,
+				ChartName:             pkg.Repo,
+				Username:              pkg.Auth.Username,
+				Password:              pkg.Auth.Password,
+				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+				Values:                values,
+				PostRenderer:          postrenderLabels,
+				TakeOwnership:         true,
+				Timeout:               helmOperationTimeout, // #410
+			}, recordRevision))
+			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -1205,6 +1254,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 			return res.Release, nil
 		})
 	})
+	clearHelmOperationRecord(mg) // #461
 	if err != nil {
 		return fmt.Errorf("upgrading helm chart: %w", err)
 	}
@@ -1366,7 +1416,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Locate, not Get (#402): Delete never fetches the chart, so it must not need the chart's
 	// credentials. With Get, a composition whose passwordRef Secret was gone (a namespace teardown
 	// that removes it first, a rotation) could never finish deleting. The definition is still read:
-	// pkg.Version decides isVersionMigrationHandover below, and guessing it would uninstall a release
+	// pkg.DefinitionVersion decides isVersionMigrationHandover below, and guessing it would uninstall a release
 	// a version migration still shares.
 	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
 	if err != nil {
@@ -1429,7 +1479,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// and retry); past it, roll back to clear the lock, then re-drive the uninstall cleanly below.
 	if rel.Status == helmconfig.StatusUninstalling {
 		stuckFor := time.Since(rel.Updated)
-		if stuckFor < pendingOperationGrace {
+		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn)) // #461, as in Observe
+		if orphan {
+			log.Info("Stuck uninstall was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+				"stuckFor", stuckFor.String(), "reason", why)
+		}
+		if stuckFor < pendingOperationGrace && !orphan {
 			log.Debug("Release uninstall in progress; waiting for it to settle before re-driving delete.",
 				"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
 			return fmt.Errorf("waiting for an in-flight uninstall of release %s to settle (stuck for %s)",
@@ -1437,13 +1492,16 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
-		if _, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			return hc.Rollback(ctx, releaseName, &helmconfig.RollbackConfig{
-				MaxHistory:     helmMaxHistory,
-				ReleaseVersion: rel.Revision,
-				Timeout:        helmOperationTimeout,
-			})
-		}); rerr != nil {
+		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+			return err
+		}
+		_, rerr := helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
+			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
+			return releaseOf(op), err
+		})
+		clearHelmOperationRecord(mg)
+		if rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
 	}
@@ -1481,10 +1539,13 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	err = helmPhaseErr(log, "uninstall", releaseName, func() error {
 		return helmMetrics.TimedUninstall(func() error {
-			return hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
+			op, err := hc.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{
 				IgnoreNotFound: true,
 				Timeout:        helmOperationTimeout,
 			})
+			// An uninstall leaves no release, so no child is counted unchanged (-1).
+			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionUninstall, op, -1), mg)
+			return err
 		})
 	})
 	if err != nil {
@@ -1605,7 +1666,8 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 //
 // It compares this CR's own version — taken from its apiVersion (mg.GroupVersionKind().Version,
 // e.g. "v0-1-7"), which is ALWAYS present and independent of any label — against the owning
-// CompositionDefinition's current chart version. That version is pkg.Version: the getter resolves
+// CompositionDefinition's current chart version. That version is pkg.DefinitionVersion (#461: not
+// pkg.Version, which for an older version's controller is its OWN chart): the getter resolves
 // the owning CD (via the definition-ref labels when present, else a robust namespace search that
 // tolerates label skew) and reads its spec.chart.version, so this check does NOT depend on the
 // krateo.io/composition-definition-* / composition-version labels being present. Normalizing the
@@ -1660,7 +1722,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 // be resolved the package getter fails UPSTREAM (Delete returns an error and is retried) rather
 // than reaching this check.
 func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info) bool {
-	if pkg == nil || pkg.Version == "" {
+	if pkg == nil || pkg.DefinitionVersion == "" {
 		return false
 	}
 	// A handover requires something to hand over TO, and only a parent-rendered composition has
@@ -1716,7 +1778,10 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 		return false
 	}
 	// Normalize the owning CD's semver chart version ("0.1.8") to the CR's version form ("v0-1-8").
-	cdVersion := "v" + strings.ReplaceAll(pkg.Version, ".", "-")
+	// The definition's CURRENT chart version, not the chart this controller renders (#461: an older
+	// version's controller renders its own version's chart, and comparing that would read every
+	// migration as a genuine delete).
+	cdVersion := "v" + strings.ReplaceAll(pkg.DefinitionVersion, ".", "-")
 	return cdVersion != crVersion
 }
 

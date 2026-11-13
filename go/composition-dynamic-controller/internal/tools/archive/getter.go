@@ -33,8 +33,16 @@ type Info struct {
 	// URL of the helm chart package that is being requested.
 	URL string `json:"url"`
 
-	// Version of the chart release.
+	// Version of the chart release to RENDER: the chart recorded for the requesting controller's own
+	// version (#461). For the controller of the definition's current version it is spec.chart.version.
 	Version string `json:"version,omitempty"`
+
+	// DefinitionVersion is the CompositionDefinition's CURRENT spec.chart.version, whichever
+	// controller asks. It differs from Version only for a controller of an older version, and it is
+	// what isVersionMigrationHandover compares against: a retiring controller seeing an instance leave
+	// its selector must recognise the move to the CURRENT version, and comparing its own chart
+	// instead would read a migration as a genuine delete and uninstall (#461).
+	DefinitionVersion string `json:"definitionVersion,omitempty"`
 
 	// Repo is the repository name.
 	Repo string `json:"repo,omitempty"`
@@ -219,41 +227,33 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 		}
 	}
 
-	packageUrl, ok, err := unstructured.NestedString(compositionDefinition.UnstructuredContent(), "spec", "chart", "url")
-	if err != nil {
-		g.logger.Debug("Failed to resolve 'status.packageUrl'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
+	// #461 (Diego, 2026-11-13): render the chart recorded for THIS controller's version, not the
+	// definition's current spec.chart. The informer delivers instances at the controller's own
+	// version, so uns's version is it.
+	chart, err := chartForVersion(compositionDefinition, uns.GroupVersionKind().Version)
+	switch {
+	case err == nil:
+	case !withCredentials && errors.Is(err, errNoChartForVersion):
+		// Locate (a composition's Delete, #402/#419) never fetches the chart: it needs the
+		// definition's identity and DefinitionVersion for the migration-handover check. A version
+		// with no recorded chart must not block a deletion, so the chart is left empty here; Get,
+		// which renders, still refuses.
+		g.logger.Debug("No chart recorded for this version; Locate does not need one", "compositionDefinitionName", compositionDefinition.GetName(), "version", uns.GroupVersionKind().Version)
+	default:
+		g.logger.Debug("Resolving the chart for this controller's version", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace(), "version", uns.GroupVersionKind().Version)
 		return nil, err
 	}
-	if !ok {
-		return nil,
-			fmt.Errorf("missing 'status.packageUrl' in definition for '%v' in namespace: %s", gvr, uns.GetNamespace())
-	}
-
-	g.logger.Debug("PackageUrl for", "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace(), "url", packageUrl)
-
-	packageVersion, _, err := unstructured.NestedString(compositionDefinition.UnstructuredContent(), "spec", "chart", "version")
+	definitionVersion, _, err := unstructured.NestedString(compositionDefinition.UnstructuredContent(), "spec", "chart", "version")
 	if err != nil {
-		g.logger.Debug("Failed to resolve 'spec.chart.version'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
-		return nil, err
+		return nil, fmt.Errorf("resolving 'spec.chart.version': %w", err)
 	}
-	repo, _, err := unstructured.NestedString(compositionDefinition.UnstructuredContent(), "spec", "chart", "repo")
-	if err != nil {
-		g.logger.Debug("Failed to resolve 'spec.chart.repo'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
-		return nil, err
+	packageUrl, repo, packageVersion := chart.url, chart.repo, chart.version
+	if packageUrl == "" && withCredentials {
+		return nil, fmt.Errorf("missing chart url in definition for '%v' in namespace: %s", gvr, uns.GetNamespace())
 	}
+	g.logger.Debug("PackageUrl for", "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace(), "url", packageUrl, "chartVersion", packageVersion, "from", chart.source)
 
-	username, _, err := unstructured.NestedString(compositionDefinition.UnstructuredContent(), "spec", "chart", "credentials", "username")
-	if err != nil {
-		g.logger.Debug("Failed to resolve 'spec.chart.credentials.username'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
-		return nil, err
-	}
-
-	passwordRef, _, err := unstructured.NestedStringMap(compositionDefinition.UnstructuredContent(), "spec", "chart", "credentials", "passwordRef")
-	if err != nil {
-		g.logger.Debug("Failed to resolve 'spec.chart.credentials.passwordRef'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
-		return nil, err
-	}
-
+	username, passwordRef := chart.username, chart.passwordRef
 	var password string
 	if passwordRef != nil && withCredentials {
 		password, err = GetSecret(context.Background(), g.dynamicClient, SecretKeySelector{
@@ -262,15 +262,13 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 			Key:       passwordRef["key"],
 		})
 		if err != nil {
-			g.logger.Debug("Failed to resolve secret", "error", err.Error(), "compositionDefinitionName", passwordRef["compositionDefinitionName"], "compositionDefinitionNamespace", passwordRef["compositionDefinitionNamespace"])
+			// The definition's identity, not the passwordRef: the error already names the Secret it could
+			// not read, and nothing derived from a credential reference belongs in a log line.
+			g.logger.Debug("Failed to resolve the chart registry credentials", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
 			return nil, err
 		}
 	}
-	insecureSkipTLSverify, _, err := unstructured.NestedBool(compositionDefinition.UnstructuredContent(), "spec", "chart", "insecureSkipTLSverify")
-	if err != nil {
-		g.logger.Debug("Failed to resolve 'spec.chart.insecureSkipTLSverify'", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
-		return nil, err
-	}
+	insecureSkipTLSverify := chart.insecureSkipVerifyTLS
 
 	compositionDefinitionGVR, err := g.pluralizer.GVKtoGVR(compositionDefinition.GroupVersionKind())
 	if err != nil {
@@ -281,6 +279,7 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 	return &Info{
 		URL:                   packageUrl,
 		Version:               packageVersion,
+		DefinitionVersion:     definitionVersion,
 		Repo:                  repo,
 		Auth:                  authOrNil(withCredentials, username, password),
 		InsecureSkipTLSverify: insecureSkipTLSverify,
@@ -483,4 +482,90 @@ func authOrNil(withCredentials bool, username, password string) *Auth {
 		return nil
 	}
 	return &Auth{Username: username, Password: password}
+}
+
+// errNoChartForVersion: the definition records no chart for the requesting controller's version. A
+// controller must not render some OTHER version's chart in its place (#461), so this is an error.
+var errNoChartForVersion = errors.New("the composition definition records no chart for this controller's version")
+
+// resolvedChart is the chart a controller renders, from spec.chart or from the version's record.
+type resolvedChart struct {
+	url, version, repo, username string
+	passwordRef                  map[string]string
+	insecureSkipVerifyTLS        bool
+	source                       string // "spec.chart" or "status.managed.versionInfo[<version>].chart"
+}
+
+// chartForVersion returns the chart the controller of ownVersion renders (#461, Diego 2026-11-13):
+//   - the definition's DESIRED version, "v" + spec.chart.version with dots as dashes (the same
+//     normalisation the CRD versions and isVersionMigrationHandover use): spec.chart;
+//   - any other version: the chart core-provider recorded for it in status.managed.versionInfo when
+//     that version was current (helpers/status.UpdateVersionInfo writes it once and preserves it).
+//     So a retiring controller keeps rendering its own chart until migration relabels the instance,
+//     and never starts a new-chart upgrade it may be killed in the middle of; and an instance held on
+//     an old version under upgradePolicy Manual or Paused stays on its version's chart;
+//   - any other version with no recorded chart: errNoChartForVersion, never a guess.
+//
+// "Current" is decided from spec, never from status.apiVersion. 2.13.91 used status.apiVersion, and on
+// a bump spec.chart.version moves first while core-provider writes status.apiVersion only at the end
+// of its Update: on osh-052 status still said v0-3-52 for ~40s (a conflict retry included) while spec
+// said 0.3.53, so the retiring v0-3-52 controller took the "current" branch, rendered 0.3.53, and was
+// killed mid-upgrade (#461, recurrence on 2.13.91).
+//
+// Both shapes (ChartInfo and ChartInfoProps) carry the same JSON keys, read here once. The TLS flag is
+// insecureSkipVerifyTLS, the API's key; the getter used to read "insecureSkipTLSverify", which the CRD
+// does not have, so the flag was always false (#476).
+func chartForVersion(cd *unstructured.Unstructured, ownVersion string) (resolvedChart, error) {
+	specVersion, _, err := unstructured.NestedString(cd.UnstructuredContent(), "spec", "chart", "version")
+	if err != nil {
+		return resolvedChart{}, fmt.Errorf("resolving 'spec.chart.version': %w", err)
+	}
+	desired := "v" + strings.ReplaceAll(specVersion, ".", "-")
+	if ownVersion == "" || ownVersion == desired {
+		m, _, err := unstructured.NestedMap(cd.UnstructuredContent(), "spec", "chart")
+		if err != nil {
+			return resolvedChart{}, fmt.Errorf("resolving 'spec.chart': %w", err)
+		}
+		return readChart(m, "spec.chart")
+	}
+	infos, _, err := unstructured.NestedSlice(cd.UnstructuredContent(), "status", "managed", "versionInfo")
+	if err != nil {
+		return resolvedChart{}, fmt.Errorf("resolving 'status.managed.versionInfo': %w", err)
+	}
+	for _, it := range infos {
+		vi, ok := it.(map[string]any)
+		if !ok || vi["version"] != ownVersion {
+			continue
+		}
+		m, ok := vi["chart"].(map[string]any)
+		if !ok || m == nil {
+			break
+		}
+		return readChart(m, "status.managed.versionInfo["+ownVersion+"].chart")
+	}
+	return resolvedChart{}, fmt.Errorf("%w: version %s (desired %s)", errNoChartForVersion, ownVersion, desired)
+}
+
+func readChart(m map[string]any, source string) (resolvedChart, error) {
+	c := resolvedChart{source: source}
+	var err error
+	if c.url, _, err = unstructured.NestedString(m, "url"); err != nil {
+		return c, fmt.Errorf("%s.url: %w", source, err)
+	}
+	if c.version, _, err = unstructured.NestedString(m, "version"); err != nil {
+		return c, fmt.Errorf("%s.version: %w", source, err)
+	}
+	if c.repo, _, err = unstructured.NestedString(m, "repo"); err != nil {
+		return c, fmt.Errorf("%s.repo: %w", source, err)
+	}
+	if c.username, _, err = unstructured.NestedString(m, "credentials", "username"); err != nil {
+		return c, fmt.Errorf("%s.credentials.username: %w", source, err)
+	}
+	if c.passwordRef, _, err = unstructured.NestedStringMap(m, "credentials", "passwordRef"); err != nil {
+		return c, fmt.Errorf("%s.credentials.passwordRef: %w", source, err)
+	}
+	if c.insecureSkipVerifyTLS, _, err = unstructured.NestedBool(m, "insecureSkipVerifyTLS"); err != nil {
+		return c, fmt.Errorf("%s.insecureSkipVerifyTLS: %w", source, err)
+	}
+	return c, nil
 }

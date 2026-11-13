@@ -155,3 +155,47 @@ func TestLocateFindsADefinitionWithNoStatusYet(t *testing.T) {
 		t.Error("Locate accepted a definition whose status.apiVersion is malformed; only an UNSET status may be trusted")
 	}
 }
+
+// #461: Locate (a composition's Delete) never fetches the chart, so an instance of a version the
+// definition has no chart record for must still be located: Delete needs only the definition's
+// identity and DefinitionVersion (the migration-handover check). Get, which renders, refuses: the
+// control.
+func TestLocateDoesNotNeedAChartRecord(t *testing.T) {
+	cd := &unstructured.Unstructured{}
+	cd.SetAPIVersion("core.krateo.io/v1alpha1")
+	cd.SetKind("CompositionDefinition")
+	cd.SetName("fireworks-app")
+	cd.SetNamespace("demo-system")
+	_ = unstructured.SetNestedField(cd.Object, "oci://registry.example/charts/fireworks-app", "spec", "chart", "url")
+	_ = unstructured.SetNestedField(cd.Object, "2.0.5", "spec", "chart", "version")
+	_ = unstructured.SetNestedField(cd.Object, "composition.krateo.io/v2-0-5", "status", "apiVersion")
+	_ = unstructured.SetNestedField(cd.Object, "FireworksApp", "status", "kind")
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		cdGVR: "CompositionDefinitionList",
+	}, cd)
+	g := &dynamicGetter{dynamicClient: dyn, logger: logging.NewNopLogger(), pluralizer: locatePluralizer{}}
+
+	comp := &unstructured.Unstructured{}
+	comp.SetAPIVersion("composition.krateo.io/v2-0-4") // an older version, with no record on the definition
+	comp.SetKind("FireworksApp")
+	comp.SetName("probe")
+	comp.SetNamespace("demo-system")
+	comp.SetLabels(map[string]string{
+		compositionMeta.CompositionDefinitionGroupLabel:     cdGVR.Group,
+		compositionMeta.CompositionDefinitionVersionLabel:   cdGVR.Version,
+		compositionMeta.CompositionDefinitionResourceLabel:  cdGVR.Resource,
+		compositionMeta.CompositionDefinitionNameLabel:      "fireworks-app",
+		compositionMeta.CompositionDefinitionNamespaceLabel: "demo-system",
+		compositionMeta.CompositionVersionLabel:             "v2-0-4",
+	})
+	if _, err := g.Get(comp); err == nil {
+		t.Fatal("control: Get rendered an older version that has no chart record; it must refuse")
+	}
+	info, err := g.Locate(comp)
+	if err != nil {
+		t.Fatalf("Locate failed for a version with no chart record, which would block the composition's deletion: %v", err)
+	}
+	if info.DefinitionVersion != "2.0.5" || info.CompositionDefinitionInfo == nil || info.CompositionDefinitionInfo.Name != "fireworks-app" {
+		t.Errorf("Locate = DefinitionVersion %q, definition %+v; want 2.0.5 and demo-system/fireworks-app", info.DefinitionVersion, info.CompositionDefinitionInfo)
+	}
+}

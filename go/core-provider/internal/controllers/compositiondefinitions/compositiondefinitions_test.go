@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -400,15 +401,16 @@ func TestController(t *testing.T) {
 				},
 				3*time.Minute,
 				func(cd *v1alpha1.CompositionDefinition) bool {
-					// VersionInfo is a projection of the live CRD (#234A): the served-version prune
-					// drops the stale old version from BOTH the CRD and VersionInfo, so after the
-					// 2.0.3 -> 2.0.4 upgrade it settles at 2 ([<new> (served), vacuum (storage)]),
-					// not the old append-only 3. Waiting on the settled 2 also skips the transient
-					// pre-prune 3, which never coincides with Ready=Available.
+					// #454: after the 2.0.3 -> 2.0.4 upgrade the old version becomes prune-eligible,
+					// but it is pruned only after the grace window. So the definition settles Ready
+					// on the new version with the OLD one waiting in servedVersionsPendingPrune, and
+					// the CRD still serving it (asserted below).
 					return cd.GetCondition(rtv1.TypeReady).Reason == rtv1.ReasonAvailable &&
-						len(cd.Status.Managed.VersionInfo) == 2 &&
 						slices.ContainsFunc(cd.Status.Managed.VersionInfo, func(v v1alpha1.VersionDetail) bool {
 							return v.Version == newVersionNormalized
+						}) &&
+						slices.ContainsFunc(cd.Status.ServedVersionsPendingPrune, func(p v1alpha1.PendingPrune) bool {
+							return p.Version == oldVersionNormalized
 						})
 				},
 			)
@@ -441,16 +443,32 @@ func TestController(t *testing.T) {
 				})
 			}
 
-			// The served-version prune (#103) removes the now-stale old version once nothing
-			// references it (no other CompositionDefinition is on it and no Composition instance
-			// carries its version label), so after the 2.0.3 -> 2.0.4 upgrade the CRD converges to
-			// [vacuum (storage), <new> (served)] — the old version is dropped. The prune is driven
-			// from Observe and applied over several reconciles, so poll the CRD until it converges.
-			//
-			// NOTE: Status.Managed.VersionInfo is a projection of the live CRD (#234A) — the pruned
-			// version is dropped from it too, so it settles at 2 in lockstep with the CRD (this is
-			// what the watcher condition above waits for).
-			deadline := time.Now().Add(2 * time.Minute)
+			// #454, the window holding, observed on a real controller: the old version is
+			// prune-eligible (it is in servedVersionsPendingPrune) and still SERVED.
+			if err = r.Get(ctx, crdName, "", &crd); err != nil {
+				t.Fatal(err)
+			}
+			if !hasVersion(oldVersionNormalized) {
+				t.Fatalf("#454: the old version %s was pruned inside its grace window; got %v", oldVersionNormalized, crd.Spec.Versions)
+			}
+
+			// Let the window elapse without waiting 5 minutes: backdate the version's clock in the
+			// definition's status, the state servedVersionPruneGrace would produce. The controller
+			// reads the record from status, so its next reconcile finds the version due and prunes it.
+			// Its own status writes carry the resourceVersion, so they cannot overwrite this patch
+			// without re-reading it first.
+			backdate := fmt.Sprintf(`{"status":{"servedVersionsPendingPrune":[{"version":%q,"eligibleSince":%q}]}}`,
+				oldVersionNormalized, time.Now().Add(-servedVersionPruneGrace-time.Minute).UTC().Format(time.RFC3339))
+			if _, err := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig()).Resource(schema.GroupVersionResource{
+				Group: v1alpha1.Group, Version: v1alpha1.Version, Resource: "compositiondefinitions",
+			}).Namespace(namespace).Patch(ctx, res.Name, types.MergePatchType, []byte(backdate), metav1.PatchOptions{}, "status"); err != nil {
+				t.Fatalf("backdating the prune clock: %v", err)
+			}
+
+			// The served-version prune (#103) then removes the old version, so the CRD converges to
+			// [vacuum (storage), <new> (served)]. It is driven from Observe and applied over several
+			// reconciles, so poll the CRD until it converges.
+			deadline := time.Now().Add(3 * time.Minute)
 			for {
 				if err = r.Get(ctx, crdName, "", &crd); err != nil {
 					t.Fatal(err)

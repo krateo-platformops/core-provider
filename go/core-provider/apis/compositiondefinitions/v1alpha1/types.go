@@ -515,6 +515,43 @@ type CompositionDefinitionStatus struct {
 	// definition's main reconciler reads it to report Ready and ControllerActive.
 	// +optional
 	ScaleToZero *ScaleToZeroStatus `json:"scaleToZero,omitempty"`
+
+	// ServedVersionsPendingPrune records, per served version of this definition's CRD that has
+	// become prune-eligible (no definition references it, no instance is labelled with it, no stored
+	// helm revision names it), when it first became so (#454). A version is pruned only after it has
+	// stayed eligible for the grace window, so a render that read the CRD before the prune never
+	// looks the version up after it. Each version has its own clock: a batch released at once by a
+	// helm history rotation is N independent windows. A version that stops being eligible is
+	// dropped from the list. Written by the definition's own reconciler, in Observe.
+	// +optional
+	ServedVersionsPendingPrune []PendingPrune `json:"servedVersionsPendingPrune,omitempty"`
+
+	// ServedVersionsHeld lists, per served version of this definition's CRD that is NOT prune-eligible
+	// (other than the current version and the storage version, which are never pruned), why it is
+	// held: another definition references it, instances carry its label, or a helm revision that helm
+	// will read names it (#471). Without it a held version was visible only in a log line, and
+	// servedVersionsPendingPrune read empty while a version stayed served indefinitely. Recomputed on
+	// every Observe; empty when nothing is held. Written by the definition's own reconciler.
+	// +optional
+	ServedVersionsHeld []HeldVersion `json:"servedVersionsHeld,omitempty"`
+}
+
+// HeldVersion is one served version the prune keeps, with the reason (#471).
+type HeldVersion struct {
+	// Version is the served version, e.g. v0-3-49; "*" when every version is held because an instance
+	// carries no usable version label (the prune then refuses to remove anything).
+	Version string `json:"version"`
+	// Reason is the prune's keep reason, as logged in "served-version prune evaluation", e.g.
+	// "release-revisions=1:[openstack/umbrella(rev 4, ...)]", "instances=3", "referenced".
+	Reason string `json:"reason"`
+}
+
+// PendingPrune is one served version waiting out the prune grace window (#454).
+type PendingPrune struct {
+	// Version is the served version, e.g. v0-1-42.
+	Version string `json:"version"`
+	// EligibleSince is when this reconciler first saw the version prune-eligible.
+	EligibleSince metav1.Time `json:"eligibleSince"`
 }
 
 // ScaleToZeroStatus records what provider-runtime's scaletozero helper last decided for this

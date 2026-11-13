@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"strings"
 
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
@@ -101,6 +102,7 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 			if !strings.HasSuffix(obj.GetName(), DerivedRBACNameSuffix) {
 				continue
 			}
+			before := obj.DeepCopy() // core-provider#423: the binding this re-subject replaces
 
 			rewritten, err := rewriteServiceAccountSubject(&obj, oldSA, newSA, opts.Namespace, newNamespace)
 			if err != nil {
@@ -112,8 +114,11 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 				continue
 			}
 
-			if _, err := opts.DynamicClient.Resource(kind.gvr).Namespace(obj.GetNamespace()).
-				Update(ctx, &obj, metav1.UpdateOptions{}); err != nil {
+			after, err := opts.DynamicClient.Resource(kind.gvr).Namespace(obj.GetNamespace()).
+				Update(ctx, &obj, metav1.UpdateOptions{})
+			auditrec.RecordUpdate(ctx, auditrec.ActionRBACApply,
+				auditrec.Target{GVR: kind.gvr, Kind: obj.GetKind(), Namespace: obj.GetNamespace(), Name: obj.GetName(), Namespaces: auditrec.LabelsFrom(opts.DynamicClient)}, before, after, err, false)
+			if err != nil {
 				// Keep going: one composition's binding failing to update must not leave the rest
 				// of the fleet stale. The joined error fails the reconcile, which retries the sweep.
 				errs = append(errs, fmt.Errorf("re-subjecting %s %s/%s: %w",

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,8 @@ type Options struct {
 	// controller's absent ServiceAccount (#414). False (the default) is a dry run: they are found and
 	// logged, and nothing is deleted.
 	RemoveDanglingRBAC bool
+	// Audit records the controller's writes (core-provider#423); nil records nothing.
+	Audit *auditrec.Recorder
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -167,6 +170,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			pluralizer: o.Pluralizer,
 
 			removeDanglingRBAC: o.RemoveDanglingRBAC,
+			audit:              o.Audit,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -340,6 +344,7 @@ type connector struct {
 	pluralizer pluralizerlib.PluralizerInterface
 
 	removeDanglingRBAC bool
+	audit              *auditrec.Recorder
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -351,6 +356,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
 	ext := &external{
+		audit:       c.audit,
 		mgmt:        c.kube,
 		mgmtDynamic: c.dynamic,
 		apiReader:   c.apiReader,
@@ -387,6 +393,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 }
 
 type external struct {
+	// audit records this reconcile's writes (core-provider#423); nil records nothing.
+	audit *auditrec.Recorder
 	// mgmt is the management-cluster client: it holds the CompositionDefinition
 	// resource, the chart/credentials secrets, and is where status is persisted.
 	mgmt client.Client
@@ -626,7 +634,10 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 			continue // an instance still carries this version's label
 		}
 		// A HELM RELEASE REVISION may still NAME this version in its stored manifest (#305), and
-		// neither term above can see that.
+		// neither term above can see that. Only a revision helm will read counts: each release's
+		// latest and last deployed revision (#471, Diego 2026-11-13); a superseded older one is read
+		// only by a manual `helm rollback`, and counting it held every old version until history
+		// rotated. See package releaseref.
 		//
 		// A PARENT composition's chart renders CHILD composition CRs, so the parent's stored
 		// manifest names the child's served version. helm must read that manifest back to compute a
@@ -679,17 +690,22 @@ func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupV
 // right after a new version is appended the apiserver churns the CRD status (acceptedNames /
 // per-version established conditions) and a non-retrying Update would lose the resourceVersion race.
 // Driven to completion by the matching check in Observe.
-func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) error {
-	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gvr, selfName, selfNamespace)
+func (e *external) pruneStaleServedVersions(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) error {
+	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace)
 	if err != nil {
 		return err
 	}
+	cr.Status.ServedVersionsHeld = heldVersions(kept) // #471, as Observe records it
+	// #454: only a version that has stayed eligible for the grace window is pruned; the rest wait in
+	// status.servedVersionsPendingPrune, each on its own clock (prunesDue).
+	due := applyPruneGrace(cr, prunable, time.Now())
 	// INFO (not Debug) so the prune decision is visible in the engine's default log level (#103).
 	e.log.Info("served-version prune evaluation", "gvr", gvr.String(), "current", gvk.Version,
-		"prunable", prunable, "kept", kept)
-	if len(prunable) == 0 {
+		"prunable", prunable, "due", due, "grace", servedVersionPruneGrace.String(), "kept", kept)
+	if len(due) == 0 {
 		return nil
 	}
+	prunable = due
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
 		return fmt.Errorf("fetching CRD for prune: %w", err)
@@ -720,7 +736,7 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.Grou
 	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
-	if err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
@@ -856,6 +872,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if !ok {
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 	// core-provider's own observe span, a child of provider-runtime's reconcile/observe spans since
 	// v1.14 (#395): the runtime opens the Server-kind root (linked to any krateo.io/traceparent), so
 	// this one is Internal. The log handler bridges the active span's trace_id/span_id onto records
@@ -1235,11 +1253,21 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// after migration completes (its gates key off stale COMPOSITIONS, status hash and digest, never
 	// the set of stale served VERSIONS) before Update ever prunes, so stale served versions would
 	// accumulate forever (#103). Same predicate on both sides => no Observe<->Update ping-pong.
-	if prunable, _, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace); perr != nil {
+	//
+	// #454: and only once a version has stayed eligible for the grace window. Observe is where each
+	// version's clock starts (it runs every poll, and the runtime persists status on the up-to-date
+	// path too), so a young version leaves the definition up to date and is pruned on a later pass.
+	// Update applies the SAME prunesDue, so the two sides still agree.
+	prunable, kept, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace)
+	if perr != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
-	} else if len(prunable) > 0 {
-		log.Debug("Stale served versions pending prune", "versions", prunable)
-		markUpdatePending(cr, fmt.Sprintf("stale served versions pending prune: %v", prunable))
+	}
+	// #471: what is held, and why, on the definition itself, beside the versions waiting out the grace.
+	cr.Status.ServedVersionsHeld = heldVersions(kept)
+	if pending, pruneDue, msg := observePruneDecision(cr, prunable, time.Now()); pending {
+		log.Debug("Stale served versions due for prune", "versions", pruneDue,
+			"waiting", len(cr.Status.ServedVersionsPendingPrune)-len(pruneDue))
+		markUpdatePending(cr, msg)
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1444,7 +1472,7 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
 	// crdclient.Get.
 	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-	if err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
+	if _, err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
 	}
 	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
@@ -1456,6 +1484,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "create")
@@ -1655,6 +1685,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "update")
@@ -1801,7 +1833,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// instance carries its label is dead weight in the CRD's spec.versions (#103) — and a stale
 	// served endpoint a client can pick that silently prunes fields written through it. Best-effort:
 	// a failure is logged and retried on the next reconcile; it never blocks the reconcile.
-	if err := e.pruneStaleServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace); err != nil {
+	if err := e.pruneStaleServedVersions(ctx, cr, gvk, gvr); err != nil {
 		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 
@@ -2054,6 +2086,8 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	if !ok {
 		return fmt.Errorf(errNotCR)
 	}
+	// core-provider#423: every write this reconcile makes is recorded with the definition as its cause.
+	ctx = auditrec.WithScope(ctx, e.audit, auditrec.CauseOfDefinition(cr))
 	// Bound to ctx so each record carries the reconcile's trace_id/span_id (review of #434, L1).
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "delete")
 	ctx = contexttools.CtxWithLogger(ctx, log)
@@ -2177,7 +2211,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 			for i := range ul.Items {
 				log.Debug("Deleting composition", "name", ul.Items[i].GetName(), "namespace", ul.Items[i].GetNamespace())
-				err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
+				_, err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
 				if err != nil {
 					return err
 				}

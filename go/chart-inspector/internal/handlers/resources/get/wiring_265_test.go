@@ -30,7 +30,7 @@ import (
 
 type unservedKindHelmClient struct{ helmconfig.Client }
 
-func (c unservedKindHelmClient) Install(context.Context, string, string, *helmconfig.InstallConfig) (*helmconfig.Release, error) {
+func (c unservedKindHelmClient) Install(context.Context, string, string, *helmconfig.InstallConfig) (*helmconfig.OperationResult, error) {
 	// The real chain, as cli-runtime / plumbing / helm wrap it.
 	return nil, fmt.Errorf("install failed: %w",
 		fmt.Errorf("error while running post render on files: %w",
@@ -42,7 +42,7 @@ func (c unservedKindHelmClient) Install(context.Context, string, string, *helmco
 
 type brokenHelmClient struct{ helmconfig.Client }
 
-func (c brokenHelmClient) Install(context.Context, string, string, *helmconfig.InstallConfig) (*helmconfig.Release, error) {
+func (c brokenHelmClient) Install(context.Context, string, string, *helmconfig.InstallConfig) (*helmconfig.OperationResult, error) {
 	return nil, fmt.Errorf("dialing the registry: connection refused")
 }
 
@@ -154,7 +154,7 @@ type recordingHelmClient struct {
 	got *string
 }
 
-func (c recordingHelmClient) Install(_ context.Context, name string, _ string, _ *helmconfig.InstallConfig) (*helmconfig.Release, error) {
+func (c recordingHelmClient) Install(_ context.Context, name string, _ string, _ *helmconfig.InstallConfig) (*helmconfig.OperationResult, error) {
 	*c.got = name
 	return nil, errors.New("install failed: recorded and stopped")
 }

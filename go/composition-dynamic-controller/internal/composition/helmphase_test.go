@@ -2,6 +2,8 @@ package composition
 
 import (
 	"errors"
+	"github.com/krateo-platformops/audit"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"strings"
 	"testing"
 
@@ -112,5 +114,51 @@ func TestHelmPhaseErrLogsBothEdges(t *testing.T) {
 	}
 	if !strings.Contains(log.infos[0], "phase=uninstall") {
 		t.Errorf("phase must be carried through, got: %s", log.infos[0])
+	}
+}
+
+// core-provider#465: every helm upgrade and reconcile the cdc sends declares the audit schema's
+// authorization annotations and labels as content, so a child write that changes only who may do
+// what is recorded rather than counted metadata_only. All three call sites go through this
+// constructor (no other UpgradeConfig literal exists in the package).
+func TestUpgradeConfigDeclaresAuthorizationContent(t *testing.T) {
+	ac := &helmconfig.ActionConfig{ChartName: "x"}
+	cfg := upgradeConfig(ac)
+	if cfg.ActionConfig != ac || cfg.MaxHistory != helmMaxHistory {
+		t.Errorf("ActionConfig/MaxHistory not carried: %+v", cfg)
+	}
+	if !equalSets(cfg.ContentAnnotations, audit.AuthorizationAnnotations()) {
+		t.Errorf("ContentAnnotations = %v, want audit.AuthorizationAnnotations() %v", cfg.ContentAnnotations, audit.AuthorizationAnnotations())
+	}
+	if !equalSets(cfg.ContentLabels, audit.AuthorizationLabels()) || len(cfg.ContentLabels) == 0 {
+		t.Errorf("ContentLabels = %v, want audit.AuthorizationLabels() %v (non-empty at audit v0.13.0)", cfg.ContentLabels, audit.AuthorizationLabels())
+	}
+}
+
+func equalSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, x := range a {
+		seen[x] = true
+	}
+	for _, x := range b {
+		if !seen[x] {
+			return false
+		}
+	}
+	return true
+}
+
+// core-provider#465: both cdc rollbacks declare the authorization metadata as content too, with the
+// revision and bounds they always sent.
+func TestRollbackConfigDeclaresAuthorizationContent(t *testing.T) {
+	cfg := rollbackConfig(7)
+	if cfg.ReleaseVersion != 7 || cfg.MaxHistory != helmMaxHistory || cfg.Timeout != helmOperationTimeout {
+		t.Errorf("revision/bounds not carried: %+v", cfg)
+	}
+	if !equalSets(cfg.ContentAnnotations, audit.AuthorizationAnnotations()) || !equalSets(cfg.ContentLabels, audit.AuthorizationLabels()) || len(cfg.ContentLabels) == 0 {
+		t.Errorf("content keys = %v / %v, want audit's two lists", cfg.ContentAnnotations, cfg.ContentLabels)
 	}
 }

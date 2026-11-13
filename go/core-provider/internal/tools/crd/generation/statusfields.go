@@ -63,6 +63,10 @@ var reservedStatusFields = map[string]struct{}{
 	// every phase that resolves one -- the collision would present as a projected field that
 	// silently takes the controller's value instead of the blueprint's.
 	"releaseName": {},
+	// #461: the in-flight helm operation (phase, startedAt, startedBy pod), so the next controller can
+	// tell an operation still running from one whose starter died. Reserved because the controller
+	// writes and clears it around every helm write.
+	"helmOperation": {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision

@@ -36,7 +36,7 @@ func TestIsVersionMigrationHandover_StaleStampOnAnOutOfBandBumpIsNotAHandover(t 
 	// Stamped at v0-1-7, but the served label says the object now sits at v0-1-9: it was
 	// re-pointed in place, twice, without ever being recreated.
 	mg := withServedLabel(crWithOrigin("v0-1-9", "v0-1-7"), "v0-1-9")
-	pkg := &archive.Info{Version: "0.1.9"}
+	pkg := &archive.Info{DefinitionVersion: "0.1.9"}
 
 	if isVersionMigrationHandover(mg, pkg) {
 		t.Fatal("a genuine delete of a re-pointed parent-rendered composition read as a migration " +
@@ -56,7 +56,7 @@ func TestIsVersionMigrationHandover_RecreatedChildIsStillAHandover(t *testing.T)
 	// Created at v0-1-7 and still served at v0-1-7 — the old object, about to be pruned, while
 	// the CD has advanced to 0.1.9.
 	mg := withServedLabel(crWithOrigin("v0-1-7", "v0-1-7"), "v0-1-7")
-	pkg := &archive.Info{Version: "0.1.9"}
+	pkg := &archive.Info{DefinitionVersion: "0.1.9"}
 
 	if !isVersionMigrationHandover(mg, pkg) {
 		t.Fatal("the ordinary migration hand-over is no longer detected; every version bump would " +
@@ -69,7 +69,7 @@ func TestIsVersionMigrationHandover_RecreatedChildIsStillAHandover(t *testing.T)
 // mistake this file's own history is made of (a field a resource does not carry is evidence of
 // nothing). The guard must yield and leave the prior behaviour exactly as it was.
 func TestIsVersionMigrationHandover_MissingServedLabelChangesNothing(t *testing.T) {
-	pkg := &archive.Info{Version: "0.1.9"}
+	pkg := &archive.Info{DefinitionVersion: "0.1.9"}
 
 	// No label at all: same inputs as the hand-over case above, minus the freshness evidence.
 	if !isVersionMigrationHandover(crWithOrigin("v0-1-7", "v0-1-7"), pkg) {
@@ -88,7 +88,7 @@ func TestIsVersionMigrationHandover_MissingServedLabelChangesNothing(t *testing.
 // claim about the version.
 func TestIsVersionMigrationHandover_EmptyServedLabelIsTreatedAsAbsent(t *testing.T) {
 	mg := withServedLabel(crWithOrigin("v0-1-7", "v0-1-7"), "")
-	if !isVersionMigrationHandover(mg, &archive.Info{Version: "0.1.9"}) {
+	if !isVersionMigrationHandover(mg, &archive.Info{DefinitionVersion: "0.1.9"}) {
 		t.Fatal("an empty served label was read as evidence of staleness")
 	}
 }
@@ -102,7 +102,7 @@ func TestIsVersionMigrationHandover_EmptyServedLabelIsTreatedAsAbsent(t *testing
 func TestIsVersionMigrationHandover_TheLiveInstallerStampIsNeverAHandover(t *testing.T) {
 	mg := withServedLabel(crStandalone("v0-3-459", "v0-3-453"), "v0-3-459")
 
-	if isVersionMigrationHandover(mg, &archive.Info{Version: "0.3.459"}) {
+	if isVersionMigrationHandover(mg, &archive.Info{DefinitionVersion: "0.3.459"}) {
 		t.Fatal("the Installer composition read as a migration hand-over; a delete of it would " +
 			"orphan every release the umbrella owns")
 	}

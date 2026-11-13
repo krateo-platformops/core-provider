@@ -166,7 +166,7 @@ func ApplyOrUpdateCRD(ctx context.Context,
 
 	if crd == nil {
 		log.Debug("Creating CRD", "gvr", gvr.String())
-		err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), newcrd, kube.ApplyOptions{})
+		_, err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), newcrd, kube.ApplyOptions{})
 		if err != nil {
 			return gvr, fmt.Errorf("error applying CRD: %w", err)
 		}
@@ -257,7 +257,7 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		return gvr, nil
 	}
 
-	err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
+	_, err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
 	if err != nil {
 		return gvr, fmt.Errorf("error applying CRD update: %w", err)
 	}

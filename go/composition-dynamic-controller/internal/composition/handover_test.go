@@ -104,10 +104,10 @@ var fullDefinitionLabels = map[string]string{
 	"krateo.io/release-name":                     "krateo-observability",
 }
 
-// pkgWithChartVersion builds the package info the getter produces: pkg.Version is the owning
-// CompositionDefinition's current spec.chart.version (resolved robustly, independent of labels).
+// pkgWithChartVersion builds the package info the getter produces: pkg.DefinitionVersion is the
+// owning CompositionDefinition's current spec.chart.version (resolved robustly, independent of labels).
 func pkgWithChartVersion(chartVersion string) *archive.Info {
-	return &archive.Info{Version: chartVersion}
+	return &archive.Info{DefinitionVersion: chartVersion}
 }
 
 func TestIsVersionMigrationHandover(t *testing.T) {
@@ -374,5 +374,28 @@ func TestIsIncompleteHelmOperation(t *testing.T) {
 				t.Errorf("isIncompleteHelmOperation(%q) = %v, want %v", tc.status, got, tc.want)
 			}
 		})
+	}
+}
+
+// #461's trap. An older version's controller now renders its OWN chart, so for it pkg.Version is that
+// old chart and only pkg.DefinitionVersion is the definition's current one. The handover must read the
+// latter: an instance of v0-1-7 leaving the v0-1-7 controller while the definition is at 0.1.8 is a
+// migration, even though this controller's chart (Version) is 0.1.7. Reading Version would see 0.1.7
+// == v0-1-7, call it a genuine delete, and uninstall a release the migration still shares.
+func TestHandoverReadsTheDefinitionVersionNotTheRenderedChart(t *testing.T) {
+	// The same fixture as TestIsVersionMigrationHandover's first case, so the function's
+	// preconditions (a parent-rendered composition) hold and the call reaches the version comparison.
+	mg := crWithVersion("v0-1-7", fullDefinitionLabels)
+	if !isVersionMigrationHandover(mg, pkgWithChartVersion("0.1.8")) {
+		t.Fatal("precondition: the fixture must be a handover with the definition at 0.1.8")
+	}
+
+	old := &archive.Info{Version: "0.1.7", DefinitionVersion: "0.1.8"} // the v0-1-7 controller, after the bump
+	if !isVersionMigrationHandover(mg, old) {
+		t.Error("an old controller rendering its own chart must still see the move to the current version as a migration")
+	}
+	// Control: no bump; the definition is still at the instance's version, so a delete is genuine.
+	if isVersionMigrationHandover(mg, &archive.Info{Version: "0.1.7", DefinitionVersion: "0.1.7"}) {
+		t.Error("with the definition still at v0-1-7 a delete is genuine, not a handover")
 	}
 }
