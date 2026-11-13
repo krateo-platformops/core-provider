@@ -254,7 +254,9 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 			Key:       passwordRef["key"],
 		})
 		if err != nil {
-			g.logger.Debug("Failed to resolve secret", "error", err.Error(), "secretName", passwordRef["name"], "secretNamespace", passwordRef["namespace"])
+			// The definition's identity, not the passwordRef: the error already names the Secret it could
+			// not read, and nothing derived from a credential reference belongs in a log line.
+			g.logger.Debug("Failed to resolve the chart registry credentials", "error", err.Error(), "compositionDefinitionName", compositionDefinition.GetName(), "compositionDefinitionNamespace", compositionDefinition.GetNamespace())
 			return nil, err
 		}
 	}
