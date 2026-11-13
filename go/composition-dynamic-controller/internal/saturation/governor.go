@@ -18,8 +18,10 @@ import (
 // OFF BY DEFAULT, and nil rather than a governor with saturation disabled: the cdc implements no
 // RateLimitKeyer, so a governor without saturation would gate nothing, and passing none keeps the
 // controller exactly as it was. With it on, every reconcile needs a slot in a process-wide local
-// capacity that starts at 1, ramps up to `workers`, and halves while cpu.pressure "some avg10" is
-// over the threshold. The controller's Run starts the sampler.
+// capacity that starts at 1 and ramps +1 per 2s up to `workers`, and that halves (minimum 1, at most
+// once per window) when the CPU pressure of a whole 10s window, the share of it in which some task
+// waited for CPU (cpu.pressure "some total"), is over the threshold (unstructured-runtime v1.16.0,
+// #82; it was "some avg10" sampled every second). The controller's Run starts the sampler.
 //
 // threshold 0 means the runtime's default (50, provisional: the cdc measurement is what tests it).
 // An out-of-range threshold is an error, so a misconfigured opt-in fails at startup instead of

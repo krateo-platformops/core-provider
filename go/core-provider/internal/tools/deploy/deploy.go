@@ -511,12 +511,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	jsonSchemaConfigmap := corev1.ConfigMap{}
-	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath,
-		"schema", string(opts.JsonSchemaBytes),
-	)
+	jsonSchemaConfigmap, err := renderJSONSchemaConfigMap(opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath, opts.JsonSchemaBytes)
 	if err != nil {
-		return "", fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
+		return "", err
 	}
 	_, err = kubecli.Apply(ctx, opts.DynClient, configMapGVR, &jsonSchemaConfigmap, applyOpts)
 	if err != nil {
