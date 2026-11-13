@@ -854,6 +854,9 @@
         "tracing": {
           "type": "boolean"
         },
+        "logs": {
+          "type": "boolean"
+        },
         "endpoint": {
           "type": "string"
         },
