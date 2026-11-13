@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -50,11 +51,12 @@ func childAt(version string) string {
 // #471: only the revisions helm's automatic paths read hold a version: each release's LATEST and its
 // last DEPLOYED revision. Each arm is a history shape; the first is osh-s2's, measured.
 func TestReferencingReleases_OnlyLatestAndLastDeployedHold(t *testing.T) {
-	old, cur := "composition.krateo.io/v0-3-49", "composition.krateo.io/v0-3-50"
+	old := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-3-49", Kind: "Glance"}
+	cur := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-3-50", Kind: "Glance"}
 	for _, tc := range []struct {
 		name    string
 		history []*corev1.Secret
-		probe   string
+		probe   schema.GroupVersionKind
 		want    []int // revisions that hold probe
 	}{
 		{"osh-s2: two superseded revisions at the old version, latest deployed at the new", []*corev1.Secret{
@@ -109,7 +111,7 @@ func TestReferencingReleases_UndecodableSupersededRevisionStillRefuses(t *testin
 	bad.Data[releaseDataKey] = []byte("not base64 !!")
 	c := newClient(t, secretsAsObjects([]*corev1.Secret{bad,
 		releaseSecretWithStatus(t, "openstack", "umbrella", 4, "deployed", childAt("v0-3-50"))})...)
-	if _, err := ReferencingReleases(context.Background(), c, "composition.krateo.io/v0-3-49"); err == nil || !strings.Contains(err.Error(), "decoding release secret") {
+	if _, err := ReferencingReleases(context.Background(), c, schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-3-49", Kind: "Glance"}); err == nil || !strings.Contains(err.Error(), "decoding release secret") {
 		t.Errorf("err = %v, want a decode refusal", err)
 	}
 }

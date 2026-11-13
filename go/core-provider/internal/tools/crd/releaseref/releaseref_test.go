@@ -13,12 +13,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const probeVersion = "composition.krateo.io/v0-6-1"
+
+// probe is the Kind+version the wedge was measured on: BaremetalHost at probeVersion.
+var probe = schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-6-1", Kind: "BaremetalHost"}
 
 // releaseSecret builds a helm release Secret the way helm's storage driver does: JSON, gzip,
 // base64. compress=false exercises helm's BACKWARDS-COMPAT path, where the gzip magic header is
@@ -94,7 +98,7 @@ metadata:
 func TestReferencingReleases_FindsTheWedgeShape(t *testing.T) {
 	c := newClient(t, releaseSecret(t, "krateo-system", "parent", 3, parentManifest, true))
 
-	refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+	refs, err := ReferencingReleases(context.Background(), c, probe)
 	if err != nil {
 		t.Fatalf("ReferencingReleases: %v", err)
 	}
@@ -147,7 +151,7 @@ func TestReferencingReleases_IgnoresTheVersionStringOutsideAnApiVersion(t *testi
 		t.Fatal("premise: the fixture must contain the version as a substring")
 	}
 
-	refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+	refs, err := ReferencingReleases(context.Background(), c, probe)
 	if err != nil {
 		t.Fatalf("ReferencingReleases: %v", err)
 	}
@@ -159,7 +163,7 @@ func TestReferencingReleases_IgnoresTheVersionStringOutsideAnApiVersion(t *testi
 
 	// And the version that IS declared must still be found, so the negative above is discrimination
 	// rather than blindness.
-	refs, err = ReferencingReleases(context.Background(), c, "composition.krateo.io/v0-6-2")
+	refs, err = ReferencingReleases(context.Background(), c, schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-6-2", Kind: "BaremetalHost"})
 	if err != nil {
 		t.Fatalf("ReferencingReleases (v0-6-2): %v", err)
 	}
@@ -177,7 +181,7 @@ func TestReferencingReleases_IgnoresTheVersionStringOutsideAnApiVersion(t *testi
 func TestReferencingReleases_HandlesUncompressedReleases(t *testing.T) {
 	c := newClient(t, releaseSecret(t, "krateo-system", "legacy", 1, parentManifest, false))
 
-	refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+	refs, err := ReferencingReleases(context.Background(), c, probe)
 	if err != nil {
 		t.Fatalf("an uncompressed release must decode, got: %v", err)
 	}
@@ -203,7 +207,7 @@ func TestReferencingReleases_ListFailureIsAnErrorNotZero(t *testing.T) {
 			},
 		}).Build()
 
-	refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+	refs, err := ReferencingReleases(context.Background(), c, probe)
 	if err == nil {
 		t.Fatalf("a list failure returned refs=%v and NO error. The caller prunes on an empty "+
 			"result, so this silently deletes a served version that is still referenced", refs)
@@ -238,7 +242,7 @@ func TestReferencingReleases_UndecodableReleaseIsAnError(t *testing.T) {
 			}
 			c := newClient(t, sec)
 
-			refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+			refs, err := ReferencingReleases(context.Background(), c, probe)
 			if err == nil {
 				t.Errorf("got refs=%v and no error; an undecodable release means we cannot see "+
 					"what it manages, and that must refuse the prune", refs)
@@ -247,16 +251,79 @@ func TestReferencingReleases_UndecodableReleaseIsAnError(t *testing.T) {
 	}
 }
 
-// An empty apiVersion is a CALLER BUG, and answering "unreferenced" would turn it into a deletion
-// of every version. Refuse instead.
-func TestReferencingReleases_EmptyApiVersionRefuses(t *testing.T) {
+// An empty group, version or kind is a CALLER BUG, and answering "unreferenced" would turn it into
+// a deletion. Refuse instead. The control proves the same client answers a complete GVK, so each
+// refusal is the missing field and not a broken fixture.
+func TestReferencingReleases_IncompleteGVKRefuses(t *testing.T) {
 	c := newClient(t, releaseSecret(t, "krateo-system", "parent", 1, parentManifest, true))
 
-	for _, v := range []string{"", "   "} {
-		if _, err := ReferencingReleases(context.Background(), c, v); err == nil {
-			t.Errorf("apiVersion %q returned no error: a caller that computed an empty version has "+
-				"a bug, and 'unreferenced' would make it destructive", v)
-		}
+	if refs, err := ReferencingReleases(context.Background(), c, probe); err != nil || len(refs) != 1 {
+		t.Fatalf("control: the complete GVK must answer 1 reference, got %v, %v", refs, err)
+	}
+	for _, tc := range []struct {
+		name string
+		gvk  schema.GroupVersionKind
+	}{
+		{"empty group", schema.GroupVersionKind{Version: probe.Version, Kind: probe.Kind}},
+		{"empty version", schema.GroupVersionKind{Group: probe.Group, Kind: probe.Kind}},
+		{"blank version", schema.GroupVersionKind{Group: probe.Group, Version: "   ", Kind: probe.Kind}},
+		{"empty kind", schema.GroupVersionKind{Group: probe.Group, Version: probe.Version}},
+		{"blank kind", schema.GroupVersionKind{Group: probe.Group, Version: probe.Version, Kind: " "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if refs, err := ReferencingReleases(context.Background(), c, tc.gvk); err == nil {
+				t.Errorf("%v returned refs=%v and no error: a caller that computed an empty field has "+
+					"a bug, and 'unreferenced' would make it destructive", tc.gvk, refs)
+			}
+		})
+	}
+}
+
+// #486, in the shape measured on krateo-057: installer-platform's DEPLOYED revision declares
+// ClickhouseOperator, KrateoMarketplaceCatalog and ModelConfigs at composition.krateo.io/v0-1-2,
+// and that held OtelCollectorTailSampling's v0-1-2 served with zero instances on it. helm maps
+// each document by its own Kind, so only a document of the asked Kind can be stranded.
+const umbrellaManifest = `
+apiVersion: composition.krateo.io/v0-1-2
+kind: ClickhouseOperator
+metadata:
+  name: clickhouse-operator
+---
+apiVersion: composition.krateo.io/v0-1-2
+kind: KrateoMarketplaceCatalog
+metadata:
+  name: catalog
+---
+apiVersion: composition.krateo.io/v0-1-12
+kind: OtelCollectorTailSampling
+metadata:
+  name: tailsampling
+`
+
+func TestReferencingReleases_AnotherKindAtTheSameApiVersionDoesNotHold(t *testing.T) {
+	c := newClient(t, releaseSecretWithStatus(t, "krateo-system", "installer-platform", 2140, "deployed", umbrellaManifest))
+	at := func(version, kind string) schema.GroupVersionKind {
+		return schema.GroupVersionKind{Group: "composition.krateo.io", Version: version, Kind: kind}
+	}
+	for _, tc := range []struct {
+		name string
+		gvk  schema.GroupVersionKind
+		want int
+	}{
+		{"the 057 false keep: another Kind at the same apiVersion", at("v0-1-2", "OtelCollectorTailSampling"), 0},
+		{"control: a Kind the revision declares at that apiVersion holds it", at("v0-1-2", "ClickhouseOperator"), 1},
+		{"control: the second Kind at that apiVersion holds it too", at("v0-1-2", "KrateoMarketplaceCatalog"), 1},
+		{"control: the asked Kind at the version it IS declared at holds it", at("v0-1-12", "OtelCollectorTailSampling"), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs, err := ReferencingReleases(context.Background(), c, tc.gvk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(refs) != tc.want {
+				t.Errorf("%v: got %d references, want %d: %v", tc.gvk, len(refs), tc.want, refs)
+			}
+		})
 	}
 }
 
@@ -274,7 +341,7 @@ func TestReferencingReleases_IgnoresNonReleaseSecrets(t *testing.T) {
 	}
 	c := newClient(t, impostor)
 
-	refs, err := ReferencingReleases(context.Background(), c, probeVersion)
+	refs, err := ReferencingReleases(context.Background(), c, probe)
 	if err != nil {
 		t.Fatalf("a non-release Secret must be skipped, not decoded: %v", err)
 	}
