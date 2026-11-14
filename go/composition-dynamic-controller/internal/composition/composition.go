@@ -460,7 +460,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// rbac.authorization.k8s.io/{roles,rolebindings,clusterroles,clusterrolebindings}.
 	written, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName)
 	if written > 0 {
-		controller.MarkActed(ctx) // RBAC created or changed, possibly before an error
+		markWrote(ctx, writeDerivedRBAC) // RBAC created or changed, possibly before an error
 	}
 	if err != nil {
 		cond := condition.Unavailable()
@@ -533,7 +533,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		})
-		controller.MarkActed(ctx) // the rollback ran, which writes, whether or not it then failed
+		markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
 		clearHelmOperationRecord(mg)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
@@ -663,7 +663,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	})
 	clearHelmOperationRecord(mg) // #461: the operation returned; the next status write drops the record
 	if reconcileRes != nil && reconcileRes.Changed {
-		controller.MarkActed(ctx) // the reconcile changed the cluster, possibly before an error
+		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
 	}
 	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)

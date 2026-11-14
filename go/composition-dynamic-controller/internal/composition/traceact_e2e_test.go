@@ -197,13 +197,19 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 	}
 	deadline4 := time.Now().Add(3 * time.Minute)
 	acted4 := false
+	var actedRoot sdktrace.ReadOnlySpan
 	for time.Now().Before(deadline4) && !acted4 {
 		for _, r := range rootsAfter(rec, t4) {
 			if v, ok := rootActed(r); ok && v {
-				acted4 = true
+				acted4, actedRoot = true, r
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	// And the root says WHAT was written: observability counts the "write" event, because this
+	// non-joined act opens no step span whose name could say so.
+	if acted4 && !hasWriteEventOn(actedRoot, writeHelmReconcile) {
+		t.Errorf("the acted root must carry a %q event with %s=%s; events: %v", writeEvent, attrWrite, writeHelmReconcile, actedRoot.Events())
 	}
 	if !acted4 {
 		t.Errorf("a pass whose helm reconcile changed the cluster must carry %s=true; %d roots after the spec change, none marked", tracecontext.AttrActed, len(rootsAfter(rec, t4)))
