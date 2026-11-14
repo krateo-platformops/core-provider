@@ -1085,7 +1085,8 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// bucketed correctly all along.
 			return childFailed
 		case stringField(cm, "reason") == "CreateUnreachable",
-			stringField(cm, "reason") == "NoCreateVerbDeclared":
+			stringField(cm, "reason") == "NoCreateVerbDeclared",
+			stringField(cm, "reason") == "NoIdentifierRecorded":
 			// rest-dynamic-controller's two "this will never be created" reasons. Both are
 			// permanent: nothing failed, nothing is retryable, and the remedy is a declaration change.
 			//
@@ -1105,6 +1106,19 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// defect. Until it arrives such a child reads Ready=False/Creating, which must stay
 			// converging, because a create genuinely in flight says the same thing. Only the specific
 			// reason can tell the two apart.
+			//
+			// NoIdentifierRecorded: MAPPED AHEAD OF ARRIVAL, for oasgen-provider 0.69.0 (#687; verified
+			// at oasgen-provider main b30652f, go/rest-dynamic-controller/internal/controllers/condition/
+			// condition.go:60, constructor :417, sole producer restResources.go:446-464; Ready=False,
+			// written under controller.ReadyAssessed so it survives the runtime's observe-failed path).
+			// The create reported success but recorded no identifier, and the kind declares a get verb
+			// but no findby, so the resource can be neither addressed nor re-found: every later pass
+			// reaches the same answer. STRUCTURAL, not "cannot assess" (ObserveFailed/NotObserved are
+			// attempts that may succeed later), so NOT childUnevaluated: that would never affect Ready
+			// and would hide a vendor resource that may exist unreferenced. Cleared only by a human: an
+			// identifier written into the CR's status, or a findby declared on the RestDefinition.
+			// Falsifier (oasgen-provider): a child leaving this reason without either means it is not
+			// permanent and this mapping must be revisited.
 			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved",
