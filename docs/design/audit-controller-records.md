@@ -135,11 +135,13 @@ create/unchanged/update/delete on a real apiserver (`audit_envtest_test.go`); an
 and an update by escalation prevention and a delete for a missing verb, each recorded failure / 403,
 the create with no uid, the update and delete with the live object's); and the cdc's **prune**
 (the heal step requires the FocusConfig the render drops to be one helm.reconcile / delete / success
-record with its uid, after a precondition that it existed). Checked against audit v0.15.0.
+record with its uid, after a precondition that it existed); and the cdc uninstall row's **failure**
+(a ValidatingAdmissionPolicy refuses one child's DELETE: one helm.uninstall / delete / failure record
+naming the live child, which stays live; the retry after the policy is lifted goes through, #497).
+Checked against audit v0.15.0.
 **Not yet proven**, and tracked on #423:
 - a **kept deletion** through the real path (only hand-built verdicts are tested);
-- an **authorization-label-only** child change recorded end to end;
-- the **failure** outcome of the cdc uninstall row.
+- an **authorization-label-only** child change recorded end to end.
 
 ## Decisions (Diego, 2026-11-11)
 
@@ -163,3 +165,4 @@ record with its uid, after a precondition that it existed). Checked against audi
 - 2026-11-14: audit v0.15.0 in both modules; core-provider's RBAC-set failure outcome proven on a real
   apiserver.
 - 2026-11-14: the cdc's prune record required (#495).
+- 2026-11-14: the cdc uninstall row's failure outcome proven on kind, with #497's fix (#499).
