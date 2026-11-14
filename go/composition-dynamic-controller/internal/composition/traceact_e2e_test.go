@@ -115,6 +115,9 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 		// As the cdc's main.go configures it: an annotation change reaches Observe.
 		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
 		builder.WithTracerProvider(tp),
+		// Short resync so ARM 3 can observe a resync pass, the one "mark only on a real write"
+		// (Diego, 2026-11-14) is about, within the test's budget (the default is 3m).
+		builder.WithResyncInterval(20*time.Second),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -166,26 +169,23 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 		t.Errorf("Observe's apply root must carry %s=true, got (%v, present %v)", tracecontext.AttrActed, v, ok)
 	}
 
-	// ARM 3 (Diego, 2026-11-14: "mark only on a real write"). An annotation-only change reaches
-	// Observe (CRUpdated -> Observe), whose apply path runs RBAC and a helm reconcile and changes
-	// nothing. Its root must carry no acted mark. This is the per-resync pass the tail sampler used
-	// to keep every time.
+	// ARM 3 (Diego, 2026-11-14: "mark only on a real write"). A RESYNC reaches Observe, whose apply
+	// path runs RBAC and a helm reconcile and changes nothing; its root must carry no acted mark.
+	// This is the per-resync pass the tail sampler used to keep every time. (An annotation-only
+	// patch would not do: the runtime enqueues only spec changes and watched annotations, and
+	// treats the rest as status-only updates.)
 	time.Sleep(2 * time.Second) // let ARM 2's own follow-up passes end before the baseline
 	t3 := time.Now()
-	noop := []byte(`{"metadata":{"annotations":{"krateo.io/test-noop":"1"}}}`)
-	if _, err := cli.Patch(ctx, name, types.MergePatchType, noop, metav1.PatchOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	waitRootsAfter(t, rec, t3, 1, 2*time.Minute)
-	time.Sleep(3 * time.Second) // any further passes it triggers end too
+	waitRootsAfter(t, rec, t3, 1, 90*time.Second) // at least one resync (every 20s)
+	time.Sleep(3 * time.Second)
 	after3 := rootsAfter(rec, t3)
 	for _, r := range after3 {
 		if _, ok := rootActed(r); ok {
-			t.Errorf("a pass that changed nothing (annotation-only update) must carry no %s; %d roots after the patch", tracecontext.AttrActed, len(after3))
+			t.Errorf("a resync that changed nothing must carry no %s; %d roots after the baseline", tracecontext.AttrActed, len(after3))
 			break
 		}
 	}
-	t.Logf("ARM 3: roots after the annotation-only patch: %d, acted: 0 expected", len(after3))
+	t.Logf("ARM 3: resync roots after the baseline: %d, acted: 0 expected", len(after3))
 
 	// ARM 4, the control for ARM 3: a spec change makes the helm reconcile change the cluster with NO
 	// new traceparent, so nothing joins; the root must still be marked, by MarkActed.
