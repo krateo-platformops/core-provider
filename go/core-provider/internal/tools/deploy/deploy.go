@@ -111,7 +111,11 @@ type DeployOptions struct {
 	DiscoveryClient discovery.CachedDiscoveryInterface
 	KubeClient      client.Client
 	DynClient       dynamic.Interface
-	Namespace       string
+	// HubDynClient is the management cluster's dynamic client. core-provider's OWN authn mapping goes
+	// there, where core-provider and its authn run, even when DynClient is a remote target's (#251).
+	// Nil means the same cluster as DynClient (a local definition).
+	HubDynClient dynamic.Interface
+	Namespace    string
 	// ControllerNamespace is where this version's controller ITSELF lives: its Deployment,
 	// ServiceAccount, ConfigMaps and Service (#313). It is required: an empty value is an error,
 	// never a fall-back to Namespace, so no caller can keep the old placement by omission.
@@ -488,17 +492,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	// When the CompositionDefinition declares an apiRef, register the CDC ServiceAccount in
-	// authn's allowlist so it can exchange its projected token for a service JWT.
-	err = applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
-	if err != nil {
-		return "", err
-	}
-
-	// Ensure core-provider's OWN authn mapping exists before calling /rbac (which authenticates
-	// with core-provider's projected token). Provisioned at runtime — lazily, once authn is up —
-	// rather than declaratively at bootstrap, where the authn CRD does not yet exist.
-	err = ensureSelfAuthnMapping(ctx, opts.DynClient, opts, applyOpts)
+	err = applyAuthnMappings(ctx, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -1177,3 +1171,27 @@ func controllerObjectName(controllerNamespace string, gvr schema.GroupVersionRes
 // keepShared reports whether Undeploy must leave the objects shared with another placement or
 // definition. Relocating implies it: a moving controller keeps every shared object.
 func (o UndeployOptions) keepShared() bool { return o.KeepShared || o.Relocating }
+
+// hubDynClient is where core-provider's own authn mapping is written: the management cluster (#251).
+// A local definition's DynClient is the management cluster already.
+func hubDynClient(opts DeployOptions) dynamic.Interface {
+	if opts.HubDynClient != nil {
+		return opts.HubDynClient
+	}
+	return opts.DynClient
+}
+
+// applyAuthnMappings writes the two authn mappings a definition with an apiRef needs, each where it
+// belongs (#251):
+//   - the controller's, on the cluster the controller runs in (DynClient: a remote target's for a
+//     remote definition), so it can exchange its projected token for a service JWT. Skipped, not
+//     failed, when that cluster has no authn (AuthnSupport.NotInstalled);
+//   - core-provider's OWN, on the management cluster (hubDynClient), where core-provider and its
+//     authn run, before /rbac is called with core-provider's projected token. Provisioned lazily,
+//     once authn is up, rather than at bootstrap, where the authn CRD does not yet exist.
+func applyAuthnMappings(ctx context.Context, opts DeployOptions, saName, saNamespace string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+	if err := applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, saName, saNamespace, hsh, applyOpts); err != nil {
+		return err
+	}
+	return ensureSelfAuthnMapping(ctx, hubDynClient(opts), opts, applyOpts)
+}

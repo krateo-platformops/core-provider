@@ -66,7 +66,7 @@ func TestAuthnMappingSupportFollowsTheServedCRD(t *testing.T) {
 		"authn-crds 0.37.0 serves delegation": {dyn: crdClient(authnMappingCRD(true, false, true)), want: AuthnSupport{Delegation: true}},
 		"authn-crds 0.36.0 serves neither":    {dyn: crdClient(authnMappingCRD(true, false, false)), want: AuthnSupport{}},
 		"the version is not served":           {dyn: crdClient(authnMappingCRD(false, true, true)), want: AuthnSupport{}},
-		"no authn mapping CRD at all":         {dyn: crdClient(), want: AuthnSupport{}},
+		"no authn mapping CRD at all":         {dyn: crdClient(), want: AuthnSupport{NotInstalled: true}},
 	} {
 		got, err := AuthnMappingSupport(ctx, tc.dyn)
 		if err != nil || got != tc.want {

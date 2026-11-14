@@ -1160,6 +1160,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		JsonSchemaBytes:        specSchemaBytes,
 		ServiceTemplatePath:    ServiceTemplatePath,
 		DynClient:              e.dynamic,
+		HubDynClient:           e.mgmtDynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
 		ApiRefDelegation:       apiRefDelegation(cr),
@@ -1178,6 +1179,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
+	recordAuthnMappingApplied(cr, authnSupport)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error deploying dynamic controller in dry-run mode: %w", err)
 	}
@@ -1574,6 +1576,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		ServiceTemplatePath:    ServiceTemplatePath,
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
+		HubDynClient:           e.mgmtDynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
 		ApiRefDelegation:       apiRefDelegation(cr),
@@ -1592,6 +1595,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
+	recordAuthnMappingApplied(cr, authnSupport)
 	if err != nil {
 		return err
 	}
@@ -1960,6 +1964,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		ServiceTemplatePath:    ServiceTemplatePath,
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
+		HubDynClient:           e.mgmtDynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		ApiRefName:             apiRefName(cr),
 		ApiRefDelegation:       apiRefDelegation(cr),
@@ -1978,6 +1983,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
+	recordAuthnMappingApplied(cr, authnSupport)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}
