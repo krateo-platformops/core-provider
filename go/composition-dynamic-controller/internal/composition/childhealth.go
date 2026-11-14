@@ -1061,6 +1061,28 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// named the state, the less this rollup understood it. A generic Unavailable would have
 			// bucketed correctly all along.
 			return childFailed
+		case stringField(cm, "reason") == "CreateUnreachable",
+			stringField(cm, "reason") == "NoCreateVerbDeclared":
+			// rest-dynamic-controller's two "this will never be created" reasons. Both are
+			// permanent: nothing failed, nothing is retryable, and the remedy is a declaration change.
+			//
+			// CreateUnreachable: SHIPPED in oasgen-provider 0.64.0 (b82990b, their #636/#629),
+			// verified first-hand at condition.go ReasonCreateUnreachable. Type=Ready, Status=False:
+			// the create is the Kind's only write verb and its findby matches, so the runtime (which
+			// queues a create only on !ResourceExists) can never queue it. Their own constructor
+			// comment: "nothing failed and nothing is retryable ... a declaration change ... which is
+			// a human's decision". Without this arm it fell to the converging default, so a parent
+			// reported Creating forever.
+			//
+			// NoCreateVerbDeclared: MAPPED AHEAD OF ARRIVAL. oasgen-provider removed it in #645 because
+			// the runtime's create-error path overwrote it with Creating; unstructured-runtime v1.17.0's
+			// ResultCreator lets it survive (Requested=false with Ready/Synced=False and this reason),
+			// and oasgen is reviving it with that exact string (their #660). Mapped now for the same
+			// reason as CreateFailed above: waiting for a child's reason to appear is waiting for the
+			// defect. Until it arrives such a child reads Ready=False/Creating, which must stay
+			// converging, because a create genuinely in flight says the same thing. Only the specific
+			// reason can tell the two apart.
+			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved",
 			stringField(cm, "reason") == "ObserveFailed":

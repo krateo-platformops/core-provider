@@ -211,6 +211,25 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 			"will make", got, childFailed)
 	}
 
+	// CreateUnreachable (shipped, oasgen-provider 0.64.0) and NoCreateVerbDeclared (mapped ahead of
+	// arrival, oasgen #660) must be FAILED: both say this child will never be created, and the remedy
+	// is a declaration change. Verified first-hand at the monorepo's condition.go for
+	// CreateUnreachable. Before this, a composition holding either child reported Ready=False/Creating
+	// indefinitely while nothing progressed.
+	for _, reason := range []string{"CreateUnreachable", "NoCreateVerbDeclared"} {
+		if got := krateoReady(krateoCR("False", reason, true)); got != childFailed {
+			t.Errorf("reason %q maps to %d, want childFailed (%d). The child will never be created; "+
+				"reporting the parent as converging promises progress nothing will make", reason, got, childFailed)
+		}
+	}
+
+	// And Creating must STAY converging: it is what a create genuinely in flight reports, and also
+	// what a never-creatable child reported before its controller could name it. The two are told
+	// apart only by the specific reasons above, never by failing Creating.
+	if got := krateoReady(krateoCR("False", "Creating", true)); got != childConverging {
+		t.Errorf("Creating maps to %d, want childConverging (%d): a create in flight must hold the parent back without failing it", got, childConverging)
+	}
+
 	// The two that must STAY converging, pinned because they are live reasons from the same file
 	// and the same releases. Without them, a change that widened the failing arm "to cover RDC's
 	// Ready=False reasons" would pass: Pending and Updating are genuinely in progress, and failing
