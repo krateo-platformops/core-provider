@@ -129,13 +129,16 @@ CompositionDefinition controller's Observe, Create, Update and Delete, and of th
 
 audit v0.14.0 counts a row as **audited** only when every outcome it lists is checked by
 `audittest.AssertConformant` on real records. Proven today: the cdc's install, heal and uninstall
-successes (`composition_test.go` via `audit_e2e_test.go`), and core-provider's deploy RBAC
-create/unchanged/update/delete on a real apiserver (`audit_envtest_test.go`). **Not yet proven**, and
-tracked on #423:
+successes (`composition_test.go` via `audit_e2e_test.go`); core-provider's deploy RBAC
+create/unchanged/update/delete on a real apiserver (`audit_envtest_test.go`); and that row's
+**failure** outcome (`audit_refusal_envtest_test.go`: an RBAC-authorizing apiserver refuses a create
+and an update by escalation prevention and a delete for a missing verb, each recorded failure / 403,
+the create with no uid, the update and delete with the live object's). Checked against audit v0.15.0.
+**Not yet proven**, and tracked on #423:
 - the cdc's **prune** record (a run that prunes nothing still passes today);
 - a **kept deletion** through the real path (only hand-built verdicts are tested);
 - an **authorization-label-only** child change recorded end to end;
-- the **failure** outcomes of the cdc uninstall row and core-provider's RBAC-set row.
+- the **failure** outcome of the cdc uninstall row.
 
 ## Decisions (Diego, 2026-11-11)
 
@@ -156,3 +159,5 @@ tracked on #423:
   2.13.87.
 - 2026-11-13: rewritten as the design of record against main 22fbe70 (2.13.94); coverage per audit
   v0.14.0.
+- 2026-11-14: audit v0.15.0 in both modules; core-provider's RBAC-set failure outcome proven on a real
+  apiserver.
