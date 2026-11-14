@@ -133,9 +133,10 @@ successes (`composition_test.go` via `audit_e2e_test.go`); core-provider's deplo
 create/unchanged/update/delete on a real apiserver (`audit_envtest_test.go`); and that row's
 **failure** outcome (`audit_refusal_envtest_test.go`: an RBAC-authorizing apiserver refuses a create
 and an update by escalation prevention and a delete for a missing verb, each recorded failure / 403,
-the create with no uid, the update and delete with the live object's). Checked against audit v0.15.0.
+the create with no uid, the update and delete with the live object's); and the cdc's **prune**
+(the heal step requires the FocusConfig the render drops to be one helm.reconcile / delete / success
+record with its uid, after a precondition that it existed). Checked against audit v0.15.0.
 **Not yet proven**, and tracked on #423:
-- the cdc's **prune** record (a run that prunes nothing still passes today);
 - a **kept deletion** through the real path (only hand-built verdicts are tested);
 - an **authorization-label-only** child change recorded end to end;
 - the **failure** outcome of the cdc uninstall row.
@@ -161,3 +162,4 @@ the create with no uid, the update and delete with the live object's). Checked a
   v0.14.0.
 - 2026-11-14: audit v0.15.0 in both modules; core-provider's RBAC-set failure outcome proven on a real
   apiserver.
+- 2026-11-14: the cdc's prune record required (#495).

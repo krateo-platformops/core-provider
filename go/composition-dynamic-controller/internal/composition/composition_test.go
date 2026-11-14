@@ -870,6 +870,19 @@ func TestController(t *testing.T) {
 			t.Fatalf("expected child %q to exist before delete: %v", childName, err)
 		}
 
+		// #423 PRUNE arm, its precondition. The chart renders a FocusConfig only while its
+		// DataPresentationAzure has a status (templates/focus_config.yaml: lookup, then
+		// `if and $resource $resource.status`). The Update step patched that status, so the FocusConfig
+		// exists now; deleting the DataPresentationAzure makes the heal's render drop it, and the
+		// reconcile must PRUNE it. Required, not incidental: without this precondition a run in which
+		// nothing was there to prune would pass the prune assertion below vacuously.
+		focusCfgCli := dynamic.NewForConfigOrDie(adminCfg).Resource(schema.GroupVersionResource{
+			Group: "finops.krateo.io", Version: "v1", Resource: "focusconfigs"}).Namespace("krateo-system")
+		focusCfg, err := focusCfgCli.Get(ctx, childName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("#423 prune precondition: the FocusConfig %s/%s must exist before the heal: %v", "krateo-system", childName, err)
+		}
+
 		revBefore := latestRevision()
 		t.Logf("[selfheal-delete] latest revision before out-of-band delete: %d", revBefore)
 
@@ -919,6 +932,20 @@ func TestController(t *testing.T) {
 		}
 		if recreated != 1 {
 			t.Errorf("#423: the recreated child must be recorded exactly once as a create, got %d in [%s]", recreated, rowNames(healRows))
+		}
+		// #423 PRUNE arm: the reconcile's prune of the FocusConfig the render no longer emits is one
+		// helm.reconcile / delete / success record, naming the object that was there (its uid). That it
+		// is really gone is checked by assertRowsMatchCluster below.
+		var pruned []auditRow
+		for _, r := range healRows {
+			if r.resource == "focusconfigs" && r.verb == "delete" {
+				pruned = append(pruned, r)
+			}
+		}
+		if len(pruned) != 1 || pruned[0].action != auditrec.ActionReconcile || pruned[0].outcome != audit.OutcomeSuccess ||
+			pruned[0].namespace != "krateo-system" || pruned[0].name != childName || pruned[0].uid != string(focusCfg.GetUID()) {
+			t.Errorf("#423: the pruned FocusConfig must be recorded exactly once as helm.reconcile / delete / success with uid %s, got %+v (all rows: [%s])",
+				focusCfg.GetUID(), pruned, rowNames(healRows))
 		}
 		assertRowsMatchCluster(ctx, t, cfg.Client().RESTConfig(), healRows)
 		t.Logf("#423: the heal recorded %d rows: %s", len(healRows), rowNames(healRows))
