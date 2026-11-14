@@ -94,6 +94,11 @@
         "startedBy": {
           "type": "string",
           "description": "The name of the controller pod that started it (POD_NAME, from the downward API)."
+        },
+        "returnedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the controller's call for this operation RETURNED with an error, leaving helm's lock behind (#497). Written only on that path. A record carrying it describes an operation that is provably no longer in flight, so the next controller clears the lock at once instead of waiting the pending grace. Absent while the operation runs, and on a record from a controller that predates it (then the grace applies, as before)."
         }
       }
     }

@@ -1827,6 +1827,102 @@ func TestController(t *testing.T) {
 			return ctx
 		}
 
+		// #423 UNINSTALL FAILURE arm, and #497. A ValidatingAdmissionPolicy refuses the DELETE of one
+		// child, so the uninstall fails through the real path: the refusal must be one
+		// helm.uninstall / delete / failure record naming the live child, and the composition must
+		// record that its call RETURNED (status.helmOperation.returnedAt). Then the policy is lifted,
+		// and the Delete below must go through at once: before #497 it returned "waiting for an
+		// in-flight uninstall ... to settle" for the whole pending grace (16m), because the lock helm
+		// left read as an operation this pod might still be running. No grace is shortened here.
+		{
+			const blocked = "focus-1-focus-data-presentation-azure"
+			vapGVR := schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}
+			vbGVR := schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
+			dpa := adminDy.Resource(schema.GroupVersionResource{Group: "finops.krateo.io", Version: "v1alpha1", Resource: "datapresentationazures"}).Namespace(obj.GetNamespace())
+			live, err := dpa.Get(ctx, blocked, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("#423 uninstall-failure precondition: child %s must exist: %v", blocked, err)
+			}
+			vap := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicy",
+				"metadata": map[string]interface{}{"name": "test-423-refuse-child-delete"},
+				"spec": map[string]interface{}{
+					"failurePolicy": "Fail",
+					"matchConstraints": map[string]interface{}{"resourceRules": []interface{}{map[string]interface{}{
+						"apiGroups": []interface{}{"finops.krateo.io"}, "apiVersions": []interface{}{"*"},
+						"operations": []interface{}{"DELETE"}, "resources": []interface{}{"datapresentationazures"}}}},
+					"validations": []interface{}{map[string]interface{}{
+						"expression": "oldObject.metadata.name != '" + blocked + "'",
+						"message":    "test-423: this child's delete is refused"}},
+				}}}
+			vb := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",
+				"metadata": map[string]interface{}{"name": "test-423-refuse-child-delete"},
+				"spec":     map[string]interface{}{"policyName": "test-423-refuse-child-delete", "validationActions": []interface{}{"Deny"}}}}
+			if _, err := adminDy.Resource(vapGVR).Create(ctx, vap, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("creating the refusing policy: %v", err)
+			}
+			if _, err := adminDy.Resource(vbGVR).Create(ctx, vb, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("binding the refusing policy: %v", err)
+			}
+			lifted := false
+			lift := func() {
+				if lifted {
+					return
+				}
+				lifted = true
+				_ = adminDy.Resource(vbGVR).Delete(ctx, "test-423-refuse-child-delete", metav1.DeleteOptions{})
+				_ = adminDy.Resource(vapGVR).Delete(ctx, "test-423-refuse-child-delete", metav1.DeleteOptions{})
+			}
+			defer lift()
+			// The policy is enforced asynchronously: wait until a dry-run delete is refused (and, below,
+			// until it is accepted again), so neither half of the arm runs against the wrong state.
+			waitDelete := func(refused bool) {
+				t.Helper()
+				for i := 0; i < 150; i++ {
+					derr := dpa.Delete(ctx, blocked, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}})
+					if (derr != nil && !errors.IsNotFound(derr)) == refused {
+						return
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				t.Fatalf("the refusing policy never became refused=%v", refused)
+			}
+			waitDelete(true)
+
+			auditSink.Reset()
+			if err := handler.Delete(ctx, u); err == nil {
+				t.Fatal("#423: Delete succeeded although a child's delete is refused: the failure arm exercised nothing")
+			}
+			var failed []auditRow
+			for _, r := range auditRowsFor(t, auditSink, u.GetUID()) {
+				if r.outcome == audit.OutcomeFailure {
+					failed = append(failed, r)
+				}
+			}
+			if len(failed) != 1 || failed[0].action != auditrec.ActionUninstall || failed[0].verb != "delete" ||
+				failed[0].resource != "datapresentationazures" || failed[0].name != blocked || failed[0].uid != string(live.GetUID()) {
+				t.Errorf("#423: the refused child delete must be one helm.uninstall / delete / failure row with uid %s, got [%s]", live.GetUID(), rowNames(failed))
+			}
+			if _, err := dpa.Get(ctx, blocked, metav1.GetOptions{}); err != nil {
+				t.Errorf("#423: the child whose delete was refused must still be live: %v", err)
+			}
+			u, err = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if at, _, _ := unstructured.NestedString(u.Object, "status", "helmOperation", "returnedAt"); at == "" {
+				t.Errorf("#497: the failed uninstall's record carries no returnedAt on the persisted object (status.helmOperation = %v): the next Delete would wait the pending grace", u.Object["status"].(map[string]interface{})["helmOperation"])
+			}
+
+			lift()
+			waitDelete(false)
+			u, err = cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
 		auditSink.Reset()
 		err = handler.Delete(ctx, u)
 		if err != nil {
@@ -1838,6 +1934,11 @@ func TestController(t *testing.T) {
 		delRows := auditRowsFor(t, auditSink, u.GetUID())
 		deleted := map[string]bool{}
 		for _, r := range delRows {
+			// #497: the lock the refused uninstall left is cleared by a rollback before the re-driven
+			// uninstall, and that rollback's writes are recorded too.
+			if r.action == auditrec.ActionRollback {
+				continue
+			}
 			if r.action != auditrec.ActionUninstall || r.verb != "delete" {
 				t.Errorf("#423: uninstall row %+v, want helm.uninstall/delete", r)
 			}

@@ -474,7 +474,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// tens of seconds; the old unconditional rollback reverted such in-flight operations mid-flight
 		// (even rolling back a pending-rollback), which — with the reconcile re-enqueue cadence —
 		// produced an Upgrade<->Rollback thrash on the 319-resource portal composition.
-		pendingFor := time.Since(rel.Updated)
+		pendingFor := time.Since(operationClock(rel))
 		// #461: an operation whose starter pod no longer exists will never settle; clear it now
 		// instead of after the grace. Only on positive evidence (see orphanedOperation).
 		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn))
@@ -1478,13 +1478,19 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Observe recovery: within the grace period the uninstall may still be legitimately in flight (wait
 	// and retry); past it, roll back to clear the lock, then re-drive the uninstall cleanly below.
 	if rel.Status == helmconfig.StatusUninstalling {
-		stuckFor := time.Since(rel.Updated)
+		stuckFor := time.Since(operationClock(rel))                        // #497: the uninstall's start, not the deploy
 		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn)) // #461, as in Observe
 		if orphan {
 			log.Info("Stuck uninstall was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
 				"stuckFor", stuckFor.String(), "reason", why)
 		}
-		if stuckFor < pendingOperationGrace && !orphan {
+		// #497: a lock left by an uninstall whose call RETURNED (with an error) is not in flight.
+		returned, rwhy := returnedOperation(mg, rel, "uninstall")
+		if returned {
+			log.Info("Stuck uninstall was left by a call that already returned; clearing it now instead of waiting out the grace.",
+				"stuckFor", stuckFor.String(), "reason", rwhy)
+		}
+		if stuckFor < pendingOperationGrace && !orphan && !returned {
 			log.Debug("Release uninstall in progress; waiting for it to settle before re-driving delete.",
 				"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
 			return fmt.Errorf("waiting for an in-flight uninstall of release %s to settle (stuck for %s)",
@@ -1549,6 +1555,15 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		})
 	})
 	if err != nil {
+		// #497: the call RETURNED; whatever lock helm left (uninstalling) is not in flight. Say so in
+		// the record, so the next Delete clears it at once instead of waiting the pending grace. A
+		// failed write only costs that wait: the grace path still recovers.
+		markHelmOperationReturned(mg, time.Now())
+		if updated, werr := updateStatus(ctx, mg, updateOpts); werr != nil {
+			log.Debug("Could not record that the failed uninstall returned; the next Delete waits the pending grace", "error", werr.Error())
+		} else if updated != nil {
+			mg = updated
+		}
 		return fmt.Errorf("uninstalling helm chart: %w", err)
 	}
 
