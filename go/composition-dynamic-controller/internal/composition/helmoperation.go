@@ -59,6 +59,20 @@ func recordHelmOperation(ctx context.Context, mg *unstructured.Unstructured, pha
 	return updated, nil
 }
 
+// operationClock is when rel's incomplete operation began: helm's Info.Deleted for an uninstalling
+// revision (helm stamps it as the uninstall starts), and Info.LastDeployed (rel.Updated) for a
+// pending install, upgrade or rollback, where helm writes the pending revision as the operation
+// starts. An uninstall never moves LastDeployed, so measuring it from rel.Updated measured from the
+// DEPLOY (#497): a release deployed hours ago read as stuck the moment its uninstall began, and the
+// operation record, written just before the uninstall, never matched the revision. A zero Deleted
+// on an uninstalling revision (a release written before helm stamped it) falls back to Updated.
+func operationClock(rel *helmconfig.Release) time.Time {
+	if rel.Status == helmconfig.StatusUninstalling && !rel.Deleted.IsZero() {
+		return rel.Deleted
+	}
+	return rel.Updated
+}
+
 // podName / podNamespace identify THIS controller pod (POD_NAME / POD_NAMESPACE, from the downward API
 // on the cdc Deployment). Empty when unset (tests, an older chart): then no starter is recorded and
 // the orphan check never fires, which is today's behaviour.
@@ -84,6 +98,64 @@ func setHelmOperationRecord(mg *unstructured.Unstructured, phase string, started
 	_ = unstructured.SetNestedMap(mg.Object, rec, "status", "helmOperation")
 }
 
+// markHelmOperationReturned stamps status.helmOperation.returnedAt (#497): this controller's call for
+// the recorded operation RETURNED with an error, and helm's lock (e.g. uninstalling) was left behind.
+// Nothing is in flight any more, which the record alone could not say: "started by this pod" was
+// read as "maybe still running", so the next Delete waited the full pending grace (16m) for a call
+// that had already returned. No-op without a record.
+func markHelmOperationReturned(mg *unstructured.Unstructured, returned time.Time) {
+	if _, found, _ := unstructured.NestedStringMap(mg.Object, "status", "helmOperation"); !found {
+		return
+	}
+	_ = unstructured.SetNestedField(mg.Object, returned.UTC().Format(time.RFC3339Nano), "status", "helmOperation", "returnedAt")
+}
+
+// helmOperationRecordKeys is every key this file writes under status.helmOperation. The composition
+// CRD's status schema is CLOSED there (core-provider statics/status.schema.json), so a key missing
+// from it is pruned by the apiserver on every write and the behaviour built on it silently never
+// engages. helmoperation_schema_test.go holds the two together.
+var helmOperationRecordKeys = []string{"phase", "startedAt", "startedBy", "returnedAt"}
+
+// returnedOperation reports whether rel's lock was left by a recorded operation whose call has
+// RETURNED (#497, Diego 2026-11-14), so it can be cleared now instead of after the pending grace.
+// ALL must hold, and anything else is false (keep the grace):
+//   - status.helmOperation exists, for the given phase, and its startedAt is within orphanWindow
+//     BEFORE operationClock(rel), so the record is THIS operation's (the same test as orphanedOperation);
+//   - it carries returnedAt, at or after startedAt.
+//
+// A record from a controller that predates returnedAt, or one an older CRD pruned it from, carries
+// none: the grace applies, which is the behaviour before #497.
+func returnedOperation(mg *unstructured.Unstructured, rel *helmconfig.Release, phase string) (bool, string) {
+	if rel == nil {
+		return false, "no release"
+	}
+	rec, found, err := unstructured.NestedStringMap(mg.Object, "status", "helmOperation")
+	if err != nil || !found {
+		return false, "no operation recorded"
+	}
+	if rec["phase"] != phase {
+		return false, fmt.Sprintf("the recorded operation is %q, not %q", rec["phase"], phase)
+	}
+	started, err := time.Parse(time.RFC3339Nano, rec["startedAt"])
+	if err != nil {
+		return false, "unreadable startedAt"
+	}
+	if gap := operationClock(rel).Sub(started); gap < 0 || gap > orphanWindow {
+		return false, fmt.Sprintf("the record is not this revision's (recorded %s before it)", gap)
+	}
+	if rec["returnedAt"] == "" {
+		return false, "the call has not been recorded as returned"
+	}
+	returned, err := time.Parse(time.RFC3339Nano, rec["returnedAt"])
+	if err != nil {
+		return false, "unreadable returnedAt"
+	}
+	if returned.Before(started) {
+		return false, "returnedAt precedes startedAt"
+	}
+	return true, "this operation's call returned at " + rec["returnedAt"]
+}
+
 // clearHelmOperationRecord removes status.helmOperation in memory once the operation has returned;
 // the next status write persists the removal. A record that stays (no further write) is harmless:
 // orphanedOperation only acts on a record that belongs to the pending revision it is looking at.
@@ -106,7 +178,7 @@ func podLookupFrom(dyn dynamic.Interface) podLookup {
 // orphanedOperation reports whether rel's incomplete operation was started by a controller pod that
 // no longer exists (#461, Diego 2026-11-13), so the lock can be cleared now instead of after the
 // pending grace. ALL must hold, and anything else is false (keep the grace):
-//   - status.helmOperation exists and its startedAt is within orphanWindow BEFORE rel.Updated (the
+//   - status.helmOperation exists and its startedAt is within orphanWindow BEFORE operationClock(rel) (the
 //     revision's LastDeployed), so the record is THIS operation's and not a stale one a live pod failed
 //     to overwrite;
 //   - it names a starter pod, and that pod is not this one;
@@ -125,7 +197,7 @@ func orphanedOperation(ctx context.Context, mg *unstructured.Unstructured, rel *
 	if err != nil {
 		return false, "unreadable startedAt"
 	}
-	if gap := rel.Updated.Sub(started); gap < 0 || gap > orphanWindow {
+	if gap := operationClock(rel).Sub(started); gap < 0 || gap > orphanWindow {
 		return false, fmt.Sprintf("the record is not this revision's (recorded %s before it)", gap)
 	}
 	ns, name, ok := strings.Cut(rec["startedBy"], "/")

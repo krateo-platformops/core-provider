@@ -307,6 +307,9 @@ spec:
                     format: date-time
                   startedBy:
                     type: string
+                  returnedAt:
+                    type: string
+                    format: date-time
               releaseName:
                 type: string
                 description: 'The helm release name this composition resolved to, written by every phase that resolves it. It exists so that RESOLUTION and PERSISTENCE can be told apart from the object alone. The krateo.io/release-name label is write-once, so an established composition carries it and resolution short-circuits; a new or recreated composition has no label, and whether the resolved name was then persisted was NOT observable -- the openstack-ironic-operator-kog session could only infer it by counting ''Adopting the existing helm release'' log lines (11 on a probe against 0 in production), because managedFields is stripped on these objects (zero entries on the probe AND zero on a production object that demonstrably carries the label, so ownership said nothing). With this field the three states read directly: label present means it was read from the label and no adoption ran; label absent with releaseName present means adoption resolved it and the write landed; label absent with releaseName
