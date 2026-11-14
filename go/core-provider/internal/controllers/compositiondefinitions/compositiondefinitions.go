@@ -386,6 +386,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		ext.client = tc.Clientset
 		ext.remote = true
 		ext.secretResourceVersion = tc.SecretResourceVersion
+		ext.targetAuthnURL = tc.AuthnURL
 		log.Debug("Deploying to remote target cluster", "host", tc.Config.Host)
 	}
 
@@ -421,6 +422,9 @@ type external struct {
 	// resourceVersion of the kubeconfig Secret used to reach it.
 	remote                bool
 	secretResourceVersion string
+	// targetAuthnURL is the remote KubernetesTarget's spec.authnUrl (#251 item 4); empty for a local
+	// definition or when unset. Read through controllerAuthnURL, never directly.
+	targetAuthnURL string
 
 	// removeDanglingRBAC: see Options.RemoveDanglingRBAC.
 	removeDanglingRBAC bool
@@ -1170,6 +1174,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
@@ -1586,6 +1591,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,
@@ -1974,6 +1980,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
 		SelfSAName:             SelfSAName,
 		SelfSANamespace:        SelfSANamespace,
 		SelfGroup:              SelfGroup,

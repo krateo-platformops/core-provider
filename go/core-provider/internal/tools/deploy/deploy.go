@@ -156,6 +156,13 @@ type DeployOptions struct {
 	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
 	// and presents it as the Bearer. Empty ⇒ the /rbac call is unauthenticated (snowplow 401).
 	AuthnURL string
+	// ControllerAuthnURL is the authn base URL the composition controller is given (URL_AUTHN in its
+	// ConfigMap), resolved by the caller for where the controller runs (#251 item 4): a remote
+	// target's KubernetesTarget.spec.authnUrl, or core-provider's own authn URL for a local one.
+	// It must never be empty: the controller reads URL_AUTHN with plumbing's env.String, which returns
+	// a set-but-empty value as "", not as its default, so an empty value would leave it without an
+	// authn to call. The caller always resolves a default.
+	ControllerAuthnURL string
 	// SelfSAName / SelfSANamespace / SelfGroup identify core-provider's OWN ServiceAccount for its
 	// apiRefRBAC authn allowlist mapping — provisioned lazily (ensureSelfAuthnMapping) the first
 	// time a composition declares an apiRef, so core-provider can authenticate to snowplow /rbac.
@@ -535,7 +542,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		"status_data_template", opts.StatusDataTemplate,
 		"api_ref_name", opts.ApiRefName,
 		"api_ref_namespace", opts.ApiRefNamespace,
-		"api_ref_extras", opts.ApiRefExtras)
+		"api_ref_extras", opts.ApiRefExtras,
+		"authn_url", opts.ControllerAuthnURL)
 	if err != nil {
 		return "", err
 	}
@@ -731,7 +739,8 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		"status_data_template", "",
 		"api_ref_name", "",
 		"api_ref_namespace", "",
-		"api_ref_extras", "")
+		"api_ref_extras", "",
+		"authn_url", "")
 	if err != nil {
 		return err
 	}
@@ -961,7 +970,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		"status_data_template", opts.StatusDataTemplate,
 		"api_ref_name", opts.ApiRefName,
 		"api_ref_namespace", opts.ApiRefNamespace,
-		"api_ref_extras", opts.ApiRefExtras)
+		"api_ref_extras", opts.ApiRefExtras,
+		"authn_url", opts.ControllerAuthnURL)
 	if err != nil {
 		return "", err
 	}

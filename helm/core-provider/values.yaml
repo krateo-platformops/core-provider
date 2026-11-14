@@ -202,6 +202,10 @@ apiRefRBAC:
   # http://snowplow.<.Release.Namespace>.svc.cluster.local:8081 and authn.<ns>...:8082 (the chart
   # defaults). Set either explicitly to override (e.g. a port-80 exposure).
   snowplowUrl: ""
+  # authnUrl is ALSO the authn every LOCAL composition controller calls (its URL_AUTHN, #251): one
+  # value for both processes, since they share the cluster. A controller on a remote target uses
+  # that target's KubernetesTarget.spec.authnUrl instead, never this. Changing it rolls every local
+  # composition controller (their ConfigMap changes).
   authnUrl: ""
   # Namespace where core-provider's authn allowlist mapping is created (where authn watches).
   # "" ⇒ the release namespace.

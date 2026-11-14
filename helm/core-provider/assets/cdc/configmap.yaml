@@ -19,6 +19,12 @@ data:
   COMPOSITION_CONTROLLER_API_REF_EXTRAS: {{ "{{" }} .api_ref_extras | quote {{ "}}" }}
   URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081/
   KRATEO_NAMESPACE: {{ .Release.Namespace }}
+  # #251 item 4: the authn this controller exchanges its projected token with, resolved by
+  # core-provider for where the controller runs: a remote target's KubernetesTarget.spec.authnUrl, or
+  # core-provider's own authn URL (apiRefRBAC.authnUrl) for a local one; otherwise the in-cluster
+  # authn Service in COMPOSITION_AUTHN_NAMESPACE. Never empty (an empty value would override the
+  # controller's default with "").
+  URL_AUTHN: {{ "{{" }} .authn_url | quote {{ "}}" }}
   DEPLOYMENT_NAME: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
   # docs/design/cdc-pooling.md, step 2: the Lease this controller must hold to reconcile its Kind at
   # this version, in its own namespace (POD_NAMESPACE). Named for the Kind x version, so any other

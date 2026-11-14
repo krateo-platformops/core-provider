@@ -372,6 +372,17 @@ type KubernetesTargetSpec struct {
 	// target cluster. The Secret is the credential rotation seam - populate and rotate
 	// it via External Secrets Operator.
 	KubeconfigRef rtv1.SecretKeySelector `json:"kubeconfigRef"`
+
+	// AuthnURL is the base URL of the authn service INSIDE the target cluster, which a composition
+	// controller running there calls to exchange its projected ServiceAccount token for a JWT
+	// (definitions with an apiRef). That token is minted by the target's apiserver, so only an authn
+	// in the same target can validate it. Optional: when empty, the controller is given
+	// http://authn.<authn namespace>.svc.cluster.local:8082, where the authn namespace is the one
+	// core-provider writes the controller's authn mapping into (COMPOSITION_AUTHN_NAMESPACE).
+	// Set it when the target's authn Service has another name, namespace or port (#251).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^https?://[^\s]+$`
+	AuthnURL string `json:"authnUrl,omitempty"`
 }
 
 // KubernetesTargetStatus reports the observed reachability of the target cluster, refreshed by the
