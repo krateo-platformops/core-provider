@@ -23,15 +23,17 @@ func TestApplyOrUpdateCRDWaitsOnTheVersionAwarePredicate(t *testing.T) {
 		t.Fatalf("parsing crd.go: %v", err)
 	}
 
+	// The body lives in ApplyOrUpdateCRDDropping since #484; ApplyOrUpdateCRD delegates to it with no
+	// drop set, so that is the function whose waits this test is about.
 	var fn *ast.FuncDecl
 	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "ApplyOrUpdateCRD" {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "ApplyOrUpdateCRDDropping" {
 			fn = fd
 			break
 		}
 	}
 	if fn == nil {
-		t.Fatal("ApplyOrUpdateCRD not found in crd.go — this test has lost its subject and would " +
+		t.Fatal("ApplyOrUpdateCRDDropping not found in crd.go — this test has lost its subject and would " +
 			"otherwise report nothing at all")
 	}
 
@@ -73,7 +75,7 @@ func TestApplyOrUpdateCRDWaitsOnTheVersionAwarePredicate(t *testing.T) {
 	// collapses or adds one, the positional assertions stop meaning what they say and this must
 	// fail rather than silently assert about the wrong call.
 	if len(predicates) != 2 {
-		t.Fatalf("expected exactly 2 watcher.NewWatcher calls in ApplyOrUpdateCRD, found %d: %v. "+
+		t.Fatalf("expected exactly 2 watcher.NewWatcher calls in ApplyOrUpdateCRDDropping, found %d: %v. "+
 			"The create path legitimately waits on IsReady and the update path must not, so the "+
 			"count is load-bearing for this assertion rather than incidental", len(predicates), predicates)
 	}

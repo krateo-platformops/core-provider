@@ -88,7 +88,7 @@ func TestApplyHubCompositionCRD_LocalIsNoOp(t *testing.T) {
 	e := &external{remote: false, mgmt: mgmt, mgmtDynamic: nil}
 
 	crd := testCompositionCRD()
-	if err := e.applyHubCompositionCRD(context.Background(), crd); err != nil {
+	if err := e.applyHubCompositionCRD(context.Background(), crd, nil); err != nil {
 		t.Fatalf("expected nil error for local CD, got: %v", err)
 	}
 

@@ -719,26 +719,12 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, cr *composition
 	for _, v := range prunable {
 		pruneSet[v] = true
 	}
-	// The apiserver forbids removing a version from spec.versions while it is still listed in
-	// status.storedVersions (a version that was, at some point, a storage version — e.g. the very
-	// first served version before "vacuum" became the permanent storage version). Trim the pruned
-	// versions out of storedVersions FIRST, via the status subresource, then remove them from
-	// spec.versions. Safe: the migration loop re-writes every Composition through the current served
-	// endpoint, so all data is now persisted at the current storage version ("vacuum") — none remains
-	// at these retired versions. Without this the whole spec update is rejected and nothing prunes.
-	var keptStored []string
-	for _, sv := range crd.Status.StoredVersions {
-		if !pruneSet[sv] {
-			keptStored = append(keptStored, sv)
-		}
+	// storedVersions first, then spec.versions: the one removal shared with the add (#484).
+	removed, err := crdclient.DropVersions(ctx, e.kube, crd, pruneSet)
+	if err != nil {
+		return fmt.Errorf("prune: %w", err)
 	}
-	if len(keptStored) != len(crd.Status.StoredVersions) {
-		crd.Status.StoredVersions = keptStored
-		if err := e.kube.Status().Update(ctx, crd); err != nil {
-			return fmt.Errorf("trimming storedVersions before prune: %w", err)
-		}
-	}
-	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
+	if !removed {
 		return nil
 	}
 	if _, err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
@@ -1010,8 +996,18 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if !existVersion {
 		log.Debug("CRD version not found", "gvr", gvr.String())
-		cr.SetConditions(rtv1.Unavailable().
-			WithMessage(fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())))
+		// #484: say WHY when the add is waiting for a vacated version's grace, from the same plan
+		// Update acts on, so the message and the behaviour cannot disagree. Same condition and reason
+		// as before; only the message is specific.
+		msg := fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())
+		plan, perr := e.planServedVersionAdd(ctx, cr, chartGVK, gvr.Resource)
+		if perr != nil {
+			return reconciler.ExternalObservation{}, perr
+		}
+		if plan.wait != nil {
+			msg = plan.wait.Error()
+		}
+		cr.SetConditions(rtv1.Unavailable().WithMessage(msg))
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1341,11 +1337,11 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 // ApplyOrUpdateCRD adds the composition-version printer column and waits for the CRD to become
 // established, independently of the spoke apply. Cross-cluster CRD-version skew (hub vs spoke) is
 // tracked in docs/design/remote-composition-mirror.md §7.
-func (e *external) applyHubCompositionCRD(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) error {
+func (e *external) applyHubCompositionCRD(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition, drop map[string]bool) error {
 	if !e.remote {
 		return nil
 	}
-	if _, err := crdclient.ApplyOrUpdateCRD(ctx, e.mgmt, e.mgmtDynamic, crd.DeepCopy()); err != nil {
+	if _, err := crdclient.ApplyOrUpdateCRDDropping(ctx, e.mgmt, e.mgmtDynamic, crd.DeepCopy(), drop); err != nil {
 		return fmt.Errorf("error applying composition CRD to hub: %w", err)
 	}
 	return nil
@@ -1531,14 +1527,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error injecting declared status fields: %w", err)
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
-	if err != nil {
-		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-
-	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
-	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
-	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
+	// #484: the target and hub CRD writes, with the prune-due versions dropped in the same write; a
+	// vacated version still inside its grace makes the add wait, which is not a failure.
+	gvr, err := e.applyCompositionCRD(ctx, cr, gvk, crd)
+	if stop, err := settleAddWait(log, err); stop || err != nil {
 		return err
 	}
 
@@ -1742,7 +1734,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	} else {
 		gvr, err = e.deployController(ctx, cr, gvk, crd, specSchemaBytes, log)
 	}
-	if err != nil {
+	// #484: the add waits out a vacated version's grace. Nothing of the new version was written, so
+	// nothing below may run for it; Observe keeps reporting it not served (with this reason) and the
+	// next poll retries. Returned as success: the wait is the intended outcome, not a failure, and an
+	// error would back off and report Synced=False for something working as designed.
+	if stop, err := settleAddWait(log, err); stop || err != nil {
 		return err
 	}
 
@@ -1918,14 +1914,10 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 // deployController is Update's apply of this definition's CRD version and composition controller,
 // for the definition that owns its Kind+version (controllerowner.go).
 func (e *external) deployController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, crd *apiextensionsv1.CustomResourceDefinition, specSchemaBytes []byte, log logging.Logger) (schema.GroupVersionResource, error) {
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
+	// #484: the target and hub CRD writes, with the prune-due versions dropped in the same write. A
+	// vacated version still inside its grace returns the add-waits outcome, which Update handles.
+	gvr, err := e.applyCompositionCRD(ctx, cr, gvk, crd)
 	if err != nil {
-		return gvr, fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-
-	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
-	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
-	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
 		return gvr, err
 	}
 
