@@ -463,13 +463,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		markWrote(ctx, writeDerivedRBAC) // RBAC created or changed, possibly before an error
 	}
 	if err != nil {
-		cond := condition.Unavailable()
-		cond.Message = err.Error()
-		unstructuredtools.SetConditions(mg, cond)
-		if _, uerr := updateStatus(ctx, mg, updateOpts); uerr != nil {
-			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", uerr)
-		}
-		return controller.ExternalObservation{}, err
+		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, err, updateOpts)
 	}
 
 	if isIncompleteHelmOperation(rel.Status) {
@@ -668,15 +662,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 	if err != nil {
-		retErr := fmt.Errorf("reconciling helm chart: %w", err)
-		condition := condition.Unavailable()
-		condition.Message = retErr.Error()
-		unstructuredtools.SetConditions(mg, condition)
-		_, err = updateStatus(ctx, mg, updateOpts)
-		if err != nil {
-			return controller.ExternalObservation{}, fmt.Errorf("updating status after failure: %w", err)
-		}
-		return controller.ExternalObservation{}, retErr
+		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, fmt.Errorf("reconciling helm chart: %w", err), updateOpts)
 	}
 
 	// The reconcile converged the cluster in-place. When it detected a real change it also wrote a
