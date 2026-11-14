@@ -971,6 +971,29 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 		switch {
 		case stringField(cm, "status") == "True":
 			return childHealthy
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "TerminalByDesign":
+			// #498 (Diego, 2026-11-14): the child DECLARES that resting at Ready=False is its
+			// healthy end state, so it is healthy here, and the stall deadline (when it ships) never
+			// applies to it. Example: an Ironic NodeProvision, a create the vendor answers 202 that
+			// must never be driven again, because driving to "active" again wipes the disk.
+			//
+			// UNREACHABLE TODAY, BY DESIGN: no producer emits it yet. rest-dynamic-controller will,
+			// from an explicit per-verb declaration in the RestDefinition (oasgen-provider, after
+			// their 0.68.0). Mapped ahead of arrival for the reason CreateFailed is below: waiting
+			// for a child's reason to appear is waiting for the defect. So the silence of this arm
+			// is not evidence of anything until that release exists.
+			//
+			// The opposite verdict to NoCreateVerbDeclared and CreateUnreachable (failed, below):
+			// those say a definition must change, this says nothing is wrong. And never inferred
+			// from Pending, which stays converging: Pending means both "in flight" and "resting for
+			// good", which is the ambiguity this declaration removes.
+			//
+			// A LITERAL, matched against the child's own controller's string, for the reason the
+			// ObserveFailed arm gives. The shared constant is plumbing's
+			// conditions.ReasonTerminalByDesign; reasoncontract_test.go pins this literal to it.
+			// READ ONLY: the cdc never writes it on a composition (installer's dependency gate would
+			// withhold a composition carrying it); a test pins that too.
+			return childHealthy
 		case stringField(cm, "reason") == "Unavailable":
 			return childFailed
 		case stringField(cm, "reason") == "CreateFailed",
