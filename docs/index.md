@@ -64,6 +64,9 @@ catalog is [go/core-provider/telemetry/metrics-reference.md](../go/core-provider
   allowlist mapping, the issued group, and the auto-generated RBAC.
 - [how-to/migrate-off-remoteinstall.md](./how-to/migrate-off-remoteinstall.md) —
   migrating the removed `RemoteInstall` kind to first-class remote Compositions.
+- [how-to/projected-health.md](./how-to/projected-health.md) — a chart's own health
+  verdict (`.status.health`): hold `Ready=False/Creating` until the chart is complete, withdraw it
+  with `{}`, and what it can and cannot override.
 
 ## Design records (`docs/design/`)
 
