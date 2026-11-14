@@ -1011,6 +1011,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
+		markWrote(ctx, writeHelmUpgrade) // the upgrade ran, which writes, whether or not it then failed
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
 		// controller panicked mid-reconcile. Reproduced on a fresh vcluster child, where the portal's
 		// first install outlived pendingOperationGrace, was rolled back, and this upgrade then ran
@@ -1029,6 +1030,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
+		markWrote(ctx, writeHelmInstall) // the install ran, which writes, whether or not it then failed
 		if err != nil {
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
@@ -1254,6 +1256,9 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		})
 	})
 	clearHelmOperationRecord(mg) // #461
+	if reconcileRes != nil && reconcileRes.Changed {
+		markWrote(ctx, writeHelmReconcile) // what this Update wrote; the runtime marks the pass acted itself
+	}
 	if err != nil {
 		return fmt.Errorf("upgrading helm chart: %w", err)
 	}
@@ -1553,6 +1558,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			return err
 		})
 	})
+	markWrote(ctx, writeHelmUninstall) // the uninstall ran, which writes, whether or not it then failed
 	if err != nil {
 		// #497: the call RETURNED; whatever lock helm left (uninstalling) is not in flight. Say so in
 		// the record, so the next Delete clears it at once instead of waiting the pending grace. A

@@ -9,12 +9,18 @@ import (
 )
 
 // Write kinds recorded on the reconcile trace by markWrote. A CLOSED set, consumed by
-// observability to count what a pass wrote: a non-joined act (every resync) opens no step span, so
-// without this event an acted root has nothing in its trace that says what was written.
+// observability to count what a pass wrote: a non-joined act (every resync, and every Create,
+// Update or Delete that joins no upstream trace) opens no step span, so without this event an
+// acted root has nothing in its trace that says what was written. Observe records derived_rbac,
+// rollback and helm_reconcile; Update records helm_reconcile when its reconcile changed the
+// cluster; Create records helm_install or helm_upgrade; Delete records helm_uninstall.
 const (
 	writeDerivedRBAC   = "derived_rbac"
 	writeRollback      = "rollback"
 	writeHelmReconcile = "helm_reconcile"
+	writeHelmInstall   = "helm_install"
+	writeHelmUpgrade   = "helm_upgrade"
+	writeHelmUninstall = "helm_uninstall"
 
 	// writeEvent and attrWrite name the span event and its attribute.
 	writeEvent = "write"

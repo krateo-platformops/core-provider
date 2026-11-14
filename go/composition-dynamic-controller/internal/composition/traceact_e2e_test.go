@@ -197,19 +197,27 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 	}
 	deadline4 := time.Now().Add(3 * time.Minute)
 	acted4 := false
-	var actedRoot sdktrace.ReadOnlySpan
-	for time.Now().Before(deadline4) && !acted4 {
+	// And an acted root says WHAT was written: observability counts the "write" event, because a
+	// non-joined act opens no step span whose name could say so. A spec change is reported
+	// not-up-to-date by Observe and applied by the Update route's reconcile, which records
+	// helm_reconcile; whichever pass carries the write must say so.
+	said := false
+	var actedEvents [][]sdktrace.Event
+	for time.Now().Before(deadline4) && !said {
+		actedEvents = nil
 		for _, r := range rootsAfter(rec, t4) {
 			if v, ok := rootActed(r); ok && v {
-				acted4, actedRoot = true, r
+				acted4 = true
+				actedEvents = append(actedEvents, r.Events())
+				if hasWriteEventOn(r, writeHelmReconcile) {
+					said = true
+				}
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	// And the root says WHAT was written: observability counts the "write" event, because this
-	// non-joined act opens no step span whose name could say so.
-	if acted4 && !hasWriteEventOn(actedRoot, writeHelmReconcile) {
-		t.Errorf("the acted root must carry a %q event with %s=%s; events: %v", writeEvent, attrWrite, writeHelmReconcile, actedRoot.Events())
+	if acted4 && !said {
+		t.Errorf("no acted root after the spec change carries a %q event with %s=%s; acted roots' events: %v", writeEvent, attrWrite, writeHelmReconcile, actedEvents)
 	}
 	if !acted4 {
 		t.Errorf("a pass whose helm reconcile changed the cluster must carry %s=true; %d roots after the spec change, none marked", tracecontext.AttrActed, len(rootsAfter(rec, t4)))
