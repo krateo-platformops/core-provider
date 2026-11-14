@@ -24,6 +24,7 @@ docs/how-to/remote-target-credentials.md: KubernetesTarget kubeconfig Secrets wi
 docs/how-to/remote-target-rbac.yaml: the target-side ClusterRole for remote projection
 docs/how-to/apiref-status-projection-authn.md: the apiRef status source — allowlist mapping, issued group, auto-generated RBAC
 docs/how-to/migrate-off-remoteinstall.md: migrating the removed RemoteInstall kind to first-class remote Compositions
+docs/how-to/projected-health.md: a chart's own health verdict via statusDataTemplate forPath health — Creating until complete, withdraw with {}, what it overrides
 # Design records (frontmatter status reconciled against the code, 2026-08-07):
 docs/design/multicluster-compositions.md: local + remote deployment via KubernetesTarget (diverged: target is namespaced now)
 docs/design/remote-composition-mirror.md: hub Composition mirrored onto the spoke; retired RemoteInstall (implemented)
