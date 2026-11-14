@@ -861,6 +861,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationCreate)
 
 	log := xcontext.Logger(ctx)
 	log = log.WithValues("op", "Create").
@@ -1086,6 +1087,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationUpdate)
 
 	// RESOLVED, NOT READ OFF THE LABEL (#335). This read the label, and on #303's adoption path the
 	// label does not exist: its absence is what triggers adoption. So Update got "" and every helm
@@ -1357,6 +1359,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationDelete)
 
 	// RESOLVED HERE TOO (#335), for the same reason as Update -- and with a guard, because this is
 	// a teardown path. A composition deleted before any phase persisted the label would otherwise

@@ -25,6 +25,15 @@ const (
 	// writeEvent and attrWrite name the span event and its attribute.
 	writeEvent = "write"
 	attrWrite  = attribute.Key("krateo.write")
+
+	// attrOperation names the handler the runtime dispatched this pass to, for observability: an
+	// acted root with no write event is EITHER a dispatched Update/Create/Delete that wrote nothing
+	// (the runtime marks those acted itself) OR a false mark, and only this attribute tells them
+	// apart. A CLOSED set: create | update | delete. Observe passes carry none.
+	attrOperation   = attribute.Key("krateo.operation")
+	operationCreate = "create"
+	operationUpdate = "update"
+	operationDelete = "delete"
 )
 
 // markWrote marks this pass acted (Diego, 2026-11-14: "mark only on a real write") and records
@@ -34,4 +43,10 @@ const (
 func markWrote(ctx context.Context, kind string) {
 	controller.MarkActed(ctx)
 	trace.SpanFromContext(ctx).AddEvent(writeEvent, trace.WithAttributes(attrWrite.String(kind)))
+}
+
+// markOperation records, on the active span (the reconcile root unless the act joined an upstream
+// trace), which handler this pass was dispatched to. With tracing off it does nothing.
+func markOperation(ctx context.Context, op string) {
+	trace.SpanFromContext(ctx).SetAttributes(attrOperation.String(op))
 }

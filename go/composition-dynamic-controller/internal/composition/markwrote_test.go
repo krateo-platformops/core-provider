@@ -44,3 +44,23 @@ func hasWriteEventOn(s sdktrace.ReadOnlySpan, kind string) bool {
 	}
 	return false
 }
+
+// markOperation names the dispatched handler, so an acted root with no write event can be told
+// apart: a dispatched Update/Create/Delete that wrote nothing, or a false mark.
+func TestMarkOperation_NamesTheHandler(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	ctx, span := tp.Tracer("test").Start(context.Background(), "reconcile")
+	markOperation(ctx, operationUpdate)
+	span.End()
+	got := ""
+	for _, kv := range rec.Ended()[0].Attributes() {
+		if kv.Key == attrOperation {
+			got = kv.Value.AsString()
+		}
+	}
+	if got != operationUpdate {
+		t.Fatalf("%s = %q, want %q", attrOperation, got, operationUpdate)
+	}
+	markOperation(context.Background(), operationCreate) // no span: a no-op
+}
