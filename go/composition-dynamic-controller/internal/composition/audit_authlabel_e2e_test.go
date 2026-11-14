@@ -67,6 +67,36 @@ func TestAuthorizationLabelOnlyChangeIsAudited(t *testing.T) {
 			}
 		}
 
+		// The test leaves the cluster as it found it: TestController shares it, and its Setup CREATES
+		// the CompositionDefinition CRD, so a CRD this test left behind fails that whole suite.
+		// Everything created here is deleted at the end, and a CRD is waited out until it is gone.
+		crdGVR := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+		var createdCRDs []string
+		t.Cleanup(func() {
+			bg := context.Background()
+			for _, name := range createdCRDs {
+				_ = dyn.Resource(crdGVR).Delete(bg, name, metav1.DeleteOptions{})
+			}
+			for _, name := range createdCRDs {
+				waitFor(t, 120*time.Second, "CRD "+name+" to be deleted", func() bool {
+					_, err := dyn.Resource(crdGVR).Get(bg, name, metav1.GetOptions{})
+					return apierrors.IsNotFound(err)
+				})
+			}
+			_ = kube.CoreV1().Namespaces().Delete(bg, alNS, metav1.DeleteOptions{})
+		})
+		createCRD := func(crd *unstructured.Unstructured, what string) {
+			t.Helper()
+			_, err := dyn.Resource(crdGVR).Create(ctx, crd, metav1.CreateOptions{})
+			switch {
+			case err == nil:
+				createdCRDs = append(createdCRDs, crd.GetName())
+			case apierrors.IsAlreadyExists(err):
+			default:
+				t.Fatalf("%s: %v", what, err)
+			}
+		}
+
 		_, err := kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: alNS}}, metav1.CreateOptions{})
 		ignoreExists(err, "namespace")
 
@@ -75,9 +105,7 @@ func TestAuthorizationLabelOnlyChangeIsAudited(t *testing.T) {
 		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "crds", "core")), "core.krateo.io_compositiondefinitions.yaml", &cdCRD); err != nil {
 			t.Fatal(err)
 		}
-		crdGVR := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
-		_, err = dyn.Resource(crdGVR).Create(ctx, &cdCRD, metav1.CreateOptions{})
-		ignoreExists(err, "CompositionDefinition CRD")
+		createCRD(&cdCRD, "CompositionDefinition CRD")
 
 		// 1. A chart repository served from this test: one ConfigMap, labels from values.
 		chartDir, repoDir := t.TempDir(), t.TempDir()
@@ -137,8 +165,7 @@ func TestAuthorizationLabelOnlyChangeIsAudited(t *testing.T) {
 						"type": "object", "x-kubernetes-preserve-unknown-fields": true}},
 				}},
 			}}}
-		_, err = dyn.Resource(crdGVR).Create(ctx, compCRD, metav1.CreateOptions{})
-		ignoreExists(err, "composition CRD")
+		createCRD(compCRD, "composition CRD")
 		compGVR := schema.GroupVersionResource{Group: "composition.krateo.io", Version: alVersion, Resource: alResource}
 		waitFor(t, 60*time.Second, "the composition CRD to serve", func() bool {
 			_, err := dyn.Resource(compGVR).Namespace(alNS).List(ctx, metav1.ListOptions{})
