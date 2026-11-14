@@ -156,6 +156,11 @@ holding a complete kubeconfig — the rotation seam, ESO-friendly). Its own cont
 probes the target periodically and fills `status`: `connectionStatus`
 (Healthy/Down), the target's Kubernetes `version`,
 `kubeconfigSecretResourceVersion`, `lastProbeTime`, and a Ready condition.
+Optional `spec.authnUrl` (`^https?://...`): the authn **inside** the target that a
+composition controller running there calls with its projected token (only that
+target's authn can validate a token its apiserver minted). Unset, the controller is
+given `http://authn.<authn namespace>.svc.cluster.local:8082`, the namespace
+core-provider writes the controller's authn mapping into (#251).
 Referenced by name from `CompositionDefinition.spec.deploy.targetRef` and resolved
 in the referencing object's own namespace (no cross-namespace targeting).
 

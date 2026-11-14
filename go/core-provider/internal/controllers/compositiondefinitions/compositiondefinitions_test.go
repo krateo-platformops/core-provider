@@ -331,6 +331,7 @@ func TestController(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			assertControllersCarryAuthnURL(ctx, t, cfg, len(cdli))
 
 			return ctx
 		}).Assess("Test Change Version", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
@@ -496,6 +497,8 @@ func TestController(t *testing.T) {
 			}
 
 		}
+		// The version change went through Update: its controller ConfigMaps carry the URL too.
+		assertControllersCarryAuthnURL(ctx, t, cfg, len(toUpgrade))
 
 		return ctx
 	}).Assess("Test Reclaim a leaked per-version controller (#327)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {

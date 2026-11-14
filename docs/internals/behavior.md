@@ -159,6 +159,12 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
    encoded `statusDataTemplate`) and
    `COMPOSITION_CONTROLLER_API_REF_NAME`/`_NAMESPACE`/`_EXTRAS` (the `apiRef`),
    empty when not declared; per-definition `spec.controller` tuning rides as args.
+   `URL_AUTHN` is the authn the controller exchanges its projected token with, for
+   where it runs (`controllerAuthnURL`, #251): a remote target's
+   `KubernetesTarget.spec.authnUrl`, core-provider's own `CORE_PROVIDER_AUTHN_URL`
+   (chart `apiRefRBAC.authnUrl`) for a local controller, else
+   `http://authn.<COMPOSITION_AUTHN_NAMESPACE>.svc.cluster.local:8082`. Never empty:
+   the controller's `env.String` reads a set-but-empty value as `""`.
 4. **Deployment** running the CDC image the chart wired
    (`ghcr.io/krateo-platformops/composition-dynamic-controller`, tag tracking the
    chart `appVersion`) with `-group/-version/-resource/-namespace` args (template

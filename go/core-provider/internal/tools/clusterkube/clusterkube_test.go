@@ -141,4 +141,20 @@ users:
 	if got.SecretResourceVersion == "" {
 		t.Fatal("expected SecretResourceVersion to be captured from the kubeconfig Secret")
 	}
+	if got.AuthnURL != "" {
+		t.Fatalf("a target without spec.authnUrl must report none, got %q", got.AuthnURL)
+	}
+
+	// #251 item 4: the target's own authn URL is carried to the caller, which gives it to a
+	// controller running there.
+	kt := kubernetesTarget()
+	kt.Spec.AuthnURL = "http://authn.auth-system.svc.cluster.local:9443"
+	c = newFakeClient(kt, kubeconfigSecret(kubeconfig)).Build()
+	got, err = Remote(context.Background(), c, targetNS, remoteDeploy())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.AuthnURL != kt.Spec.AuthnURL {
+		t.Fatalf("AuthnURL = %q, want the KubernetesTarget's %q", got.AuthnURL, kt.Spec.AuthnURL)
+	}
 }

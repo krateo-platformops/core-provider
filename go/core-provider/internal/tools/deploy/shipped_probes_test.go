@@ -128,7 +128,8 @@ func renderControllerObjects(t *testing.T, overrides map[string]any) (appsv1.Dep
 		"composition_controller_sa_name", "kubernetesclusters-v0-13-23",
 		"composition_controller_sa_namespace", "krateo-system",
 		"status_data_template", "",
-		"api_ref_name", "", "api_ref_namespace", "", "api_ref_extras", ""); err != nil {
+		"api_ref_name", "", "api_ref_namespace", "", "api_ref_extras", "",
+		"authn_url", shippedControllerAuthnURL); err != nil {
 		t.Fatalf("stage 2, ConfigMap: %v", err)
 	}
 	return dep, cm

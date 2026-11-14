@@ -308,7 +308,8 @@
         },
         "authnUrl": {
           "type": "string",
-          "title": "Authn base URL"
+          "title": "Authn base URL",
+          "description": "The authn core-provider calls, and also every LOCAL composition controller's URL_AUTHN (#251). Empty derives http://authn.<release namespace>.svc.cluster.local:8082. Controllers on a remote target use that KubernetesTarget's spec.authnUrl instead."
         },
         "authnNamespace": {
           "type": "string",

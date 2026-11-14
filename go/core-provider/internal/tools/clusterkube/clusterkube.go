@@ -35,6 +35,9 @@ type Clients struct {
 	// SecretResourceVersion is the resourceVersion of the kubeconfig Secret these
 	// clients were built from, for rotation traceability (empty for local targets).
 	SecretResourceVersion string
+	// AuthnURL is the KubernetesTarget's spec.authnUrl: the authn a controller running in that
+	// target calls (#251 item 4). Empty when unset, and for local targets.
+	AuthnURL string
 }
 
 // IsRemote reports whether the deployment target references a remote cluster.
@@ -75,6 +78,7 @@ func Remote(ctx context.Context, mgmt client.Client, namespace string, target *c
 		return nil, err
 	}
 	clients.SecretResourceVersion = secret.ResourceVersion
+	clients.AuthnURL = kt.Spec.AuthnURL
 	return clients, nil
 }
 
