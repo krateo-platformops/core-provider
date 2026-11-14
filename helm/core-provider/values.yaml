@@ -31,6 +31,12 @@ otel:
   # through env and cdc.env, and core-provider's was left off on krateo-057). An explicit
   # OTEL_LOGS_ENABLED in env or cdc.env still wins for that process.
   logs: false
+  # OTLP export of controller audit records ONLY, for core-provider AND every composition controller
+  # (OTEL_AUDIT_LOGS_ENABLED; needs enabled: true). A dedicated logger provider carries just the audit
+  # records to krateo_audit; the application log stream stays on stderr for the node log collector.
+  # Independent of `logs`, which exports the whole stream. An explicit OTEL_AUDIT_LOGS_ENABLED in env
+  # or cdc.env still wins for that process.
+  auditLogs: false
   # Empty (the default): core-provider and every composition controller send to the OpenTelemetry
   # daemonset agent on THEIR OWN NODE, via the node IP and the daemonset's OTLP hostPort
   # (http://$(HOST_IP):4318, or :4317 for protocol grpc). Node-local matters: the agent attaches pod
