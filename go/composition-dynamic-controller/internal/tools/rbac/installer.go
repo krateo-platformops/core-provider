@@ -40,6 +40,18 @@ type ApplyReport struct {
 	// SkippedTerminating lists the objects the apiserver refused because their namespace is
 	// terminating. A grant into a namespace that is going away is moot.
 	SkippedTerminating []SkippedObject
+
+	// Written counts the objects this apply actually changed: created, or updated where the
+	// apiserver did not treat the update as a no-op (the resourceVersion moved). Zero means the
+	// derived RBAC was already in place, which is the common case on a resync. The composition
+	// controller marks a pass acted only when something was written (Diego, 2026-11-14).
+	Written int
+}
+
+func (r *ApplyReport) count(changed bool) {
+	if changed {
+		r.Written++
+	}
 }
 
 // namespaceTerminating reports the apiserver's refusal to create content in a namespace that is
@@ -69,7 +81,9 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
 	if rbac.Namespaces != nil {
 		for _, ns := range rbac.Namespaces {
 			if ns != nil {
-				_, err := i.ApplyNamespace(context.Background(), ns)
+				var changed bool
+				_, err := i.applyNamespace(context.Background(), ns, &changed)
+				report.count(changed)
 				if err != nil {
 					return report, fmt.Errorf("failed to Apply Namespace %s: %w", ns.Name, err)
 				}
@@ -78,20 +92,26 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
 	}
 
 	if rbac.ClusterRole != nil {
-		_, err := i.ApplyClusterRole(context.Background(), rbac.ClusterRole)
+		var changed bool
+		_, err := i.applyClusterRole(context.Background(), rbac.ClusterRole, &changed)
+		report.count(changed)
 		if err != nil {
 			return report, fmt.Errorf("failed to Apply ClusterRole: %w - name: %s", err, rbac.ClusterRole.Name)
 		}
 	}
 	if rbac.ClusterRoleBinding != nil {
-		_, err := i.ApplyClusterRoleBinding(context.Background(), rbac.ClusterRoleBinding)
+		var changed bool
+		_, err := i.applyClusterRoleBinding(context.Background(), rbac.ClusterRoleBinding, &changed)
+		report.count(changed)
 		if err != nil {
 			return report, fmt.Errorf("failed to Apply ClusterRoleBinding: %w - name: %s", err, rbac.ClusterRoleBinding.Name)
 		}
 	}
 	for _, ns := range rbac.Namespaced {
 		if ns.Role != nil {
-			_, err := i.ApplyRole(context.Background(), ns.Role)
+			var changed bool
+			_, err := i.applyRole(context.Background(), ns.Role, &changed)
+			report.count(changed)
 			if namespaceTerminating(err) {
 				report.SkippedTerminating = append(report.SkippedTerminating,
 					SkippedObject{Kind: "Role", Namespace: ns.Role.Namespace, Name: ns.Role.Name})
@@ -100,7 +120,9 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
 			}
 		}
 		if ns.RoleBinding != nil {
-			_, err := i.ApplyRoleBinding(context.Background(), ns.RoleBinding)
+			var changed bool
+			_, err := i.applyRoleBinding(context.Background(), ns.RoleBinding, &changed)
+			report.count(changed)
 			if namespaceTerminating(err) {
 				report.SkippedTerminating = append(report.SkippedTerminating,
 					SkippedObject{Kind: "RoleBinding", Namespace: ns.RoleBinding.Namespace, Name: ns.RoleBinding.Name})
@@ -114,6 +136,12 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
 }
 
 func (r *RBACInstaller) ApplyNamespace(ctx context.Context, namespace *corev1.Namespace) (*corev1.Namespace, error) {
+	return r.applyNamespace(ctx, namespace, new(bool))
+}
+
+// applyNamespace is ApplyNamespace, also reporting in changed whether it wrote: a Create, or an Update
+// the apiserver did not treat as a no-op (its resourceVersion moved).
+func (r *RBACInstaller) applyNamespace(ctx context.Context, namespace *corev1.Namespace, changed *bool) (*corev1.Namespace, error) {
 	cli := r.DynamicClient.Resource(
 		schema.GroupVersionResource{
 			Group:    "",
@@ -132,6 +160,7 @@ func (r *RBACInstaller) ApplyNamespace(ctx context.Context, namespace *corev1.Na
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create Namespace: %w", err)
 		}
+		*changed = true
 		namespace = &corev1.Namespace{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, namespace); err != nil {
 			return nil, fmt.Errorf("failed to convert unstructured to Namespace: %w", err)
@@ -285,6 +314,12 @@ func errIfHelmOwned(u *unstructured.Unstructured, kind string) error {
 }
 
 func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbacv1.Role, error) {
+	return i.applyRole(ctx, role, new(bool))
+}
+
+// applyRole is ApplyRole, also reporting in changed whether it wrote: a Create, or an Update
+// the apiserver did not treat as a no-op (its resourceVersion moved).
+func (i *RBACInstaller) applyRole(ctx context.Context, role *rbacv1.Role, changed *bool) (*rbacv1.Role, error) {
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(role)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert Role to unstructured: %w", err)
@@ -305,6 +340,7 @@ func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbac
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create Role: %w", err)
 		}
+		*changed = true
 
 		role = &rbacv1.Role{}
 		err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, role)
@@ -354,6 +390,7 @@ func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbac
 	if err != nil {
 		return nil, fmt.Errorf("failed to Update Role: %w", err)
 	}
+	*changed = res.GetResourceVersion() != existingU.GetResourceVersion()
 
 	role = &rbacv1.Role{}
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, role)
@@ -365,6 +402,12 @@ func (i *RBACInstaller) ApplyRole(ctx context.Context, role *rbacv1.Role) (*rbac
 }
 
 func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
+	return i.applyRoleBinding(ctx, roleBinding, new(bool))
+}
+
+// applyRoleBinding is ApplyRoleBinding, also reporting in changed whether it wrote: a Create, or an Update
+// the apiserver did not treat as a no-op (its resourceVersion moved).
+func (i *RBACInstaller) applyRoleBinding(ctx context.Context, roleBinding *rbacv1.RoleBinding, changed *bool) (*rbacv1.RoleBinding, error) {
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(roleBinding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert RoleBinding to unstructured: %w", err)
@@ -385,6 +428,7 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create RoleBinding: %w", err)
 		}
+		*changed = true
 
 		roleBinding = &rbacv1.RoleBinding{}
 		err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, roleBinding)
@@ -409,6 +453,7 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 	if err != nil {
 		return nil, fmt.Errorf("failed to Update RoleBinding: %w", err)
 	}
+	*changed = res.GetResourceVersion() != existingU.GetResourceVersion()
 
 	roleBinding = &rbacv1.RoleBinding{}
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, roleBinding)
@@ -420,6 +465,12 @@ func (i *RBACInstaller) ApplyRoleBinding(ctx context.Context, roleBinding *rbacv
 }
 
 func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv1.ClusterRole) (*rbacv1.ClusterRole, error) {
+	return i.applyClusterRole(ctx, clusterRole, new(bool))
+}
+
+// applyClusterRole is ApplyClusterRole, also reporting in changed whether it wrote: a Create, or an Update
+// the apiserver did not treat as a no-op (its resourceVersion moved).
+func (i *RBACInstaller) applyClusterRole(ctx context.Context, clusterRole *rbacv1.ClusterRole, changed *bool) (*rbacv1.ClusterRole, error) {
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(clusterRole)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert ClusterRole to unstructured: %w", err)
@@ -440,6 +491,7 @@ func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create ClusterRole: %w", err)
 		}
+		*changed = true
 
 		clusterRole = &rbacv1.ClusterRole{}
 		err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, clusterRole)
@@ -489,6 +541,7 @@ func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv
 	if err != nil {
 		return nil, fmt.Errorf("failed to Update ClusterRole: %w", err)
 	}
+	*changed = res.GetResourceVersion() != existingU.GetResourceVersion()
 
 	clusterRole = &rbacv1.ClusterRole{}
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, clusterRole)
@@ -499,6 +552,12 @@ func (i *RBACInstaller) ApplyClusterRole(ctx context.Context, clusterRole *rbacv
 }
 
 func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRoleBinding *rbacv1.ClusterRoleBinding) (*rbacv1.ClusterRoleBinding, error) {
+	return i.applyClusterRoleBinding(ctx, clusterRoleBinding, new(bool))
+}
+
+// applyClusterRoleBinding is ApplyClusterRoleBinding, also reporting in changed whether it wrote: a Create, or an Update
+// the apiserver did not treat as a no-op (its resourceVersion moved).
+func (i *RBACInstaller) applyClusterRoleBinding(ctx context.Context, clusterRoleBinding *rbacv1.ClusterRoleBinding, changed *bool) (*rbacv1.ClusterRoleBinding, error) {
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(clusterRoleBinding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert ClusterRoleBinding to unstructured: %w", err)
@@ -519,6 +578,7 @@ func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRole
 		if err != nil {
 			return nil, fmt.Errorf("failed to Create ClusterRoleBinding: %w", err)
 		}
+		*changed = true
 
 		clusterRoleBinding = &rbacv1.ClusterRoleBinding{}
 		err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, clusterRoleBinding)
@@ -543,6 +603,7 @@ func (i *RBACInstaller) ApplyClusterRoleBinding(ctx context.Context, clusterRole
 	if err != nil {
 		return nil, fmt.Errorf("failed to Update ClusterRoleBinding: %w", err)
 	}
+	*changed = res.GetResourceVersion() != existingU.GetResourceVersion()
 
 	clusterRoleBinding = &rbacv1.ClusterRoleBinding{}
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(res.Object, clusterRoleBinding)

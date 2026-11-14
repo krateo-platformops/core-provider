@@ -166,6 +166,52 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 		t.Errorf("Observe's apply root must carry %s=true, got (%v, present %v)", tracecontext.AttrActed, v, ok)
 	}
 
+	// ARM 3 (Diego, 2026-11-14: "mark only on a real write"). An annotation-only change reaches
+	// Observe (CRUpdated -> Observe), whose apply path runs RBAC and a helm reconcile and changes
+	// nothing. Its root must carry no acted mark. This is the per-resync pass the tail sampler used
+	// to keep every time.
+	time.Sleep(2 * time.Second) // let ARM 2's own follow-up passes end before the baseline
+	t3 := time.Now()
+	noop := []byte(`{"metadata":{"annotations":{"krateo.io/test-noop":"1"}}}`)
+	if _, err := cli.Patch(ctx, name, types.MergePatchType, noop, metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitRootsAfter(t, rec, t3, 1, 2*time.Minute)
+	time.Sleep(3 * time.Second) // any further passes it triggers end too
+	after3 := rootsAfter(rec, t3)
+	for _, r := range after3 {
+		if _, ok := rootActed(r); ok {
+			t.Errorf("a pass that changed nothing (annotation-only update) must carry no %s; %d roots after the patch", tracecontext.AttrActed, len(after3))
+			break
+		}
+	}
+	t.Logf("ARM 3: roots after the annotation-only patch: %d, acted: 0 expected", len(after3))
+
+	// ARM 4, the control for ARM 3: a spec change makes the helm reconcile change the cluster with NO
+	// new traceparent, so nothing joins; the root must still be marked, by MarkActed.
+	t4 := time.Now()
+	joinedBefore := len(joinedTo(rec.Ended(), sc2)) + len(joinedTo(rec.Ended(), sc1))
+	change := []byte(`{"spec":{"filter":"serviceName eq 'Storage'"}}`)
+	if _, err := cli.Patch(ctx, name, types.MergePatchType, change, metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline4 := time.Now().Add(3 * time.Minute)
+	acted4 := false
+	for time.Now().Before(deadline4) && !acted4 {
+		for _, r := range rootsAfter(rec, t4) {
+			if v, ok := rootActed(r); ok && v {
+				acted4 = true
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !acted4 {
+		t.Errorf("a pass whose helm reconcile changed the cluster must carry %s=true; %d roots after the spec change, none marked", tracecontext.AttrActed, len(rootsAfter(rec, t4)))
+	}
+	if n := len(joinedTo(rec.Ended(), sc2)) + len(joinedTo(rec.Ended(), sc1)); n != joinedBefore {
+		t.Errorf("the spec change must join nothing (no new traceparent), so its mark came from MarkActed; joined %d -> %d", joinedBefore, n)
+	}
+
 	// Every pass is its own root, never an upstream child; and up1 was never re-joined.
 	for _, s := range rec.Ended() {
 		if s.Name() == tracecontext.SpanReconcile && s.Parent().IsValid() {
@@ -188,6 +234,31 @@ func assessTraceActPlacement(ctx context.Context, t *testing.T, cfg *envconf.Con
 		time.Sleep(2 * time.Second)
 	}
 	return ctx
+}
+
+// rootsAfter returns the reconcile roots that STARTED after t0.
+func rootsAfter(rec *tracetest.SpanRecorder, t0 time.Time) []sdktrace.ReadOnlySpan {
+	var out []sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == tracecontext.SpanReconcile && s.StartTime().After(t0) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// waitRootsAfter waits until at least n reconcile roots that started after t0 have ended.
+func waitRootsAfter(t *testing.T, rec *tracetest.SpanRecorder, t0 time.Time, n int, timeout time.Duration) []sdktrace.ReadOnlySpan {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if r := rootsAfter(rec, t0); len(r) >= n {
+			return r
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %d reconcile roots after %s", timeout, n, t0.Format(time.RFC3339))
+	return nil
 }
 
 func mustParse(t *testing.T, tp string) trace.SpanContext {
