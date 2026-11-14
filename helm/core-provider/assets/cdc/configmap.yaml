@@ -20,6 +20,11 @@ data:
   URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081/
   KRATEO_NAMESPACE: {{ .Release.Namespace }}
   DEPLOYMENT_NAME: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+  # docs/design/cdc-pooling.md, step 2: the Lease this controller must hold to reconcile its Kind at
+  # this version, in its own namespace (POD_NAMESPACE). Named for the Kind x version, so any other
+  # controller for it (the next pod of a rolling update, a pool) waits for the same Lease. Granted by
+  # assets/cdc/rbac/lease-role.yaml from the same value.
+  COMPOSITION_CONTROLLER_LEASE_NAME: {{ "{{" }} .controllerLease {{ "}}" }}
   # Must match the container port named "health" in assets/cdc/deployment.yaml, which the probes use.
   COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT: "{{ .Values.cdc.healthProbe.port }}"
   # #410: bound on every helm operation, hooks included (values.yaml cdc.helmTimeout).

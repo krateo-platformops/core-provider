@@ -28,6 +28,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/composition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/health"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/ownership"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
@@ -160,6 +161,7 @@ func main() {
 	otelServiceName := flag.String("otel-service-name", serviceName, "The service name attached to exported OTLP metrics/traces.")
 	otelExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	deploymentName := flag.String("deployment-name", env.String("DEPLOYMENT_NAME", ""), "The deployment name for stable resource identification in metrics.")
+	leaseName := flag.String("lease-name", env.String("COMPOSITION_CONTROLLER_LEASE_NAME", ""), "The coordination.k8s.io Lease, in the pod's namespace, this controller must hold to reconcile (core-provider renders it). Empty: no Lease.")
 	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects
 	// (chart-set cdc.image.tag): the stamp describes the image actually running, the env var describes
 	// what the chart believes it deployed, and they diverge whenever a tag is moved or an image is
@@ -442,6 +444,20 @@ func main() {
 		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
 		builder.WithTelemetryMetrics(telemetryMetrics),
 	}
+	// Pool step 2 (core-provider docs/design/cdc-pooling.md): reconcile only while holding this
+	// Kind x version's Lease, so a second controller for it waits instead of writing alongside.
+	ownershipOpt, err := ownership.Option(*leaseName, os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME"))
+	if err != nil {
+		log.Error(err, "Configuring the ownership lease")
+		os.Exit(1)
+	}
+	if ownershipOpt != nil {
+		opts = append(opts, ownershipOpt)
+		log.Info("Ownership lease enabled", "lease", os.Getenv("POD_NAMESPACE")+"/"+*leaseName, "identity", os.Getenv("POD_NAME"))
+	} else {
+		log.Info("Ownership lease disabled: COMPOSITION_CONTROLLER_LEASE_NAME is unset")
+	}
+
 	gov, err := saturation.NewGovernor(*saturationEnabled, *cpuPressureThreshold, *workers, log)
 	if err != nil {
 		log.Error(err, "Invalid CPU-saturation configuration")
@@ -499,6 +515,11 @@ func main() {
 	}
 
 	err = controller.Run(ctx, *workers)
+	if ownership.Lost(err) {
+		// Exiting restarts the container, which then waits for the Lease again.
+		log.Error(err, "Lost the ownership lease; exiting so the restarted controller waits for it again.")
+		os.Exit(1)
+	}
 	if err != nil {
 		log.Error(err, "Running controller.")
 		os.Exit(1)

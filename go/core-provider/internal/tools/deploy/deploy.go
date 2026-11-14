@@ -492,6 +492,15 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
+	// The ownership Lease grant (cdc-pooling step 2), beside the ServiceAccount it is for.
+	leaseRole, leaseBinding, err := renderLeaseRBAC(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath, sa.Name, sa.Namespace)
+	if err != nil {
+		return "", err
+	}
+	if err = installLeaseRBAC(ctx, opts.DynClient, leaseRole, leaseBinding, &hsh, applyOpts); err != nil {
+		return "", err
+	}
+
 	err = applyAuthnMappings(ctx, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
 	if err != nil {
 		return "", err
@@ -739,6 +748,17 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
+	// The ownership Lease grant goes with the ServiceAccount it was for (deleted just above), after
+	// the drain. The Lease object itself is left: it names only a holder that no longer exists, and
+	// the next controller for this Kind x version takes it over once it expires.
+	leaseRole, leaseBinding, err := renderLeaseRBAC(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath, sa.Name, sa.Namespace)
+	if err != nil {
+		return err
+	}
+	if err = uninstallLeaseRBAC(ctx, opts.DynamicClient, leaseRole, leaseBinding); err != nil {
+		return err
+	}
+
 	// Remove the authn allowlist mapping (no-op if absent / authn CRD not installed). Done
 	// unconditionally so it is cleaned up even if apiRef was removed before undeploy.
 	err = deleteAuthnServiceAccountMapping(ctx, opts.KubeClient, opts.AuthnNamespace, sa.Namespace, sa.Name)
@@ -886,6 +906,15 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	err = lookupRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh)
 	if err != nil {
+		return "", err
+	}
+
+	// Same position in the digest as Deploy's installLeaseRBAC.
+	leaseRole, leaseBinding, err := renderLeaseRBAC(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath, sa.Name, sa.Namespace)
+	if err != nil {
+		return "", err
+	}
+	if err = lookupLeaseRBAC(ctx, opts.DynClient, leaseRole, leaseBinding, &hsh); err != nil {
 		return "", err
 	}
 

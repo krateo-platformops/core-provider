@@ -18,6 +18,8 @@ import (
 	xenv "github.com/krateo-platformops/plumbing/env"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -115,6 +117,12 @@ func TestDeploy(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, dig)
 
+		// cdc-pooling step 2: the controller's lease grant is applied beside its ServiceAccount.
+		for _, gvr := range []schema.GroupVersionResource{roleGVR, roleBindingGVR} {
+			_, err := dyn.Resource(gvr).Namespace(namespace).Get(context.Background(), "fireworksapps-v1alpha1-lease", metav1.GetOptions{})
+			assert.NoError(t, err, "the controller's lease %s after Deploy", gvr.Resource)
+		}
+
 		return ctx
 	}).Assess("Undeploy", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		cli, err := client.New(cfg.Client().RESTConfig(), client.Options{})
@@ -161,6 +169,11 @@ func TestDeploy(t *testing.T) {
 
 		err = Undeploy(context.Background(), opts.KubeClient, opts)
 		assert.NoError(t, err)
+
+		for _, gvr := range []schema.GroupVersionResource{roleGVR, roleBindingGVR} {
+			_, err := opts.DynamicClient.Resource(gvr).Namespace(namespace).Get(context.Background(), "fireworksapps-v1alpha1-lease", metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err), "the controller's lease %s must be gone after Undeploy: %v", gvr.Resource, err)
+		}
 
 		return ctx
 	},
