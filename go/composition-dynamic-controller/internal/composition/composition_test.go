@@ -1720,6 +1720,92 @@ func TestController(t *testing.T) {
 			t.Errorf("RBACComplete = %s/%s after recovery, want True/Applied", st, reason)
 		}
 		return ctx
+	}).Assess("Kept: a dropped child carrying resource-policy keep is recorded as a kept deletion (#423)", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		// #423 KEPT-DELETION arm. audit v0.14.0 requires the kept outcome checked on records from the
+		// real path; only hand-built verdicts were tested. The chart renders its FocusConfig only while
+		// the DataPresentationAzure has a status (templates/focus_config.yaml). So: give it a status
+		// (the FocusConfig is rendered and created), mark the live FocusConfig
+		// helm.sh/resource-policy: keep, take the status away (the render drops it), and the reconcile
+		// must DECLINE the delete. One helm.reconcile / delete / denied / kept_resource_policy record
+		// naming it, and the FocusConfig still live.
+		var obj unstructured.Unstructured
+		if err := decoder.DecodeFile(os.DirFS(filepath.Join(testdataPath, "compositions")), "focus.yaml", &obj); err != nil {
+			t.Fatalf("decoding the focus composition: %v", err)
+		}
+		dy := dynamic.NewForConfigOrDie(c)
+		cli := dy.Resource(schema.GroupVersionResource{
+			Group:    "composition.krateo.io",
+			Version:  obj.GetLabels()["krateo.io/composition-version"],
+			Resource: flect.Pluralize(strings.ToLower(obj.GetObjectKind().GroupVersionKind().Kind)),
+		}).Namespace(obj.GetNamespace())
+		adminDy := dynamic.NewForConfigOrDie(cfg.Client().RESTConfig())
+		const name = "focus-1-focus-data-presentation-azure"
+		dpa := adminDy.Resource(schema.GroupVersionResource{Group: "finops.krateo.io", Version: "v1alpha1", Resource: "datapresentationazures"}).Namespace(obj.GetNamespace())
+		focusCfg := adminDy.Resource(schema.GroupVersionResource{Group: "finops.krateo.io", Version: "v1", Resource: "focusconfigs"}).Namespace("krateo-system")
+
+		reconcile := func() {
+			t.Helper()
+			u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("getting the composition: %v", err)
+			}
+			if _, err := handler.Observe(ctx, u); err != nil {
+				t.Fatalf("observe: %v", err)
+			}
+		}
+		patchStatus := func(body string) {
+			t.Helper()
+			if _, err := dpa.Patch(ctx, name, types.MergePatchType, []byte(body), metav1.PatchOptions{}, "status"); err != nil {
+				t.Fatalf("patching the DataPresentationAzure status: %v", err)
+			}
+		}
+
+		// 1. A status: the render emits the FocusConfig and the reconcile creates it.
+		// The same status the Update step patches: every field the FocusConfig template reads.
+		patchStatus(`{"status":{"armRegionName":"example-region","armSkuName":"example-sku","currencyCode":"USD","effectiveStartDate":"2025-01-01","isPrimaryMeterRegion":"true","location":"example-location","meterId":"example-meter-id","meterName":"example-meter-name","productId":"example-product-id","productName":"example-product-name","retailPrice":"100.00","serviceFamily":"Networking","serviceId":"example-service-id","serviceName":"example-service-name","skuId":"example-sku-id","skuName":"example-sku-name","tierMinimumUnits":"1","type":"example-type","unitOfMeasure":"example-unit","unitPrice":"10.00"}}`)
+		reconcile()
+		live, err := focusCfg.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("precondition: the FocusConfig must exist once the DataPresentationAzure has a status: %v", err)
+		}
+
+		// 2. Mark the live FocusConfig keep. helm's reconcile reads the policy from the LIVE object.
+		if _, err := focusCfg.Patch(ctx, name, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"helm.sh/resource-policy":"keep"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatalf("annotating the FocusConfig keep: %v", err)
+		}
+		defer func() { _ = focusCfg.Delete(ctx, name, metav1.DeleteOptions{}) }()
+
+		// 3. No status: the render drops the FocusConfig, and the reconcile must keep it.
+		patchStatus(`{"status":null}`)
+		u, err := cli.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		auditSink.Reset()
+		reconcile()
+		var kept []auditRow
+		var reasons []string
+		for _, rec := range auditSink.Records() {
+			if recAttr(rec, "krateo.audit.cause_ref.uid") != string(u.GetUID()) || recAttr(rec, "krateo.audit.object_ref.resource") != "focusconfigs" {
+				continue
+			}
+			reasons = append(reasons, recAttr(rec, "krateo.audit.denial_reason"))
+		}
+		for _, r := range auditRowsFor(t, auditSink, u.GetUID()) {
+			if r.resource == "focusconfigs" {
+				kept = append(kept, r)
+			}
+		}
+		if len(kept) != 1 || kept[0].action != auditrec.ActionReconcile || kept[0].verb != "delete" || kept[0].outcome != audit.OutcomeDenied ||
+			kept[0].name != name || kept[0].uid != string(live.GetUID()) || len(reasons) != 1 || reasons[0] != audit.DenialReasonKeptResourcePolicy {
+			t.Errorf("#423: the kept FocusConfig must be one helm.reconcile / delete / denied / %s record with uid %s, got [%s] reasons %v",
+				audit.DenialReasonKeptResourcePolicy, live.GetUID(), rowNames(kept), reasons)
+		}
+		if _, err := focusCfg.Get(ctx, name, metav1.GetOptions{}); err != nil {
+			t.Errorf("#423: a kept child must still be live: %v", err)
+		}
+		return ctx
 	}).Assess("Delete", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		dy := dynamic.NewForConfigOrDie(c)
 		var obj unstructured.Unstructured
