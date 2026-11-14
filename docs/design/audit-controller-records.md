@@ -137,10 +137,11 @@ the create with no uid, the update and delete with the live object's); and the c
 (the heal step requires the FocusConfig the render drops to be one helm.reconcile / delete / success
 record with its uid, after a precondition that it existed); and the cdc uninstall row's **failure**
 (a ValidatingAdmissionPolicy refuses one child's DELETE: one helm.uninstall / delete / failure record
-naming the live child, which stays live; the retry after the policy is lifted goes through, #497).
-Checked against audit v0.15.0.
+naming the live child, which stays live; the retry after the policy is lifted goes through, #497);
+and a **kept deletion** (a render that drops a child marked helm.sh/resource-policy: keep is one
+helm.reconcile / delete / denied / kept_resource_policy record, and the child stays live; plumbing
+v1.74.0, which stopped the reconcile recording that one decision twice). Checked against audit v0.15.0.
 **Not yet proven**, and tracked on #423:
-- a **kept deletion** through the real path (only hand-built verdicts are tested);
 - an **authorization-label-only** child change recorded end to end.
 
 ## Decisions (Diego, 2026-11-11)
@@ -166,3 +167,4 @@ Checked against audit v0.15.0.
   apiserver.
 - 2026-11-14: the cdc's prune record required (#495).
 - 2026-11-14: the cdc uninstall row's failure outcome proven on kind, with #497's fix (#499).
+- 2026-11-14: the kept deletion proven on kind; one decision, one record (plumbing v1.74.0, #172).
