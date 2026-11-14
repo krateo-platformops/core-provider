@@ -85,6 +85,7 @@ func run() int {
 	metricsEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
 	tracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
 	logsEnabled := flag.Bool("otel-logs-enabled", env.Bool("OTEL_LOGS_ENABLED", false), "Enable OTLP log export (logs as a first-class OTel signal, in addition to the stderr JSON stream).")
+	auditLogsEnabled := flag.Bool("otel-audit-logs-enabled", env.Bool("OTEL_AUDIT_LOGS_ENABLED", false), "Export ONLY controller audit records over OTLP, on a dedicated logger provider; the log stream stays on stderr.")
 	metricsServiceName := flag.String("otel-service-name", fmt.Sprintf("%s-provider", strcase.KebabCase(providerName)), "The service name attached to exported OTLP metrics/traces.")
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
@@ -262,7 +263,15 @@ func run() int {
 		return 1
 	}
 	// core-provider#423: one controller audit record per write that changed what an object holds.
-	auditRecorder, hasActor, err := auditrec.New(mgr.GetConfig())
+	// OTEL_AUDIT_LOGS_ENABLED gives the records their own OTLP provider, so they reach krateo_audit
+	// without exporting the whole log stream (Diego, 2026-11-14).
+	auditLogs, auditLogsShutdown, err := coretelemetry.NewAuditLoggerProvider(context.Background(), *auditLogsEnabled, *metricsServiceName)
+	if err != nil {
+		log.Error(err, "Cannot initialize the audit OTLP logger provider")
+		return 1
+	}
+	defer func() { _ = auditLogsShutdown(context.Background()) }()
+	auditRecorder, hasActor, err := auditrec.New(mgr.GetConfig(), auditLogs)
 	if err != nil {
 		log.Error(err, "Cannot create the audit recorder")
 		return 1

@@ -3,6 +3,7 @@ package auditrec
 import (
 	"github.com/krateo-platformops/audit"
 	"go.opentelemetry.io/otel"
+	otellog "go.opentelemetry.io/otel/log"
 	logglobal "go.opentelemetry.io/otel/log/global"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -16,7 +17,10 @@ import (
 // (audit.ControllerActor: POD_NAMESPACE, POD_SERVICE_ACCOUNT); when either is unset no actor is
 // given, and every record is marked actor-incomplete, never guessed. ok reports whether an actor
 // was found, for the caller to log.
-func New(hub *rest.Config) (r *Recorder, ok bool, err error) {
+//
+// auditLogs is the audit-only LoggerProvider (telemetry.NewAuditLoggerProvider), nil to use the
+// process's global one.
+func New(hub *rest.Config, auditLogs otellog.LoggerProvider) (r *Recorder, ok bool, err error) {
 	dyn, err := dynamic.NewForConfig(hub)
 	if err != nil {
 		return nil, false, err
@@ -26,7 +30,11 @@ func New(hub *rest.Config) (r *Recorder, ok bool, err error) {
 	if actor != "" {
 		opts = append(opts, audit.WithActor(actor, audit.ClassController))
 	}
-	e := audit.New(logglobal.GetLoggerProvider().Logger(Scope), opts...)
+	lp := auditLogs
+	if lp == nil {
+		lp = logglobal.GetLoggerProvider()
+	}
+	e := audit.New(lp.Logger(Scope), opts...)
 	r, err = NewRecorder(e, otel.GetMeterProvider(), LabelsFrom(dyn))
 	return r, actor != "", err
 }

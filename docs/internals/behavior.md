@@ -251,7 +251,9 @@ reflects hub instances ↔ spoke status. `status.target` reports `mode`,
 - **`:8080`** — controller-runtime metrics server. No `/call`-style content API;
   core-provider is a controller, not an HTTP service.
 - **OTLP export** — opt-in per signal via `OTEL_ENABLED` / `OTEL_TRACING_ENABLED` /
-  `OTEL_LOGS_ENABLED`; service name `core-provider`. Catalog and example queries in
+  `OTEL_LOGS_ENABLED`; service name `core-provider`. `OTEL_AUDIT_LOGS_ENABLED` (chart
+  `otel.auditLogs`, for core-provider and every composition controller) exports only the controller
+  audit records (`event.name` = `audit`), leaving the log stream on stderr. Catalog and example queries in
   `telemetry/metrics-reference.md`.
 - **chart-inspector** — called (by the CDC, and projected onto spokes) to compute
   chart RBAC; **snowplow `GET /rbac`** and **authn** — the `apiRef` authorization
