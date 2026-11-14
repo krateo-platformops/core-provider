@@ -2,6 +2,7 @@ package crd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -162,6 +163,81 @@ func ApplyOrUpdateCRD(ctx context.Context,
 // drop must not name the version being applied (a caller that computed that has a bug, and dropping
 // it would remove the version this call exists to add); it is refused. On the create path (no CRD
 // yet) there is nothing to drop.
+// ProjectWrite is the object ApplyOrUpdateCRDDropping sends for newcrd over live, computed in memory
+// (live is not modified), and whether it differs from live. It is the ONE place the spec changes of
+// that write are made, so a caller that needs the write's size (the add plan, #494) measures the very
+// object that would be sent:
+//   - #207: a vacuum storage version orphaned in status.storedVersions is restored;
+//   - #484: the versions in drop leave spec.versions (vacuum never does);
+//   - a changed status schema is applied to the existing versions;
+//   - newcrd's version is appended (served, not storage) when absent.
+//
+// storedVersions is the caller's (TrimStoredVersions): it needs the apiserver.
+func ProjectWrite(live, newcrd *apiextensionsv1.CustomResourceDefinition, drop map[string]bool) (*apiextensionsv1.CustomResourceDefinition, bool, error) {
+	crd := live.DeepCopy()
+	nc := newcrd.DeepCopy()
+	generation.AddCompositionVersionColumn(nc)
+	version := nc.Spec.Versions[0].Name
+	mutated := false
+
+	// #207, BEFORE the append below, deliberately: the append is the only other place vacuum is
+	// created, and it is unreachable for a CRD that already carries the version being reconciled,
+	// which is exactly the damaged CRD's situation. A no-op in every state but that one; see
+	// generation.RestoreOrphanedVacuum.
+	if generation.RestoreOrphanedVacuum(crd) {
+		mutated = true
+	}
+	if generation.RemoveStaleVersions(crd, drop) {
+		mutated = true
+	}
+
+	statusEqual, err := generation.StatusEqual(crd, nc)
+	if err != nil {
+		return nil, false, fmt.Errorf("error comparing CRD status: %w", err)
+	}
+	// The status change and the version bump are INDEPENDENT and both apply in one write (#190).
+	if !statusEqual {
+		// Only the static part (the status) of the versions that already exist is updated, never the
+		// dynamically generated spec.
+		if err := generation.UpdateStatus(crd, nc.Spec.Versions[0]); err != nil {
+			return nil, false, fmt.Errorf("error updating CRD version: %w", err)
+		}
+		// Backfill the VERSION printer column onto pre-existing served versions. Idempotent.
+		generation.AddCompositionVersionColumn(crd)
+		mutated = true
+	}
+
+	if !generation.GVKExists(crd, schema.GroupVersionKind{Group: nc.Spec.Group, Kind: nc.Spec.Names.Kind, Version: version}) {
+		appended, err := generation.AppendVersion(*crd, *nc)
+		if err != nil {
+			return nil, false, fmt.Errorf("error appending version to CRD: %w", err)
+		}
+		crd = appended
+		// The served versions are schema-passthrough, so the built-in None converter is equivalent and
+		// needs no webhook; lossless storage across heterogeneous schemas is the permissive vacuum
+		// storage version's job, not conversion's. Identical for local and remote targets.
+		setNoneConversion(crd)
+		generation.SetServedStorage(crd, version, true, false)
+		mutated = true
+	}
+	return crd, mutated, nil
+}
+
+// ProjectedWriteBytes is the JSON size of the object ApplyOrUpdateCRDDropping would send for newcrd
+// over live (ProjectWrite), metadata and all, as the request carries it. JSON over-states etcd's
+// protobuf encoding of a CRD, so a budget compared against it errs toward refusing (#494).
+func ProjectedWriteBytes(live, newcrd *apiextensionsv1.CustomResourceDefinition, drop map[string]bool) (int, error) {
+	projected, _, err := ProjectWrite(live, newcrd, drop)
+	if err != nil {
+		return 0, err
+	}
+	b, err := json.Marshal(projected)
+	if err != nil {
+		return 0, fmt.Errorf("measuring the projected CRD write: %w", err)
+	}
+	return len(b), nil
+}
+
 func ApplyOrUpdateCRDDropping(ctx context.Context,
 	cli client.Client,
 	dyn dynamic.Interface,
@@ -209,84 +285,31 @@ func ApplyOrUpdateCRDDropping(ctx context.Context,
 	}
 	log.Debug("Updating CRD", "gvr", gvr.String())
 
-	statusEqual, err := generation.StatusEqual(crd, newcrd)
+	// #484: the prune-due versions leave in this same spec write, so the object the apiserver receives
+	// never carries them together with the new version. storedVersions is trimmed on the apiserver
+	// FIRST (it must not name a version the spec write removes); every spec change is then computed
+	// by ProjectWrite, the same function the add plan measures (#494), so the size checked and the
+	// object written cannot differ.
+	if err := TrimStoredVersions(ctx, cli, crd, drop); err != nil {
+		return gvr, err
+	}
+	// The status change and the version bump are INDEPENDENT and land in one write; they used to be
+	// exclusive, so ApplyOrUpdateCRD reported the new GVR having never added that version (#190).
+	dropping := false
+	for _, v := range crd.Spec.Versions {
+		if drop[v.Name] && v.Name != "vacuum" {
+			dropping = true
+		}
+	}
+	projected, mutated, err := ProjectWrite(crd, newcrd, drop)
 	if err != nil {
-		return gvr, fmt.Errorf("error comparing CRD status: %w", err)
+		return gvr, err
 	}
-	// The status change and the version bump are INDEPENDENT: a single reconcile can carry
-	// both (a statusDataTemplate edit landing in the same generation as a chart version bump,
-	// or a core-provider upgrade that changes the embedded status.schema.json for every
-	// definition at once). They were previously exclusive — the status branch returned before
-	// the append could run, so ApplyOrUpdateCRD reported the new GVR with err == nil having
-	// never added that version to the CRD, and the caller went on to build a CDC
-	// Deployment/SA for it and migrate instances through an endpoint the apiserver does not
-	// serve (#190). Both mutations are now accumulated and applied once.
-	mutated := false
-
-	// #207: repair a CRD whose vacuum storage version is gone from spec.versions while
-	// status.storedVersions still names it — objects encoded at a version the CRD no longer
-	// declares, so every read of the Kind fails with "invalid group/version".
-	//
-	// BEFORE the append below, deliberately. The append is the only other place vacuum is created,
-	// and it is unreachable for a CRD that already carries the version being reconciled — which is
-	// exactly the damaged CRD's situation. Repairing first means the single-storage-version
-	// bookkeeping is settled before anything else touches spec.versions.
-	//
-	// A no-op in every state but that one. In particular it does NOT fire on a CRD that simply has
-	// no vacuum: a never-bumped CRD legitimately has one version that is both served and storage,
-	// and injecting vacuum there would demote it and strand vacuum in storedVersions. See
-	// generation.RestoreOrphanedVacuum.
-	if generation.RestoreOrphanedVacuum(crd) {
-		log.Debug("restored the vacuum storage version orphaned in status.storedVersions",
-			"crd", crd.Name, "storedVersions", crd.Status.StoredVersions)
-		mutated = true
-	}
-
-	// #484: the prune-due versions leave in this same spec write, BEFORE the append below, so the
-	// object the apiserver receives never carries them together with the new version.
-	if removed, derr := DropVersions(ctx, cli, crd, drop); derr != nil {
-		return gvr, derr
-	} else if removed {
+	if dropping {
 		log.Info("Dropping prune-due served versions in the CRD write that adds a version",
 			"crd", crd.Name, "adding", gvr.Version, "dropped", sortedKeys(drop))
-		mutated = true
 	}
-
-	if !statusEqual {
-		log.Debug("CRD status differs, updating status", "crd", crd.Name, "version", gvr.Version)
-		// To avoid issues with changed in the dynamically generated part of the CRD (the spec), we only update the static part (the status) to any version that already exists
-		err = generation.UpdateStatus(crd, newcrd.Spec.Versions[0])
-		if err != nil {
-			return gvr, fmt.Errorf("error updating CRD version: %w", err)
-		}
-		// Backfill the VERSION printer column onto any pre-existing served versions on the live CRD
-		// (versions created before this feature only got it on new appends otherwise). Idempotent.
-		generation.AddCompositionVersionColumn(crd)
-		mutated = true
-	}
-
-	if generation.GVKExists(crd, schema.GroupVersionKind{
-		Group:   newcrd.Spec.Group,
-		Kind:    newcrd.Spec.Names.Kind,
-		Version: gvr.Version,
-	}) {
-		log.Debug("CRD version already present, skipping append", "crd", crd.Name, "version", gvr.Version)
-	} else {
-		crd, err = generation.AppendVersion(*crd, *newcrd)
-		if err != nil {
-			return gvr, fmt.Errorf("error appending version to CRD: %w", err)
-		}
-
-		// The generated CRD's served versions are all schema-passthrough (the old conversion
-		// webhook only copied metadata/spec/status verbatim), so the built-in None converter
-		// is equivalent and needs no webhook to reach. Lossless storage across heterogeneous
-		// version schemas is provided by the permissive "vacuum" storage version, not by
-		// conversion. This works identically for local and remote targets.
-		setNoneConversion(crd)
-
-		generation.SetServedStorage(crd, gvr.Version, true, false)
-		mutated = true
-	}
+	crd = projected
 
 	if !mutated {
 		log.Debug("CRD version exists and is equal, skipping update", "crd", crd.Name, "version", gvr.Version)

@@ -999,13 +999,19 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		// #484: say WHY when the add is waiting for a vacated version's grace, from the same plan
 		// Update acts on, so the message and the behaviour cannot disagree. Same condition and reason
 		// as before; only the message is specific.
+		// #494 likewise: a held version and no room. The plan measures the write Update would make, so
+		// it needs the generated CRD Update would add.
 		msg := fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())
-		plan, perr := e.planServedVersionAdd(ctx, cr, chartGVK, gvr.Resource)
+		generated, gerr := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
+		if gerr != nil {
+			return reconciler.ExternalObservation{}, fmt.Errorf("generating the CRD to plan the served-version add: %w", gerr)
+		}
+		plan, perr := e.planServedVersionAdd(ctx, cr, chartGVK, generated)
 		if perr != nil {
 			return reconciler.ExternalObservation{}, perr
 		}
-		if plan.wait != nil {
-			msg = plan.wait.Error()
+		if r := plan.refusal(); r != nil {
+			msg = r.Error()
 		}
 		cr.SetConditions(rtv1.Unavailable().WithMessage(msg))
 		return reconciler.ExternalObservation{
