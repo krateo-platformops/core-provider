@@ -149,7 +149,10 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
 
 1. **RBAC**: a ServiceAccount, ClusterRole/ClusterRoleBinding, Role/RoleBinding
    (`createRBACResources`); plus a Secret-scoped Role/RoleBinding when the chart
-   uses private-repo credentials.
+   uses private-repo credentials; plus the **ownership Lease grant**, a
+   Role/RoleBinding `<plural>-<version>-lease` in the controller's namespace
+   (`leaserbac.go`): `create` on leases, and `get`/`update` on the one Lease the
+   controller takes. Deleted by `Undeploy` with the ServiceAccount, after the drain.
 2. **JSON-schema ConfigMap** holding the chart's `values.schema.json`.
 3. **CDC config ConfigMap** carrying the SA name/namespace plus the
    status-projection config: `COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE` (the
@@ -177,6 +180,30 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
    ClusterRole/Binding for the per-composition group. A snowplow 422 (unresolvable
    stage) surfaces as the `ApiRefRBACComplete=False` condition — **partial RBAC is
    never written**.
+
+**One reconciler per Kind × version** ([pool step 2](../design/cdc-pooling.md)).
+The config ConfigMap carries `COMPOSITION_CONTROLLER_LEASE_NAME`, the
+`coordination.k8s.io` Lease `<version>.<plural>.<group>`
+(`templates.ControllerLeaseName`; the same template value renders the Role's
+`resourceNames`). The CDC (`internal/ownership`, unstructured-runtime's
+`controller.Ownership`) takes it in its own namespace as its pod name before any
+worker starts:
+
+- it lists first and is **Ready while waiting**. A Deployment's default rolling
+  update (maxUnavailable 0) stops the old pod only once the new one is Ready, so
+  a readiness that waited for the Lease would never let the old pod go;
+- the old pod drains its in-flight reconciles, **then** releases the Lease; the
+  new pod takes it on its next attempt (2s). The two never reconcile at the same
+  time, so reconciling resumes about drain + 2s after the old pod stops, not when
+  the new pod turns Ready. The witness that a controller reconciles is the Lease's
+  `spec.holderIdentity` being its pod name, not pod readiness;
+- a Lease it cannot read or write (e.g. missing RBAC) fails `/readyz`, naming the
+  Lease;
+- losing the Lease (no renewal within 10s) cancels in-flight reconciles at once
+  and exits the process, which restarts and waits for the Lease again;
+- an unset `COMPOSITION_CONTROLLER_LEASE_NAME` (a ConfigMap rendered before this)
+  runs without a Lease, as before. A set name with no `POD_NAMESPACE`/`POD_NAME`
+  refuses to start.
 
 In non-dry-run mode it waits for the Deployment to be Ready, restarts it so it picks
 up the new ConfigMap, then waits again. Resource names follow

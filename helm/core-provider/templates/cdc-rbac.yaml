@@ -17,5 +17,9 @@ data:
 {{ tpl (.Files.Get "assets/cdc/rbac/secret-role.yaml") . | indent 4 }}
   secret-rolebinding.yaml: |
 {{ tpl (.Files.Get "assets/cdc/rbac/secret-rolebinding.yaml") . | indent 4 }}
+  lease-role.yaml: |
+{{ tpl (.Files.Get "assets/cdc/rbac/lease-role.yaml") . | indent 4 }}
+  lease-rolebinding.yaml: |
+{{ tpl (.Files.Get "assets/cdc/rbac/lease-rolebinding.yaml") . | indent 4 }}
   authn-serviceaccount.yaml: |
 {{ tpl (.Files.Get "assets/cdc/rbac/authn-serviceaccount.yaml") . | indent 4 }}

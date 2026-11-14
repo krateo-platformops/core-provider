@@ -12,3 +12,4 @@ data:
   COMPOSITION_CONTROLLER_API_REF_NAME: {{ .api_ref_name | quote }}
   COMPOSITION_CONTROLLER_API_REF_NAMESPACE: {{ .api_ref_namespace | quote }}
   COMPOSITION_CONTROLLER_API_REF_EXTRAS: {{ .api_ref_extras | quote }}
+  COMPOSITION_CONTROLLER_LEASE_NAME: {{ .controllerLease }}

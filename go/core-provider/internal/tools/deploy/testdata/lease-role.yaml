@@ -1,0 +1,18 @@
+# The controller's ownership Lease (docs/design/cdc-pooling.md, step 2): a composition controller
+# reconciles only while it holds coordination.k8s.io Lease <version>.<plural>.<group> in its own
+# namespace, so a second controller for the same Kind x version (the next pod of a rolling update,
+# or a pool taking the Kind over) waits instead of reconciling alongside. create cannot be limited
+# to a name; get and update are limited to this controller's Lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .resource }}-{{ .apiVersion }}-lease
+  namespace: {{ .namespace }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "update"]
+  resourceNames: ["{{ .controllerLease }}"]

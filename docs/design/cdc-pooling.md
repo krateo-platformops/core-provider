@@ -105,7 +105,7 @@ When a definition stops naming it, it cancels that controller.
 |---|---|---|---|
 | 0 | profile the floor | no | **done**: #182 took it from about 88 MiB (inferred) to 19.5–20 MiB (measured) |
 | 1 | `spec.controller.pool`, **inert**: field, validation, status surface; no render change | no | **cut** |
-| 2 | **reconcile-time ownership guard**, inert: one reconciler per Kind × version, refusing a second | no | **cut** |
+| 2 | **reconcile-time ownership guard**, inert: one reconciler per Kind × version, refusing a second | no | **done**: a Lease per Kind × version (Diego, 2026-11-14), below |
 | 3 | **per-controller telemetry**: GVR as a per-controller metric/span/log attribute; metrics keyed per member | no | **cut**; blocks step 5 |
 | 4 | cdc **multi-GVR manager**, shipped hosting exactly one GVR: a pure refactor, proven by byte-identical rendered Deployments | no | next, after 1–3 |
 | 5 | pool object set, membership watch, ref-counted lifecycle | **yes** | **unfunded** |
@@ -121,6 +121,22 @@ rather than assumed.
 - **Step 1:** rendering with `pool` absent is byte-identical to today (golden test over the shipped
   chart); schema validation rejects non-DNS-1123 names.
 - **Step 2:** a kind integration test where a second reconciler for the same Kind × version is refused.
+  Built as an envtest (a real kube-apiserver is all it needs):
+  `go/composition-dynamic-controller/internal/ownership/ownership_envtest_test.go` builds two
+  controllers exactly as `main.go` does, and the second reconciles nothing for longer than a lease
+  duration, then takes over once the first has drained and released.
+
+### Step 2 as built
+
+A `coordination.k8s.io` Lease per Kind × version, `<version>.<plural>.<group>`, in the controller's
+namespace. It names the Kind × version, never a Deployment or a pod, so a dedicated controller and a
+pool's controller compete for the same Lease; that is what makes the move "stop-before-start"
+without coordination between them. The mechanism is unstructured-runtime's `controller.Ownership`
+(#87): the informer lists while waiting, so readiness keeps meaning "can see its resource" and a
+rolling update is not deadlocked; workers start only on the Lease; the Lease is released after the
+drain; losing it stops writes at once. core-provider renders the name once
+(`templates.ControllerLeaseName`) into both the controller's ConfigMap and its Role. Step 5's pool
+takes one such Lease per member it hosts.
 - **Step 3:** unit and kind tests only. Two controllers in one process must produce two distinctly
   attributed metric streams. There is no production observation planned. One would need a read on a
   real cluster after a release, which is Diego's call each time.
