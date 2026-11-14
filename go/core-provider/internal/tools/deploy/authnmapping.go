@@ -103,6 +103,13 @@ func hashAuthnServiceAccountMapping(opts DeployOptions, saName string, hsh *hash
 	// the digest: declaring delegation, or authn-crds starting to serve a field, makes the definition
 	// read as not up to date, and the Update re-renders the mapping (#405). Without them here, either
 	// change would sit unapplied until something unrelated triggered an Update.
+	//
+	// Not installed hashes a marker of its own, so authn arriving on the cluster later changes the
+	// digest and the next Update writes the mapping (#251). The installed digest is unchanged from
+	// before, so no definition re-deploys because of this.
+	if opts.AuthnSupport.NotInstalled {
+		return hsh.SumHash(name, authnNS, "authn-not-installed")
+	}
 	delegation, allowed, maxDepth := delegationValues(opts.ApiRefDelegation, opts.AuthnSupport)
 	return hsh.SumHash(name, authnNS, cdcGroup(saName), principalFor(opts.AuthnSupport), delegation, allowed, maxDepth)
 }
@@ -113,6 +120,15 @@ func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface,
 		return nil
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+	// #251: no mapping CRD where the controller runs (a remote target without authn). Writing it would
+	// fail the whole deploy with a NoMatch; skip it, say so, and let the definition report it. The
+	// controller there cannot get a service token until authn is installed, which its compositions
+	// report as ApiResolved=False/AuthnUnreachable.
+	if opts.AuthnSupport.NotInstalled {
+		log.Info("authn is not installed where the controller runs; its authn ServiceAccount mapping is not written",
+			"crd", authnMappingCRDName, "serviceAccount", saNamespace+"/"+saName)
+		return hashAuthnServiceAccountMapping(opts, saName, hsh)
+	}
 
 	obj, err := renderAuthnServiceAccountMapping(opts, saName, saNamespace)
 	if err != nil {
@@ -214,6 +230,12 @@ type AuthnSupport struct {
 	Principal bool
 	// Delegation: spec.delegation (authn-crds >= 0.37.0).
 	Delegation bool
+	// NotInstalled: the cluster the mapping is written to has no mapping CRD at all (no authn-crds
+	// there, typically a remote target without authn, #251). The composition's mapping is then not
+	// written, instead of failing the deploy with a NoMatch, and the definition reports it
+	// (AuthnMappingApplied=False/AuthnNotInstalled). The zero value is "installed", so a caller that
+	// never probed behaves as before.
+	NotInstalled bool
 }
 
 // AuthnMappingSupport reads the installed mapping CRD's SERVED schema. The caller reads it once per
@@ -223,11 +245,11 @@ type AuthnSupport struct {
 //
 // A failed read is an error, not "unsupported": answering "none" on a transient error would
 // re-render every mapping without principal and flap it on the next good read. A CRD that does not
-// exist supports nothing (and the mapping apply fails on its own).
+// exist is NotInstalled (#251): the mapping is skipped, not applied into a NoMatch.
 func AuthnMappingSupport(ctx context.Context, dyn dynamic.Interface) (AuthnSupport, error) {
 	crd, err := dyn.Resource(crdGVR).Get(ctx, authnMappingCRDName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return AuthnSupport{}, nil
+		return AuthnSupport{NotInstalled: true}, nil
 	}
 	if err != nil {
 		return AuthnSupport{}, fmt.Errorf("reading %s to decide which mapping fields it serves: %w", authnMappingCRDName, err)
