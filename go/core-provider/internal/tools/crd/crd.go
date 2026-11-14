@@ -150,19 +150,6 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	return ApplyOrUpdateCRDDropping(ctx, cli, dyn, newcrd, nil)
 }
 
-// ApplyOrUpdateCRDDropping is ApplyOrUpdateCRD that also removes the served versions in drop IN THE
-// SAME spec write (#484).
-//
-// Why the same write. A CRD carries every served version's full schema, and etcd refuses a request
-// over its limit (default 1.5 MiB) with "etcdserver: request is too large". Adding the new version
-// first and pruning afterwards makes the CRD briefly carry the stale version, the current one AND the
-// new one: on krateo-057 that was three ~600 KB versions of installers, and every reconcile failed at
-// the add, before the prune could run. Removing the due versions in the write that adds keeps the CRD
-// at most the current version plus the new one.
-//
-// drop must not name the version being applied (a caller that computed that has a bug, and dropping
-// it would remove the version this call exists to add); it is refused. On the create path (no CRD
-// yet) there is nothing to drop.
 // ProjectWrite is the object ApplyOrUpdateCRDDropping sends for newcrd over live, computed in memory
 // (live is not modified), and whether it differs from live. It is the ONE place the spec changes of
 // that write are made, so a caller that needs the write's size (the add plan, #494) measures the very
@@ -238,6 +225,19 @@ func ProjectedWriteBytes(live, newcrd *apiextensionsv1.CustomResourceDefinition,
 	return len(b), nil
 }
 
+// ApplyOrUpdateCRDDropping is ApplyOrUpdateCRD that also removes the served versions in drop IN THE
+// SAME spec write (#484).
+//
+// Why the same write. A CRD carries every served version's full schema, and etcd refuses a request
+// over its limit (default 1.5 MiB) with "etcdserver: request is too large". Adding the new version
+// first and pruning afterwards makes the CRD briefly carry the stale version, the current one AND the
+// new one: on krateo-057 that was three ~600 KB versions of installers, and every reconcile failed at
+// the add, before the prune could run. Removing the due versions in the write that adds keeps the CRD
+// at most the current version plus the new one.
+//
+// drop must not name the version being applied (a caller that computed that has a bug, and dropping
+// it would remove the version this call exists to add); it is refused. On the create path (no CRD
+// yet) there is nothing to drop.
 func ApplyOrUpdateCRDDropping(ctx context.Context,
 	cli client.Client,
 	dyn dynamic.Interface,
