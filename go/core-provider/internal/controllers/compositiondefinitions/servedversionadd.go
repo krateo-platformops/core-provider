@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -28,10 +29,17 @@ import (
 // one object. With #454's 5-minute grace the same wedge needs no failure at all: a bump less than 5
 // minutes after the previous one would add N+1 while N-1 is still waiting out its grace.
 //
-// Diego, 2026-11-13: the add waits for the grace. So the CRD never carries more than the current
+// Diego, 2026-11-13: the add waits for the grace. So the CRD carries no more than the current
 // version plus one transitional version, and the grace keeps its promise to clients of a vacated
 // endpoint. The cost is that a bump landing inside the grace waits for it (up to the grace plus one
 // poll interval).
+//
+// EXCEPT a held version (#494): a version something no grace releases still uses (a helm release
+// revision helm reads, instances, another definition) is neither dropped nor waited on, so the add
+// would carry it too. For a small CRD that is harmless and necessary (a parent's release holds the
+// child's old version until the parent re-renders). When the write would exceed
+// servedVersionAddBudget, the add is refused before anything is sent and the refusal names the holder
+// (Diego, 2026-11-14).
 
 // vacatedBeforeAdd is the subset of the prune-eligible versions that the add may act on: every one
 // EXCEPT the definition's own current version. Before the add, the definition still serves its
@@ -75,18 +83,75 @@ func asServedVersionAddWaits(err error) (*servedVersionAddWaits, bool) {
 	return nil, false
 }
 
+// servedVersionAddBudget is the most a CRD write that adds a version may carry, in JSON bytes, while a
+// HELD version has to stay beside it (#494, Diego 2026-11-14). etcd refuses a request over 1.5 MiB
+// (1,572,864 B: "etcdserver: request is too large"). The budget sits below it with margin, and is
+// compared with the request's JSON size, which over-states etcd's protobuf encoding of a CRD: both
+// err toward refusing. Measured on a real apiserver: two ~560 KB versions (1.12 MB) are accepted and a
+// third is refused (crd.TestApplyOrUpdateCRDDroppingKeepsTheWriteUnderTheEtcdLimitEnvtest).
+const servedVersionAddBudget = 1_400_000
+
+// servedVersionAddTooLarge is returned (as an error, like the wait) when the add would keep a held,
+// non-current served version and the write would exceed servedVersionAddBudget (#494). Nothing is
+// written: the write would only be refused by etcd. It names each held version and what holds it (a
+// helm release revision, instances, another definition), because the add can proceed only once that
+// holder lets go, which no prune grace will do. Update and Create treat it like the wait: a
+// successful no-op, retried on the next poll; Observe states it in the Ready message.
+type servedVersionAddTooLarge struct {
+	gvr    schema.GroupVersionResource
+	bytes  int
+	budget int
+	held   []compositiondefinitionsv1alpha1.HeldVersion
+}
+
+func (e *servedVersionAddTooLarge) Error() string {
+	holders := make([]string, 0, len(e.held))
+	for _, h := range e.held {
+		holders = append(holders, fmt.Sprintf("%s held by %s", h.Version, h.Reason))
+	}
+	return fmt.Sprintf("crd for %q does not serve this version yet: adding it would make the CRD write %d bytes, "+
+		"over the %d-byte budget below etcd's request limit, because served version(s) that must stay are held: %s. "+
+		"The add proceeds once they are released",
+		e.gvr.String(), e.bytes, e.budget, strings.Join(holders, "; "))
+}
+
+// asServedVersionAddTooLarge reports whether err is (or wraps) the too-large refusal.
+func asServedVersionAddTooLarge(err error) (*servedVersionAddTooLarge, bool) {
+	var r *servedVersionAddTooLarge
+	if errors.As(err, &r) {
+		return r, true
+	}
+	return nil, false
+}
+
 // servedVersionAddPlan is what the write that adds gvk's version must do: drop the due versions, or
-// not happen yet (wait != nil). The zero value is "no add, or nothing to drop".
+// not happen yet (wait != nil: a vacated version's grace; tooLarge != nil: a held version and no room,
+// #494). The zero value is "no add, or nothing to drop".
 type servedVersionAddPlan struct {
-	drop map[string]bool
-	wait *servedVersionAddWaits
+	drop     map[string]bool
+	wait     *servedVersionAddWaits
+	tooLarge *servedVersionAddTooLarge
+}
+
+// refusal is the plan's no-write outcome, nil when the write may go ahead.
+func (p servedVersionAddPlan) refusal() error {
+	switch {
+	case p.wait != nil:
+		return p.wait
+	case p.tooLarge != nil:
+		return p.tooLarge
+	}
+	return nil
 }
 
 // planServedVersionAdd decides the add for gvk's version on the CRD with the given plural. It records
 // the grace clocks in cr's status (applyPruneGrace, the same decision Observe and the standalone prune
 // take), so the clock a wait is measured against is the one that later makes the version due.
-func (e *external) planServedVersionAdd(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, plural string) (servedVersionAddPlan, error) {
-	gr := schema.GroupResource{Group: gvk.Group, Resource: plural}
+//
+// crd is the generated CRD for gvk, the object the write would add: with a held version that has to
+// stay, the write it would make is measured against servedVersionAddBudget (#494).
+func (e *external) planServedVersionAdd(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, crd *apiextensionsv1.CustomResourceDefinition) (servedVersionAddPlan, error) {
+	gr := schema.GroupResource{Group: gvk.Group, Resource: crd.Spec.Names.Plural}
 	live, err := crdclient.Get(ctx, e.kube, gr)
 	if err != nil {
 		return servedVersionAddPlan{}, fmt.Errorf("fetching CRD to plan the served-version add: %w", err)
@@ -105,7 +170,7 @@ func (e *external) planServedVersionAdd(ctx context.Context, cr *compositiondefi
 	if listVersion == "" {
 		return servedVersionAddPlan{}, nil // nothing served but vacuum: nothing to drop or wait for
 	}
-	prunable, _, err := e.prunableServedVersions(ctx, gvk, gr.WithVersion(listVersion), cr.Name, cr.Namespace)
+	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gr.WithVersion(listVersion), cr.Name, cr.Namespace)
 	if err != nil {
 		return servedVersionAddPlan{}, fmt.Errorf("evaluating served versions before adding %s: %w", gvk.Version, err)
 	}
@@ -133,10 +198,55 @@ func (e *external) planServedVersionAdd(ctx context.Context, cr *compositiondefi
 			gvr: gr.WithVersion(gvk.Version), waiting: waiting, dueAt: dueAt,
 		}}, nil
 	}
+	// #494: a version held by something no grace will release (a helm release revision helm reads,
+	// instances, another definition) stays beside the new one. When that write would exceed the
+	// budget, refuse it and name the holders instead of sending a write etcd would reject. A small CRD
+	// (a parent/child bump) is unaffected: there three versions are harmless and the holder lets go
+	// once the parent re-renders.
+	if held := heldBeside(live, own, gvk.Version, dueSet, heldVersions(kept)); len(held) > 0 {
+		size, err := crdclient.ProjectedWriteBytes(live, crd, dueSet)
+		if err != nil {
+			return servedVersionAddPlan{}, fmt.Errorf("measuring the write that adds %s: %w", gvk.Version, err)
+		}
+		if size > servedVersionAddBudget {
+			return servedVersionAddPlan{tooLarge: &servedVersionAddTooLarge{
+				gr.WithVersion(gvk.Version), size, servedVersionAddBudget, held}}, nil
+		}
+	}
 	if len(dueSet) == 0 {
 		return servedVersionAddPlan{}, nil
 	}
 	return servedVersionAddPlan{drop: dueSet}, nil
+}
+
+// heldBeside is the held versions that would stay served beside the new version: served, not vacuum,
+// not the definition's own current version, not the version being added, not dropped by this write,
+// and held (a version the prune keeps for a reason; "*" when unaccounted instances hold every
+// version). Each keeps the reason it is held for.
+func heldBeside(live *apiextensionsv1.CustomResourceDefinition, own, adding string, drop map[string]bool, held []compositiondefinitionsv1alpha1.HeldVersion) []compositiondefinitionsv1alpha1.HeldVersion {
+	reason := map[string]string{}
+	all := ""
+	for _, h := range held {
+		if h.Version == "*" {
+			all = h.Reason
+			continue
+		}
+		reason[h.Version] = h.Reason
+	}
+	var out []compositiondefinitionsv1alpha1.HeldVersion
+	for _, v := range live.Spec.Versions {
+		if !v.Served || v.Name == "vacuum" || v.Name == own || v.Name == adding || drop[v.Name] {
+			continue
+		}
+		r, ok := reason[v.Name]
+		if !ok && all != "" {
+			r, ok = all, true
+		}
+		if ok {
+			out = append(out, compositiondefinitionsv1alpha1.HeldVersion{Version: v.Name, Reason: r})
+		}
+	}
+	return out
 }
 
 // servedListVersion picks a served, non-vacuum version of live to list instances through: own when
@@ -165,12 +275,12 @@ func servedListVersion(live *apiextensionsv1.CustomResourceDefinition, own strin
 // afterwards, but the hub apply runs first, and appending to a hub copy that still carries the dropped
 // version would make the hub write the three-version object this exists to avoid.
 func (e *external) applyCompositionCRD(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, crd *apiextensionsv1.CustomResourceDefinition) (schema.GroupVersionResource, error) {
-	plan, err := e.planServedVersionAdd(ctx, cr, gvk, crd.Spec.Names.Plural)
+	plan, err := e.planServedVersionAdd(ctx, cr, gvk, crd)
 	if err != nil {
 		return schema.GroupVersionResource{}, err
 	}
-	if plan.wait != nil {
-		return plan.wait.gvr, plan.wait
+	if r := plan.refusal(); r != nil {
+		return schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: crd.Spec.Names.Plural}, r
 	}
 	gvr, err := crdclient.ApplyOrUpdateCRDDropping(ctx, e.kube, e.dynamic, crd, plan.drop)
 	if err != nil {
@@ -190,6 +300,10 @@ func (e *external) applyCompositionCRD(ctx context.Context, cr *compositiondefin
 func settleAddWait(log logging.Logger, err error) (stop bool, out error) {
 	if w, ok := asServedVersionAddWaits(err); ok {
 		log.Info("Served-version add waits for a prune grace", "detail", w.Error())
+		return true, nil
+	}
+	if r, ok := asServedVersionAddTooLarge(err); ok {
+		log.Info("Served-version add refused: a held version must stay and the write would not fit", "detail", r.Error())
 		return true, nil
 	}
 	return false, err

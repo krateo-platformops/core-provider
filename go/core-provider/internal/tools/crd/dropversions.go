@@ -27,17 +27,32 @@ func DropVersions(ctx context.Context, cli client.Client, crd *apiextensionsv1.C
 	if len(drop) == 0 {
 		return false, nil
 	}
+	if err := TrimStoredVersions(ctx, cli, crd, drop); err != nil {
+		return false, err
+	}
+	return generation.RemoveStaleVersions(crd, drop), nil
+}
+
+// TrimStoredVersions removes the versions in drop from status.storedVersions ON THE APISERVER (and in
+// crd), so a spec write that leaves them out is accepted. vacuum is never trimmed. It is the only
+// part of a drop that needs the apiserver before the spec write; the spec side is in-memory
+// (generation.RemoveStaleVersions, also run by ProjectWrite).
+func TrimStoredVersions(ctx context.Context, cli client.Client, crd *apiextensionsv1.CustomResourceDefinition, drop map[string]bool) error {
+	if len(drop) == 0 {
+		return nil
+	}
 	var keptStored []string
 	for _, sv := range crd.Status.StoredVersions {
 		if sv == "vacuum" || !drop[sv] {
 			keptStored = append(keptStored, sv)
 		}
 	}
-	if len(keptStored) != len(crd.Status.StoredVersions) {
-		crd.Status.StoredVersions = keptStored
-		if err := cli.Status().Update(ctx, crd); err != nil {
-			return false, fmt.Errorf("trimming storedVersions before dropping served versions: %w", err)
-		}
+	if len(keptStored) == len(crd.Status.StoredVersions) {
+		return nil
 	}
-	return generation.RemoveStaleVersions(crd, drop), nil
+	crd.Status.StoredVersions = keptStored
+	if err := cli.Status().Update(ctx, crd); err != nil {
+		return fmt.Errorf("trimming storedVersions before dropping served versions: %w", err)
+	}
+	return nil
 }
