@@ -223,6 +223,16 @@ func TestUnevaluatedReasonsAreTheExpectedSet(t *testing.T) {
 		}
 	}
 
+	// NoIdentifierRecorded (oasgen-provider #687, mapped ahead of 0.69.0) must be FAILED, and must NOT
+	// be unevaluated even though it reads like "cannot observe": it is structural (no identifier, no
+	// findby), every later pass gives the same answer, and the vendor resource may exist unreferenced.
+	// Unevaluated never affects Ready, so it would hide exactly what needs a human.
+	if got := krateoReady(krateoCR("False", "NoIdentifierRecorded", true)); got != childFailed {
+		t.Errorf("NoIdentifierRecorded maps to %d, want childFailed (%d): it is cleared only by a human "+
+			"(an identifier written into status, or a findby declared), so its parent must not read "+
+			"converging or healthy", got, childFailed)
+	}
+
 	// And Creating must STAY converging: it is what a create genuinely in flight reports, and also
 	// what a never-creatable child reported before its controller could name it. The two are told
 	// apart only by the specific reasons above, never by failing Creating.
