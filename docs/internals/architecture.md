@@ -52,6 +52,11 @@ with the CDC and chart-inspector it orchestrates.
   OTel-model JSON on stderr via provider-runtime's `logging.NewOTelHandler` (the
   old local `loghandler` duplicate is gone); `telemetry.Setup` +
   `coretelemetry.SetupOTLPLogs`/`SetupTracing` wire the exporters.
+- `-otel-audit-logs-enabled` (env `OTEL_AUDIT_LOGS_ENABLED`, chart `otel.auditLogs`) exports ONLY
+  the controller audit records over OTLP, on a dedicated LoggerProvider
+  (`coretelemetry.NewAuditLoggerProvider`, the same `OTEL_EXPORTER_OTLP_*` endpoint) that is never
+  installed globally, so the slog stream stays on stderr. The composition controller has the same
+  switch (`auditrec.NewAuditLoggerProvider`). Without it, audit records follow `OTEL_LOGS_ENABLED`.
 - The manager binds a metrics server on `:8080` and uses a priority work queue
   (`ctrl.NewManager` options). **There is no webhook server or serving
   certificate** — core-provider hosts no admission webhooks since 2.0.0 (see the

@@ -156,6 +156,7 @@ func main() {
 	otelEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
 	otelTracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
 	otelLogsEnabled := flag.Bool("otel-logs-enabled", env.Bool("OTEL_LOGS_ENABLED", false), "Enable OTLP log export (logs as a first-class OTel signal, in addition to the stderr JSON stream).")
+	otelAuditLogsEnabled := flag.Bool("otel-audit-logs-enabled", env.Bool("OTEL_AUDIT_LOGS_ENABLED", false), "Export ONLY controller audit records over OTLP, on a dedicated logger provider; the log stream stays on stderr.")
 	otelServiceName := flag.String("otel-service-name", serviceName, "The service name attached to exported OTLP metrics/traces.")
 	otelExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	deploymentName := flag.String("deployment-name", env.String("DEPLOYMENT_NAME", ""), "The deployment name for stable resource identification in metrics.")
@@ -396,7 +397,15 @@ func main() {
 
 	// core-provider#423: one controller audit record per child each helm operation writes, as this
 	// controller's ServiceAccount (the same one core-provider sets serviceAccountName from).
-	auditRecorder, err := auditrec.New(cfg, *resourceName, *saNamespace, *saName)
+	// OTEL_AUDIT_LOGS_ENABLED gives the records their own OTLP provider, so they reach krateo_audit
+	// without exporting the whole log stream (Diego, 2026-11-14).
+	auditLogs, auditLogsShutdown, err := auditrec.NewAuditLoggerProvider(context.Background(), *otelAuditLogsEnabled, *otelServiceName)
+	if err != nil {
+		log.Error(err, "Creating the audit OTLP logger provider")
+		os.Exit(1)
+	}
+	defer func() { _ = auditLogsShutdown(context.Background()) }()
+	auditRecorder, err := auditrec.New(cfg, *resourceName, *saNamespace, *saName, auditLogs)
 	if err != nil {
 		log.Error(err, "Creating the audit recorder")
 		os.Exit(1)

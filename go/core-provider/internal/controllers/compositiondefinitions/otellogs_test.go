@@ -15,6 +15,12 @@ import (
 // YAML yet), and a parse that keeps the last of two equal keys would hide a duplicate.
 func otelLogsLines(t *testing.T, extra map[string]any) (core, cdc []string) {
 	t.Helper()
+	return otelKeyLines(t, extra, "OTEL_LOGS_ENABLED")
+}
+
+// otelKeyLines is otelLogsLines for any ConfigMap key.
+func otelKeyLines(t *testing.T, extra map[string]any, envKey string) (core, cdc []string) {
+	t.Helper()
 	chrt, err := loadChartForTest(chartDir)
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +33,7 @@ func otelLogsLines(t *testing.T, extra map[string]any) (core, cdc []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := regexp.MustCompile(`(?m)^\s*OTEL_LOGS_ENABLED:.*$`)
+	key := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(envKey) + `:.*$`)
 	found := 0
 	for name, body := range rendered {
 		switch {
@@ -94,4 +100,62 @@ func TestOtelLogsGovernsBothProcesses(t *testing.T) {
 		want(t, "core-provider", core, `OTEL_LOGS_ENABLED: "true"`)
 		want(t, "cdc", cdc, `OTEL_LOGS_ENABLED: "true"`)
 	})
+}
+
+// The audit-only switch (Diego, 2026-11-14): otel.auditLogs reaches core-provider AND every cdc as
+// OTEL_AUDIT_LOGS_ENABLED, independently of otel.logs, and an explicit env / cdc.env key wins for its
+// process with exactly ONE key rendered, the same override path as OTEL_LOGS_ENABLED (#469).
+func TestOtelAuditLogsGovernsBothProcesses(t *testing.T) {
+	const k = "OTEL_AUDIT_LOGS_ENABLED"
+	want := func(t *testing.T, what string, got []string, line string) {
+		t.Helper()
+		if line == "" {
+			if len(got) != 0 {
+				t.Errorf("%s: %s rendered %v, want absent", what, k, got)
+			}
+			return
+		}
+		if len(got) != 1 || got[0] != line {
+			t.Errorf("%s: %s lines %v, want exactly [%s]", what, k, got, line)
+		}
+	}
+	t.Run("otel.auditLogs true reaches both, with otel.logs off", func(t *testing.T) {
+		core, cdc := otelKeyLines(t, map[string]any{"otel": map[string]any{"enabled": true, "logs": false, "auditLogs": true}}, k)
+		want(t, "core-provider", core, k+`: "true"`)
+		want(t, "cdc", cdc, k+`: "true"`)
+		lcore, lcdc := otelKeyLines(t, map[string]any{"otel": map[string]any{"enabled": true, "logs": false, "auditLogs": true}}, "OTEL_LOGS_ENABLED")
+		want(t, "core-provider (OTEL_LOGS_ENABLED unaffected)", trimKey(lcore, "OTEL_LOGS_ENABLED"), "")
+		want(t, "cdc (OTEL_LOGS_ENABLED unaffected)", trimKey(lcdc, "OTEL_LOGS_ENABLED"), "")
+	})
+	t.Run("default: rendered false in both", func(t *testing.T) {
+		core, cdc := otelKeyLines(t, map[string]any{"otel": map[string]any{"enabled": true}}, k)
+		want(t, "core-provider", core, k+`: "false"`)
+		want(t, "cdc", cdc, k+`: "false"`)
+	})
+	t.Run("otel off: neither", func(t *testing.T) {
+		core, cdc := otelKeyLines(t, map[string]any{"otel": map[string]any{"enabled": false, "auditLogs": true}}, k)
+		want(t, "core-provider", core, "")
+		want(t, "cdc", cdc, "")
+	})
+	t.Run("an explicit env key wins, rendered once", func(t *testing.T) {
+		core, cdc := otelKeyLines(t, map[string]any{
+			"otel": map[string]any{"enabled": true, "auditLogs": false},
+			"env":  map[string]any{k: "true"},
+			"cdc":  map[string]any{"env": map[string]any{k: "true"}},
+		}, k)
+		want(t, "core-provider", core, k+`: "true"`)
+		want(t, "cdc", cdc, k+`: "true"`)
+	})
+}
+
+// trimKey keeps the lines that are NOT a "false" rendering of key, so an arm can assert "this value
+// did not turn the other switch on" without depending on whether otel.logs renders false or nothing.
+func trimKey(lines []string, key string) []string {
+	var out []string
+	for _, l := range lines {
+		if l != key+`: "false"` {
+			out = append(out, l)
+		}
+	}
+	return out
 }

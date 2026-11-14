@@ -881,6 +881,10 @@
         "logs": {
           "type": "boolean"
         },
+        "auditLogs": {
+          "type": "boolean",
+          "description": "OTLP export of controller audit records ONLY, for core-provider and every composition controller (OTEL_AUDIT_LOGS_ENABLED); the log stream stays on stderr."
+        },
         "endpoint": {
           "type": "string"
         },
