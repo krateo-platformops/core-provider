@@ -40,6 +40,17 @@ krateo-core-provider#234, read by `readProjectedHealth` in
   evidence and the composition becomes `Ready=True` / `Available`. Project `ready: true` only when
   your expression really knows the composition is healthy.
 
+## Children that rest at not-Ready on purpose
+
+A managed child whose own controller sets `Ready=False` with reason `TerminalByDesign`
+(plumbing's `conditions.ReasonTerminalByDesign`) declares that resting there is its healthy end
+state: for example, a create the vendor answers 202 that must never be driven again. The rollup
+counts such a child as **healthy**, so it does not hold its parent at `Creating` (#498). `Pending`
+is not that declaration and still counts as converging. A chart cannot project it: it is the
+child's controller's declaration, and a composition's own `Ready` never carries it. As of this
+release no controller emits it yet; rest-dynamic-controller will, from an explicit per-verb
+declaration.
+
 ## Withdrawing the verdict: project `{}`
 
 When the chart has nothing to say, project an object **without** a `ready` key, e.g. `{}`:
