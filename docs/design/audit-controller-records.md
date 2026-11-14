@@ -140,9 +140,11 @@ record with its uid, after a precondition that it existed); and the cdc uninstal
 naming the live child, which stays live; the retry after the policy is lifted goes through, #497);
 and a **kept deletion** (a render that drops a child marked helm.sh/resource-policy: keep is one
 helm.reconcile / delete / denied / kept_resource_policy record, and the child stays live; plumbing
-v1.74.0, which stopped the reconcile recording that one decision twice). Checked against audit v0.15.0.
-**Not yet proven**, and tracked on #423:
-- an **authorization-label-only** child change recorded end to end.
+v1.74.0, which stopped the reconcile recording that one decision twice); and an
+**authorization-label-only** child change (`audit_authlabel_e2e_test.go`: a chart served from the
+test renders a ConfigMap whose labels come from values; changing only `authn.krateo.io/principal`
+is one recorded write, and changing only an ordinary label lands and records nothing). Checked
+against audit v0.15.0. Every outcome #423 listed is now proven on a real path.
 
 ## Decisions (Diego, 2026-11-11)
 
@@ -168,3 +170,4 @@ v1.74.0, which stopped the reconcile recording that one decision twice). Checked
 - 2026-11-14: the cdc's prune record required (#495).
 - 2026-11-14: the cdc uninstall row's failure outcome proven on kind, with #497's fix (#499).
 - 2026-11-14: the kept deletion proven on kind; one decision, one record (plumbing v1.74.0, #172).
+- 2026-11-14: the authorization-label-only change proven on kind, with a plain-label control.
