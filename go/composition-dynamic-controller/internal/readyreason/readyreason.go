@@ -57,6 +57,31 @@ type Reason struct {
 	status  metav1.ConditionStatus
 	writer  Writer
 	meaning string
+	clears  Clearance
+}
+
+// ClearKind is how long a reason is expected to last (core-provider#522): what a consumer should do
+// on seeing it, re-read soon, wait for a timer, or treat it as a state.
+type ClearKind string
+
+const (
+	// Steady: the healthy end state, not expected to clear.
+	Steady ClearKind = "steady"
+	// Timer: clears when an operation returns, bounded by a named timer.
+	Timer ClearKind = "timer"
+	// NextPass: clears on the next reconcile, normally within the resync interval or the retry backoff.
+	NextPass ClearKind = "next pass"
+	// Indefinite: lasts until something outside this controller changes (a child, a permission).
+	Indefinite ClearKind = "indefinite"
+)
+
+// Clearance is a reason's expected lifetime. Note names the controller's timers by key in braces,
+// {helmOperationTimeout}, {pendingOperationGrace} or {childTeardownGrace}: the rendering in
+// internal/composition substitutes their values and the variables that set them, so a changed
+// timeout changes docs/ready-reasons.md.
+type Clearance struct {
+	Kind ClearKind
+	Note string
 }
 
 // String is the reason as written on the condition.
@@ -70,6 +95,9 @@ func (r Reason) Writer() Writer { return r.writer }
 
 // Meaning is one line on when it is written.
 func (r Reason) Meaning() string { return r.meaning }
+
+// Clears is how long the reason is expected to last.
+func (r Reason) Clears() Clearance { return r.clears }
 
 // Condition is the Ready condition carrying r, with no message.
 func (r Reason) Condition() metav1.Condition {
@@ -91,38 +119,38 @@ func (r Reason) WithMessage(message string) metav1.Condition {
 // The reasons the composition-dynamic-controller writes.
 var (
 	Available = Reason{condition.ReasonAvailable, metav1.ConditionTrue, WriterCDC,
-		"stampReady: the health verdict is healthy, over most of the children it names"}
+		"stampReady: the health verdict is healthy, over most of the children it names", Clearance{Steady, "the healthy end state"}}
 	AvailablePartialCoverage = Reason{ReasonAvailablePartialCoverage, metav1.ConditionTrue, WriterCDC,
-		"stampReady: healthy, but the rollup assessed a minority of the children it names (#297)"}
+		"stampReady: healthy, but the rollup assessed a minority of the children it names (#297)", Clearance{Steady, "the healthy end state, over a minority of the children named"}}
 	ReconcileGracefullyPaused = Reason{compositioncondition.ReasonReconcileGracefullyPaused, metav1.ConditionTrue, WriterCDC,
-		"Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half)"}
+		"Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half)", Clearance{Steady, "until krateo.io/gracefully-paused is removed; paired with Synced=False/ReconcileGracefullyPaused"}}
 	Creating = Reason{condition.ReasonCreating, metav1.ConditionFalse, WriterCDC,
-		"stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating)"}
+		"stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating)", Clearance{Indefinite, "until the converging child converges; no deadline (core-provider#498 adds one)"}}
 	Unavailable = Reason{condition.ReasonUnavailable, metav1.ConditionFalse, WriterCDC,
-		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error"}
+		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error", Clearance{Indefinite, "until the failing child, or the observation, recovers"}}
 	HelmOperationInProgress = Reason{ReasonHelmOperationInProgress, metav1.ConditionFalse, WriterCDC,
-		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound"}
+		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound", Clearance{Timer, "until the install or uninstall returns; each hook and each wait must finish within {helmOperationTimeout}, and the message carries the start time"}}
 	PendingHelmOperation = Reason{ReasonPendingHelmOperation, metav1.ConditionFalse, WriterCDC,
-		"Observe: a release is pending within its grace period, so this reconcile stands down"}
+		"Observe: a release is pending within its grace period, so this reconcile stands down", Clearance{Timer, "until the pending operation settles; otherwise rolled back once pending longer than {pendingOperationGrace} (at once when the pod that started it is gone); the message says how long it has been pending"}}
 	ZeroEvidence = Reason{condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
-		"stampReady: no child could be assessed at all (#165)"}
+		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"}}
 	ChildrenForbidden = Reason{ReasonChildrenForbidden, metav1.ConditionUnknown, WriterCDC,
-		"stampReady: no child could be assessed, and at least one read was refused by RBAC (#318)"}
+		"stampReady: no child could be assessed, and at least one read was refused by RBAC (#318)", Clearance{Indefinite, "until the controller may read its children (an RBAC change)"}}
 	InventoryNotRecorded = Reason{ReasonInventoryNotRecorded, metav1.ConditionUnknown, WriterCDC,
-		"stampReady: the managed-children inventory was never recorded"}
+		"stampReady: the managed-children inventory was never recorded", Clearance{NextPass, "the next Update records the inventory (core-provider#326)"}}
 )
 
 // The reasons unstructured-runtime writes on the same compositions. Unexported: the cdc must not
 // write them itself.
 var (
 	runtimeReadyPaused = Reason{condition.ReasonReconcilePausedReady, metav1.ConditionTrue, WriterRuntime,
-		"krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half)"}
+		"krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half)", Clearance{Steady, "until krateo.io/paused is removed; paired with Synced=False/ReconcilePaused"}}
 	runtimeCreating = Reason{condition.ReasonCreating, metav1.ConditionFalse, WriterRuntime,
-		"worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error)"}
+		"worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error)", Clearance{Indefinite, "retried with backoff until the write succeeds"}}
 	runtimeObserveFailed = Reason{condition.ReasonObserveFailed, metav1.ConditionUnknown, WriterRuntime,
-		"Observe failed and the handler did not wrap its error with ReadyAssessed"}
+		"Observe failed and the handler did not wrap its error with ReadyAssessed", Clearance{NextPass, "the next observation, after the retry backoff"}}
 	runtimeDeleting = Reason{condition.ReasonDeleting, metav1.ConditionFalse, WriterRuntime,
-		"Delete is in progress or failed (message: the error, on failure)"}
+		"Delete is in progress or failed (message: the error, on failure)", Clearance{Timer, "until deletion completes: finalizer-bearing children get {childTeardownGrace}, then the release is uninstalled with each hook and wait within {helmOperationTimeout}"}}
 )
 
 // Table is every reason a composition's Ready can carry, cdc first, in a fixed order.
