@@ -3,6 +3,7 @@ package composition
 import (
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/authn"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -19,25 +20,16 @@ import (
 // failure must not make a composition whose helm release is healthy report unready. So Ready keeps
 // describing the release and ApiResolved describes the projection source, and a consumer that
 // gates on Ready is unaffected by adding this.
-const ConditionTypeApiResolved = "ApiResolved"
+const ConditionTypeApiResolved = conditionreason.TypeApiResolved
 
+// The literals are declared in internal/conditionreason (core-provider#528).
 const (
-	reasonApiResolved = "Resolved"
-	reasonApiEmpty    = "ApiEmpty"
-
-	// AuthnUnreachable is the one an operator most needs to see: on a spoke it means no authn was
-	// installed into this target at all, which is the failure that used to be silent.
-	reasonAuthnUnreachable = "AuthnUnreachable"
-	// AuthnError is authn failing on its own account (5xx), NOT refusing the caller. A rejection is
-	// about the caller; a 5xx is about authn, and conflating them sends an operator to check
-	// audiences and mappings when the fault is authn's own dependency.
-	reasonAuthnError = "AuthnError"
-	// AuthnRejected is the fallback for a refusal whose body carries no machine-readable cause —
-	// an authn older than 0.28.2, which is what runs until the next umbrella roll.
-	reasonAuthnRejected = "AuthnRejected"
-	// ResolveFailed is everything that is not an authn problem: snowplow unreachable, a RESTAction
-	// that does not resolve, a malformed apiRef.
-	reasonResolveFailed = "ResolveFailed"
+	reasonApiResolved      = conditionreason.ReasonApiResolved
+	reasonApiEmpty         = conditionreason.ReasonApiEmpty
+	reasonAuthnUnreachable = conditionreason.ReasonAuthnUnreachable
+	reasonAuthnError       = conditionreason.ReasonAuthnError
+	reasonAuthnRejected    = conditionreason.ReasonAuthnRejected
+	reasonResolveFailed    = conditionreason.ReasonResolveFailed
 )
 
 const reasonApiRefUnresolved event.Reason = "ApiRefUnresolved"
@@ -52,12 +44,12 @@ const reasonApiRefUnresolved event.Reason = "ApiRefUnresolved"
 // authn commits to adding names and never renaming them, so pass-through means a new cause of
 // theirs appears in this condition the day they ship it, with no change here. Remapping would make
 // their docs and these conditions diverge on the first addition.
-func apiResolvedFailure(err error) (reason, message string) {
+func apiResolvedFailure(err error) metav1.Condition {
 	var unreachable *authn.UnreachableError
 	if errors.As(err, &unreachable) {
-		return reasonAuthnUnreachable, fmt.Sprintf(
+		return conditionreason.ApiAuthnUnreachable.WithMessage(fmt.Sprintf(
 			"authn is unreachable, so no service token could be obtained and the apiRef could not "+
-				"be resolved. On a remote target this usually means authn is not installed there: %v", err)
+				"be resolved. On a remote target this usually means authn is not installed there: %v", err))
 	}
 
 	var status *authn.StatusError
@@ -66,26 +58,26 @@ func apiResolvedFailure(err error) (reason, message string) {
 		case status.ServerSide():
 			// Keyed on the status CLASS, not on the cause name, so it stays correct against an
 			// authn that sends no Status body at all.
-			return reasonAuthnError, fmt.Sprintf("authn failed on its own account (HTTP %d%s): %v",
-				status.Code, causeSuffix(status), err)
+			return conditionreason.ApiAuthnError.WithMessage(fmt.Sprintf("authn failed on its own account (HTTP %d%s): %v",
+				status.Code, causeSuffix(status), err))
 		case status.Cause != "":
 			// authn's own discriminator, e.g. NoMapping / AudienceMismatch / MissingBearer.
-			return status.Cause, fmt.Sprintf("authn refused the service token (HTTP %d): %v",
-				status.Code, err)
+			return conditionreason.ApiAuthnRefusedWith(status.Cause, fmt.Sprintf("authn refused the service token (HTTP %d): %v",
+				status.Code, err))
 		case status.Reason != "":
 			// A Status body with no causes[]: use authn's top-level reason rather than inventing a
 			// specific cause we do not have.
-			return status.Reason, fmt.Sprintf("authn refused the service token (HTTP %d): %v",
-				status.Code, err)
+			return conditionreason.ApiAuthnRefusedWith(status.Reason, fmt.Sprintf("authn refused the service token (HTTP %d): %v",
+				status.Code, err))
 		default:
 			// No Status body at all. Reporting AuthnRejected with the code is honest about how
 			// little we know; naming a likely cause would be a guess presented as a finding.
-			return reasonAuthnRejected, fmt.Sprintf("authn refused the service token (HTTP %d): %v",
-				status.Code, err)
+			return conditionreason.ApiAuthnRejected.WithMessage(fmt.Sprintf("authn refused the service token (HTTP %d): %v",
+				status.Code, err))
 		}
 	}
 
-	return reasonResolveFailed, fmt.Sprintf("the apiRef could not be resolved: %v", err)
+	return conditionreason.ApiResolveFailed.WithMessage(fmt.Sprintf("the apiRef could not be resolved: %v", err))
 }
 
 func causeSuffix(s *authn.StatusError) string {
@@ -97,12 +89,6 @@ func causeSuffix(s *authn.StatusError) string {
 
 // setApiResolvedCondition upserts the condition. Upsert keys on Type alone, so this coexists with
 // Ready and replaces its own previous value across reconciles rather than accumulating.
-func setApiResolvedCondition(mg *unstructured.Unstructured, status metav1.ConditionStatus, reason, message string) error {
-	return unstructuredtools.SetConditions(mg, metav1.Condition{
-		Type:               ConditionTypeApiResolved,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
-	})
+func setApiResolvedCondition(mg *unstructured.Unstructured, cond metav1.Condition) error {
+	return unstructuredtools.SetConditions(mg, cond)
 }

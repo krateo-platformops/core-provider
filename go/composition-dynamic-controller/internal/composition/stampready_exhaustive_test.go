@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -32,12 +32,12 @@ import (
 // rather than an entry silently vanishing from the map and the reason going unresolved.
 var importedStringConsts = map[string]string{
 	"condition.ReasonZeroEvidence": condition.ReasonZeroEvidence,
-	// #515: this package's own Ready reasons are aliases of readyreason's literals.
-	"readyreason.ReasonAvailablePartialCoverage": readyreason.ReasonAvailablePartialCoverage,
-	"readyreason.ReasonChildrenForbidden":        readyreason.ReasonChildrenForbidden,
-	"readyreason.ReasonInventoryNotRecorded":     readyreason.ReasonInventoryNotRecorded,
-	"readyreason.ReasonHelmOperationInProgress":  readyreason.ReasonHelmOperationInProgress,
-	"readyreason.ReasonPendingHelmOperation":     readyreason.ReasonPendingHelmOperation,
+	// #515: this package's own Ready reasons are aliases of conditionreason's literals.
+	"conditionreason.ReasonAvailablePartialCoverage": conditionreason.ReasonAvailablePartialCoverage,
+	"conditionreason.ReasonChildrenForbidden":        conditionreason.ReasonChildrenForbidden,
+	"conditionreason.ReasonInventoryNotRecorded":     conditionreason.ReasonInventoryNotRecorded,
+	"conditionreason.ReasonHelmOperationInProgress":  conditionreason.ReasonHelmOperationInProgress,
+	"conditionreason.ReasonPendingHelmOperation":     conditionreason.ReasonPendingHelmOperation,
 }
 
 // resolveSelector reads a qualified identifier (pkg.CONST) into its string value.

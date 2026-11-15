@@ -154,7 +154,8 @@ func TestChartRenderableFailureInputStates(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, msg := chartRenderableFailure(tc.err)
+			r, msg := chartRenderableFailure(tc.err)
+			reason := r.String()
 			if reason != tc.wantReason {
 				t.Errorf("reason = %q, want %q (message %q)", reason, tc.wantReason, msg)
 			}
@@ -195,7 +196,8 @@ func TestValuesSchema400ThroughTheClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 400 returned no error")
 	}
-	reason, msg := chartRenderableFailure(fmt.Errorf("generating RBAC: %w", err))
+	r, msg := chartRenderableFailure(fmt.Errorf("generating RBAC: %w", err))
+	reason := r.String()
 	if reason != reasonValuesSchemaViolation {
 		t.Errorf("reason = %q, want %q", reason, reasonValuesSchemaViolation)
 	}

@@ -1,10 +1,5 @@
 package condition
 
-import (
-	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
 const (
 	ReasonReconcileGracefullyPaused = "ReconcileGracefullyPaused"
 
@@ -20,20 +15,9 @@ const (
 // sessions read Ready=True/Available plus Synced=True as "paused". Synced is the liveness axis
 // (#241): False says "do not read this as settled", and the message says what will happen and what
 // to use instead. Ready is left alone, as it is for the pause itself.
-func SyncedGracefulPausePending() metav1.Condition {
-	return metav1.Condition{
-		Type:               condition.TypeSynced,
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonGracefulPausePending,
-		Message: "krateo.io/gracefully-paused is set but not yet in effect: it takes effect after the next " +
-			"change to this composition is applied, and that change IS applied. Use krateo.io/paused to " +
-			"stop reconciliation now.",
-	}
-}
 
 // The READINESS half of a graceful pause (Ready=True/ReconcileGracefullyPaused) is
-// readyreason.ReconcileGracefullyPaused (core-provider#515: every Ready condition is built there).
+// conditionreason.ReconcileGracefullyPaused (core-provider#515: every Ready condition is built there).
 // Ready stays TRUE: a pause is a deliberate operator action, not a failure, and #241 chose not to
 // flip it, because readiness and liveness are different axes and flipping Ready moves every
 // readiness-gating consumer at once.
@@ -72,11 +56,3 @@ func SyncedGracefulPausePending() metav1.Condition {
 // Before it, the runtime stamped its own ReconcileSuccess (Synced=True) over whatever the handler
 // returned on the up-to-date path — which is exactly the path a graceful pause takes — so this
 // condition would have been overwritten on the same reconcile and the field would have lied.
-func SyncedGracefullyPaused() metav1.Condition {
-	return metav1.Condition{
-		Type:               condition.TypeSynced,
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonReconcileGracefullyPaused,
-	}
-}

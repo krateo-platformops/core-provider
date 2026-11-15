@@ -3,7 +3,7 @@ package composition
 import (
 	"context"
 	"fmt"
-	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
@@ -27,7 +27,7 @@ import (
 // WITHOUT the mark: the runtime then records what it can (and a conflict requeues quietly, as
 // before).
 func failObserveWithFinding(ctx context.Context, mg *unstructured.Unstructured, cause error, opts tools.UpdateOptions) error {
-	cond := readyreason.Unavailable.WithMessage(cause.Error())
+	cond := conditionreason.Unavailable.WithMessage(cause.Error())
 	if err := unstructuredtools.SetConditions(mg, cond); err != nil {
 		return fmt.Errorf("recording the failure on Ready: %w (cause: %v)", err, cause)
 	}

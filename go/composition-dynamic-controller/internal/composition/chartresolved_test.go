@@ -51,7 +51,8 @@ func TestChartRenderableFailure(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, message := chartRenderableFailure(tc.err)
+			r, message := chartRenderableFailure(tc.err)
+			reason := r.String()
 			if reason != tc.wantReason {
 				t.Errorf("reason = %q, want %q — %s", reason, tc.wantReason, tc.why)
 			}
@@ -87,7 +88,8 @@ func TestClassificationDoesNotDependOnMessageText(t *testing.T) {
 	// The real 422 body text, as a BARE error with no typed status in the chain. It must NOT
 	// classify as an unserved kind: without the status there is no evidence of one.
 	bare := errors.New(`unexpected status code: 422 - response body: {"message":"no matches for kind \"RemoteMCPServer\"","reason":"UnprocessableEntity","code":422}`)
-	reason, _ := chartRenderableFailure(bare)
+	r, _ := chartRenderableFailure(bare)
+	reason := r.String()
 	if reason == reasonUnservedKind {
 		t.Error("classified from message text alone. The typed status is the evidence; matching " +
 			"strings would make this break the next time helm or plumbing rewords a body")
@@ -96,7 +98,7 @@ func TestClassificationDoesNotDependOnMessageText(t *testing.T) {
 	// CONTROL: the same information carried as a typed status DOES classify, so the test above is
 	// about the mechanism rather than about the classifier being inert.
 	typed := fmt.Errorf("x: %w", &chartinspector.StatusError{Code: http.StatusUnprocessableEntity})
-	if r, _ := chartRenderableFailure(typed); r != reasonUnservedKind {
+	if r, _ := chartRenderableFailure(typed); r.String() != reasonUnservedKind {
 		t.Errorf("control: a typed 422 must classify as UnservedKind, got %q", r)
 	}
 }
