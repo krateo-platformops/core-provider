@@ -527,6 +527,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
+		priorRecord := priorHelmOperationRecord(mg)
 		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
 			return controller.ExternalObservation{}, err
 		}
@@ -536,7 +537,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			return releaseOf(op), err
 		})
 		markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
-		clearHelmOperationRecord(mg)
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
 		}
@@ -638,8 +639,10 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	}
 
 	// #461: record the starter pod just before a revision is written (never on a steady reconcile).
+	var priorRecord map[string]interface{}
 	recordRevision := func(ctx context.Context) {
 		var rerr error
+		priorRecord = priorHelmOperationRecord(mg)
 		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
 			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
 		}
@@ -663,7 +666,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			Timeout: helmOperationTimeout,
 		}, recordRevision))
 	})
-	clearHelmOperationRecord(mg) // #461: the operation returned; the next status write drops the record
+	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
 	}
@@ -1002,6 +1005,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 
 	// #410: say what is about to run before it runs, so an install held by a slow or hung hook is
 	// visible on the composition. Bounded by helmOperationTimeout.
+	priorRecord := priorHelmOperationRecord(mg)
 	if mg, err = recordHelmOperation(ctx, mg, "install", time.Now(), updateOpts, log); err != nil {
 		return err
 	}
@@ -1021,7 +1025,8 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
-		markWrote(ctx, writeHelmUpgrade) // the upgrade ran, which writes, whether or not it then failed
+		markWrote(ctx, writeHelmUpgrade)                                           // the upgrade ran, which writes, whether or not it then failed
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
 		// controller panicked mid-reconcile. Reproduced on a fresh vcluster child, where the portal's
 		// first install outlived pendingOperationGrace, was rolled back, and this upgrade then ran
@@ -1040,15 +1045,15 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
-		markWrote(ctx, writeHelmInstall) // the install ran, which writes, whether or not it then failed
+		markWrote(ctx, writeHelmInstall)                                           // the install ran, which writes, whether or not it then failed
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
 		if err != nil {
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
 	}
-	// #461: the install or upgrade returned; the status write below drops the operation record. On the
-	// error returns above it stays, which is harmless: orphanedOperation only acts on a record that
-	// belongs to the pending revision it inspects.
-	clearHelmOperationRecord(mg)
+	// #461, #520: settled right after each call above, on the error returns too. A false record left
+	// there was NOT harmless: a refused upgrade's record named this live pod over the record of the
+	// process actually holding the lock, so orphanedOperation could not clear it.
 
 	log.Debug("Installing composition package", "package", pkg.URL)
 
@@ -1239,8 +1244,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	var reconcileRes *helmconfig.ReconcileResult
 	// #461: record the starter pod just before a revision is written, as Observe does.
+	var priorRecord map[string]interface{}
 	recordRevision := func(ctx context.Context) {
 		var rerr error
+		priorRecord = priorHelmOperationRecord(mg)
 		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
 			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
 		}
@@ -1267,7 +1274,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 			return res.Release, nil
 		})
 	})
-	clearHelmOperationRecord(mg) // #461
+	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // what this Update wrote; the runtime marks the pass acted itself
 	}
@@ -1516,6 +1523,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		log.Debug("Release stuck in uninstalling past the grace period; rolling back to clear the lock before re-driving the uninstall.",
 			"stuckFor", stuckFor.String(), "grace", pendingOperationGrace.String())
+		priorRecord := priorHelmOperationRecord(mg)
 		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
 			return err
 		}
@@ -1524,7 +1532,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		})
-		clearHelmOperationRecord(mg)
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, rerr, updateOpts, log) // #461, #520
 		if rerr != nil {
 			return fmt.Errorf("clearing stuck uninstall of release %s before delete: %w", releaseName, rerr)
 		}
