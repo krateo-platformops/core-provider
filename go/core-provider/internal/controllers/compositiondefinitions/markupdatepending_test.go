@@ -92,8 +92,10 @@ func TestEveryDriftReturnInObserveMarksUpdatePending(t *testing.T) {
 		})
 		return false
 	})
-	if len(drift) != 7 {
-		t.Errorf("found %d drift returns in Observe (lines %v), want 7; update this count deliberately", len(drift), drift)
+	// 8 since core-provider#534: the served version's spec schema is looser in today's render, so
+	// Observe routes to Update, whose ProjectWrite writes it.
+	if len(drift) != 8 {
+		t.Errorf("found %d drift returns in Observe (lines %v), want 8; update this count deliberately", len(drift), drift)
 	}
 	if len(unmarked) > 0 {
 		t.Errorf("drift returns without markUpdatePending in their block: lines %v", unmarked)
