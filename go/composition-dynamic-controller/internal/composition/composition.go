@@ -144,6 +144,10 @@ type HandlerOptions struct {
 	// Audit writes one controller audit record per child each helm operation writes
 	// (core-provider#423). nil records nothing.
 	Audit *auditrec.Recorder
+	// Metrics is this controller's view of the cdc's own metrics (helm, RBAC, chart-inspector
+	// timings), carrying krateo.composition.gvr (docs/design/cdc-pooling.md step 3). Nil uses the
+	// process instance, as before.
+	Metrics *metrics.Metrics
 }
 
 // APIResolver resolves the apiRef's RESTAction (via snowplow, under the CDC's authn identity)
@@ -166,6 +170,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		statusDataTemplate: opts.StatusDataTemplate,
 		apiResolver:        opts.APIResolver,
 		audit:              opts.Audit,
+		metrics:            opts.Metrics,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
 	}
 }
@@ -198,6 +203,8 @@ type handler struct {
 	saNamespace       string
 	// audit records every helm child write (core-provider#423); nil records nothing.
 	audit *auditrec.Recorder
+	// metrics is HandlerOptions.Metrics; withMetrics puts it in each entry point's ctx.
+	metrics *metrics.Metrics
 	// Feature flag to disable random suffix in Helm release names. This is highly discouraged as it can lead to release name collisions, but it can be useful for certain complex charts that have issues with long release names.
 	safeReleaseName bool
 	// statusDataTemplate are the declarative ${ jq } status projections from the
@@ -262,6 +269,7 @@ func logMappingRetry(ctx context.Context, r helm.MappingRetry) {
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (observation controller.ExternalObservation, rerr error) {
+	ctx = h.withMetrics(ctx)
 	// #381: on every return, say so when a graceful pause is requested but not yet in effect. Deferred,
 	// so the body (and every guard test that reads it) stays where it was.
 	defer func() { observation, rerr = withGracefulPausePending(mg, observation, rerr) }()
@@ -860,6 +868,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 }
 
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
+	ctx = h.withMetrics(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationCreate)
 
@@ -1086,6 +1095,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 }
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {
+	ctx = h.withMetrics(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationUpdate)
 
@@ -1358,6 +1368,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 }
 
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
+	ctx = h.withMetrics(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationDelete)
 
@@ -1901,4 +1912,11 @@ func (h *handler) uninstallRegeneratedRBAC(ctx context.Context, mg *unstructured
 		return fmt.Errorf("uninstalling rbac: %w", err)
 	}
 	return nil
+}
+
+// withMetrics carries this controller's metrics view in ctx, so every timer below it (helm, RBAC,
+// chart-inspector) records with krateo.composition.gvr rather than as the process. Called first in
+// each entry point the runtime dispatches to.
+func (h *handler) withMetrics(ctx context.Context) context.Context {
+	return metrics.NewContext(ctx, h.metrics)
 }

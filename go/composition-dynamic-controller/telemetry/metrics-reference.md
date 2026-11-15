@@ -112,6 +112,14 @@ These boundaries provide millisecond-level precision for sub-second operations a
   - `service.name`: Application identifier
   - `k8s.deployment.name`: Kubernetes deployment name (for multi-instance identification)
   - `service.instance.id`: Stable instance identifier (set to deployment name)
+- **Per-signal attribute** (on every metric point, reconcile root span and log record; core-provider
+  pool step 3):
+  - `krateo.composition.gvr`: the controller's `<group>/<version>/<plural>`, the same value as the
+    resource attribute `krateo.io/composition-gvr`. The resource attributes describe the PROCESS;
+    this one describes the CONTROLLER, so it stays correct when one process hosts several
+    controllers (a pool). Every cdc sets it, dedicated ones included, so a query keyed on it works
+    the same before and after pooling. Prefer it over the resource attribute, `service.instance.id`
+    or `k8s.deployment.name` for anything per Kind.
 - All metrics are low-cardinality
 - Metrics are exported via OTLP HTTP to the OpenTelemetry Collector
 - Prometheus scrapes the Collector's Prometheus exporter endpoint

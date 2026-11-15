@@ -27,7 +27,7 @@ func (m *metricChartInspector) Resources(ctx context.Context, params chartinspec
 
 	resources, err := m.wrapped.Resources(ctx, params)
 
-	metrics := GetInstance()
+	metrics := FromContext(ctx)
 	if metrics != nil {
 		metrics.RecordChartInspectorDuration(ctx, timer.Elapsed())
 		metrics.IncChartInspectorTotal(ctx)
@@ -58,7 +58,7 @@ func (m *metricRBACGen) Generate(ctx context.Context, params rbacgen.Parameters)
 
 	result, err := m.wrapped.Generate(ctx, params)
 
-	metrics := GetInstance()
+	metrics := FromContext(ctx)
 	if metrics != nil {
 		metrics.RecordRBACGenerationDuration(ctx, timer.Elapsed())
 		metrics.IncRBACGenerationTotal(ctx)
