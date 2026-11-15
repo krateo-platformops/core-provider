@@ -1121,6 +1121,13 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// Falsifier (oasgen-provider): a child leaving this reason without either means it is not
 			// permanent and this mapping must be revisited.
 			return childFailed
+		case stringField(cm, "reason") == condition.ReasonCreateOutcomeUnknown:
+			// unstructured-runtime#93 (v1.21.0): a create the runtime refuses to repeat because its
+			// outcome cannot be determined. It stays until an existence check succeeds or a human,
+			// having verified the external state, clears krateo.io/external-create-pending: a parent
+			// counting it converging would wait forever on a child that needs a human (Diego,
+			// 2026-11-15: failed). Before v1.21.0 the same state was a bare Creating, read as converging.
+			return childFailed
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved",
 			stringField(cm, "reason") == "ObserveFailed":
