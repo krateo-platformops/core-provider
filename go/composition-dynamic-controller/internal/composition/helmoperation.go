@@ -3,6 +3,7 @@ package composition
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	"strings"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
-	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -25,10 +25,8 @@ import (
 // hours with no condition at all, and its deletion waited behind it just as silently. The message
 // says what is running, since when, and the bound that applies to each of its hooks and waits.
 func helmOperationInProgress(phase string, started time.Time, bound time.Duration) metav1.Condition {
-	c := condition.FailWithReason(reasonHelmOperationInProgress)
-	c.Message = fmt.Sprintf("helm %s in progress since %s; each hook and each wait must finish within %s, or the operation fails",
-		phase, started.UTC().Format(time.RFC3339), bound)
-	return c
+	return readyreason.HelmOperationInProgress.WithMessage(fmt.Sprintf("helm %s in progress since %s; each hook and each wait must finish within %s, or the operation fails",
+		phase, started.UTC().Format(time.RFC3339), bound))
 }
 
 // recordHelmOperation writes helmOperationInProgress to mg's status and returns the updated object,
