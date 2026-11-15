@@ -59,3 +59,16 @@ func TestReconcileDiffFields(t *testing.T) {
 		t.Errorf("nil result: %v, want no fields", got)
 	}
 }
+
+// A revision written because the request changed says why, and a held change says it was held
+// (plumbing #182, core-provider #519).
+func TestReconcileDiffFieldsNameTheDesiredStateChange(t *testing.T) {
+	kv := reconcileDiffFields(&helmconfig.ReconcileResult{DesiredStateChange: "chart version 0.3.62 -> 0.3.64", DesiredStateHeld: true})
+	m := map[string]any{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		m[kv[i].(string)] = kv[i+1]
+	}
+	if m["desiredStateChange"] != "chart version 0.3.62 -> 0.3.64" || m["desiredStateHeld"] != true {
+		t.Fatalf("desiredStateChange %v, desiredStateHeld %v; want the change and held=true", m["desiredStateChange"], m["desiredStateHeld"])
+	}
+}
