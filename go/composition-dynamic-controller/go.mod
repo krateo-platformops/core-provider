@@ -10,7 +10,7 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/krateo-platformops/audit v0.15.0
 	github.com/krateo-platformops/plumbing v1.80.0
-	github.com/krateo-platformops/unstructured-runtime v1.21.0
+	github.com/krateo-platformops/unstructured-runtime v1.21.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
