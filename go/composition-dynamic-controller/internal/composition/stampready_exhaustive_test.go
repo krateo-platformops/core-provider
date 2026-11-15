@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -31,6 +32,12 @@ import (
 // rather than an entry silently vanishing from the map and the reason going unresolved.
 var importedStringConsts = map[string]string{
 	"condition.ReasonZeroEvidence": condition.ReasonZeroEvidence,
+	// #515: this package's own Ready reasons are aliases of readyreason's literals.
+	"readyreason.ReasonAvailablePartialCoverage": readyreason.ReasonAvailablePartialCoverage,
+	"readyreason.ReasonChildrenForbidden":        readyreason.ReasonChildrenForbidden,
+	"readyreason.ReasonInventoryNotRecorded":     readyreason.ReasonInventoryNotRecorded,
+	"readyreason.ReasonHelmOperationInProgress":  readyreason.ReasonHelmOperationInProgress,
+	"readyreason.ReasonPendingHelmOperation":     readyreason.ReasonPendingHelmOperation,
 }
 
 // resolveSelector reads a qualified identifier (pkg.CONST) into its string value.
@@ -292,6 +299,14 @@ func packageStringConsts(fset *token.FileSet, files ...string) (map[string]strin
 				}
 				for i, name := range vs.Names {
 					if i >= len(vs.Values) {
+						continue
+					}
+					// A constant aliasing an imported one (`const X = pkg.Y`, #515) resolves through
+					// importedStringConsts, the compiled value, like any other qualified reason.
+					if se, ok := vs.Values[i].(*ast.SelectorExpr); ok {
+						if v, _, ok := resolveSelector(se); ok {
+							out[name.Name] = v
+						}
 						continue
 					}
 					bl, ok := vs.Values[i].(*ast.BasicLit)
