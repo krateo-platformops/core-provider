@@ -970,6 +970,18 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			continue
 		}
 		switch {
+		case stringField(cm, "status") == "True" && stringField(cm, "reason") == "AssumedUpToDate":
+			// oasgen-provider#709 (literal decided by Diego, 2026-11-15). rest-dynamic-controller
+			// writes Ready=True/AssumedUpToDate on its assume-up-to-date path, a kind declaring
+			// neither a get nor a findby, so nothing was observed: the True is ASSERTED. Before the
+			// distinct reason it was Ready=True/Available, and this rollup counted a child healthy on
+			// an assertion, even one whose create never landed. Unevaluated is the honest answer,
+			// the one ZeroEvidence gives: not healthy (nothing says so) and not converging (nothing
+			// is progressing, and converging would hold the parent Creating forever).
+			//
+			// MAPPED AHEAD OF ARRIVAL, as TerminalByDesign was: until an oasgen release writes the
+			// reason, this arm is unreachable and those children still read healthy.
+			return childUnevaluated
 		case stringField(cm, "status") == "True":
 			return childHealthy
 		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "TerminalByDesign":
