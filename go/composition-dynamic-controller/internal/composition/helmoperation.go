@@ -2,6 +2,7 @@ package composition
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	"strings"
@@ -154,10 +155,65 @@ func returnedOperation(mg *unstructured.Unstructured, rel *helmconfig.Release, p
 	return true, "this operation's call returned at " + rec["returnedAt"]
 }
 
-// clearHelmOperationRecord removes status.helmOperation in memory once the operation has returned;
-// the next status write persists the removal. A record that stays (no further write) is harmless:
-// orphanedOperation only acts on a record that belongs to the pending revision it is looking at.
-func clearHelmOperationRecord(mg *unstructured.Unstructured) {
+// priorHelmOperationRecord is a copy of status.helmOperation as it is now (nil when absent): what a
+// recordHelmOperation about to run would replace, kept so a refused call can put it back.
+func priorHelmOperationRecord(mg *unstructured.Unstructured) map[string]interface{} {
+	rec, found, err := unstructured.NestedMap(mg.Object, "status", "helmOperation")
+	if err != nil || !found {
+		return nil
+	}
+	return rec
+}
+
+// settleHelmOperationRecord decides what status.helmOperation says once a helm call has returned
+// (core-provider#520), in memory; the next status write persists it.
+//
+// A call helm REFUSED because another operation holds the release (ErrOperationInProgress) never
+// started, so the record it wrote is false: the one it replaced, prior, is put back. That record
+// names the process whose operation actually holds the lock, which is the evidence
+// orphanedOperation needs to clear it at once when that process is gone. Clearing it instead is
+// what made installer-platform on krateo-057 wait out the full 16m grace: the draining old
+// controller's upgrade held the release, the new pod's refused upgrade erased its record, and
+// orphanedOperation then found "no operation recorded" (2026-11-15).
+//
+// Any other outcome means this pod's operation ran and returned, and only this pod's record is
+// cleared. A record naming another pod is left: whatever it describes is not this pod's to forget.
+//
+// The restore is WRITTEN at once, not left for a later status write: a refused call returns an error,
+// and on Create and Update the runtime then records its conditions on an object it fetches afresh,
+// which still carries this pod's false record. The clear is in memory, as before.
+func settleHelmOperationRecord(ctx context.Context, mg *unstructured.Unstructured, prior map[string]interface{}, callErr error,
+	opts tools.UpdateOptions, log logging.Logger) *unstructured.Unstructured {
+	if !errors.Is(callErr, helmconfig.ErrOperationInProgress) {
+		clearOwnHelmOperationRecord(mg)
+		return mg
+	}
+	if prior == nil {
+		unstructured.RemoveNestedField(mg.Object, "status", "helmOperation")
+	} else {
+		_ = unstructured.SetNestedMap(mg.Object, prior, "status", "helmOperation")
+	}
+	updated, err := updateStatus(ctx, mg, opts)
+	if err != nil {
+		log.Debug("Could not restore the helm operation record a refused call replaced", "error", err.Error())
+		return mg
+	}
+	if updated == nil {
+		return mg
+	}
+	return updated
+}
+
+// clearOwnHelmOperationRecord removes status.helmOperation when this pod wrote it, or when it names
+// no starter (written by a pod that did not know its own identity).
+func clearOwnHelmOperationRecord(mg *unstructured.Unstructured) {
+	rec, found, err := unstructured.NestedStringMap(mg.Object, "status", "helmOperation")
+	if err != nil || !found {
+		return
+	}
+	if by := rec["startedBy"]; by != "" && by != podNamespace+"/"+podName {
+		return
+	}
 	unstructured.RemoveNestedField(mg.Object, "status", "helmOperation")
 }
 
