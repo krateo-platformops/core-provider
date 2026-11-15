@@ -3,8 +3,7 @@ package composition
 import (
 	"context"
 	"fmt"
-	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
-	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
 	"net/http"
@@ -94,11 +93,11 @@ const (
 
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
-	reasonPendingHelmOperation = readyreason.ReasonPendingHelmOperation
+	reasonPendingHelmOperation = conditionreason.ReasonPendingHelmOperation
 
 	// Ready-condition reason written BEFORE an install or uninstall starts (#410), so an operation
 	// that runs long (a slow hook) is visible on the composition instead of leaving it without status.
-	reasonHelmOperationInProgress = readyreason.ReasonHelmOperationInProgress
+	reasonHelmOperationInProgress = conditionreason.ReasonHelmOperationInProgress
 
 	// Event reasons
 	reasonCreated = "CompositionCreated"
@@ -365,8 +364,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			ResourceExists:   true,
 			ResourceUpToDate: true,
 			Conditions: []metav1.Condition{
-				readyreason.ReconcileGracefullyPaused.Condition(),
-				compositionCondition.SyncedGracefullyPaused(),
+				conditionreason.ReconcileGracefullyPaused.Condition(),
+				conditionreason.SyncedGracefullyPaused.Condition(),
 			},
 		}, nil
 	}
@@ -530,7 +529,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			// inverse is just as wrong: a stale ReconcileError from an earlier attempt would persist
 			// here unchanged. Report the wait explicitly instead; the next reconcile past the grace
 			// period rolls the lock back and the normal conditions take over.
-			pendingCond := readyreason.PendingHelmOperation.WithMessage(fmt.Sprintf(
+			pendingCond := conditionreason.PendingHelmOperation.WithMessage(fmt.Sprintf(
 				"waiting for an in-flight helm operation to settle (status %s, pending for %s)",
 				string(rel.Status), pendingFor.Truncate(time.Second)))
 			unstructuredtools.SetConditions(mg, pendingCond)
@@ -1699,7 +1698,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		// indistinguishable 500. Best-effort: the condition is a report, so failing to write it
 		// must not replace the real error with a reporting error.
 		reason, message := chartRenderableFailure(err)
-		if cerr := setChartRenderableCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
+		if cerr := setChartRenderableCondition(mg, reason, message); cerr != nil {
 			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
 		}
 		setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
@@ -1895,7 +1894,7 @@ func withGracefulPausePending(mg *unstructured.Unstructured, obs controller.Exte
 	if _, engaged := compositionMeta.GetGracefullyPausedTime(mg); engaged {
 		return obs, err
 	}
-	obs.Conditions = append(obs.Conditions, compositionCondition.SyncedGracefulPausePending())
+	obs.Conditions = append(obs.Conditions, conditionreason.SyncedGracefulPausePending.WithMessage(syncedGracefulPausePendingMessage))
 	return obs, err
 }
 
@@ -1955,3 +1954,8 @@ func (h *handler) uninstallRegeneratedRBAC(ctx context.Context, mg *unstructured
 func (h *handler) withMetrics(ctx context.Context) context.Context {
 	return metrics.NewContext(ctx, h.metrics)
 }
+
+// syncedGracefulPausePendingMessage is Synced=False/GracefulPausePending's message (#381).
+const syncedGracefulPausePendingMessage = "krateo.io/gracefully-paused is set but not yet in effect: it takes effect after the next " +
+	"change to this composition is applied, and that change IS applied. Use krateo.io/paused to " +
+	"stop reconciliation now."

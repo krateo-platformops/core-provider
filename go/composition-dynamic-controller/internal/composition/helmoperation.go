@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"strings"
 	"time"
 
@@ -26,7 +26,7 @@ import (
 // hours with no condition at all, and its deletion waited behind it just as silently. The message
 // says what is running, since when, and the bound that applies to each of its hooks and waits.
 func helmOperationInProgress(phase string, started time.Time, bound time.Duration) metav1.Condition {
-	return readyreason.HelmOperationInProgress.WithMessage(fmt.Sprintf("helm %s in progress since %s; each hook and each wait must finish within %s, or the operation fails",
+	return conditionreason.HelmOperationInProgress.WithMessage(fmt.Sprintf("helm %s in progress since %s; each hook and each wait must finish within %s, or the operation fails",
 		phase, started.UTC().Format(time.RFC3339), bound))
 }
 

@@ -3,9 +3,9 @@ package composition
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"sort"
 	"strings"
-	"time"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
@@ -25,13 +25,13 @@ import (
 //
 // It is informational and deliberately not Ready. The health rollup reads only a child's Ready
 // condition (childhealth.go), so a False here cannot cascade to parents, which was the defect.
-const ConditionTypeRBACComplete = "RBACComplete"
+const ConditionTypeRBACComplete = conditionreason.TypeRBACComplete
 
 const (
-	reasonRBACApplied              = "Applied"
-	reasonRBACNamespaceTerminating = "NamespaceTerminating"
-	reasonRBACApplyFailed          = "ApplyFailed"
-	reasonRBACNotEvaluated         = "NotEvaluated"
+	reasonRBACApplied              = conditionreason.ReasonRBACApplied
+	reasonRBACNamespaceTerminating = conditionreason.ReasonRBACNamespaceTerminating
+	reasonRBACApplyFailed          = conditionreason.ReasonRBACApplyFailed
+	reasonRBACNotEvaluated         = conditionreason.ReasonRBACNotEvaluated
 )
 
 // rbacCompleteCondition computes the condition from what this pass did. It is the ONLY place the
@@ -45,22 +45,16 @@ const (
 //	skipped terminating objects     False/NamespaceTerminating, naming them
 //	otherwise                       True/Applied
 func rbacCompleteCondition(attempted bool, report rbac.ApplyReport, applyErr error) metav1.Condition {
-	c := metav1.Condition{Type: ConditionTypeRBACComplete, LastTransitionTime: metav1.NewTime(time.Now())}
 	switch {
 	case !attempted:
-		c.Status, c.Reason = metav1.ConditionUnknown, reasonRBACNotEvaluated
-		c.Message = "RBAC was not applied this reconcile: the chart could not be rendered (see ChartRenderable)"
+		return conditionreason.RBACNotEvaluated.WithMessage("RBAC was not applied this reconcile: the chart could not be rendered (see ChartRenderable)")
 	case applyErr != nil:
-		c.Status, c.Reason = metav1.ConditionFalse, reasonRBACApplyFailed
-		c.Message = applyErr.Error()
+		return conditionreason.RBACApplyFailed.WithMessage(applyErr.Error())
 	case len(report.SkippedTerminating) > 0:
-		c.Status, c.Reason = metav1.ConditionFalse, reasonRBACNamespaceTerminating
-		c.Message = describeSkipped(report.SkippedTerminating)
+		return conditionreason.RBACNamespaceTerminating.WithMessage(describeSkipped(report.SkippedTerminating))
 	default:
-		c.Status, c.Reason = metav1.ConditionTrue, reasonRBACApplied
-		c.Message = "every RBAC object derived from the chart was applied"
+		return conditionreason.RBACApplied.WithMessage("every RBAC object derived from the chart was applied")
 	}
-	return c
 }
 
 // describeSkipped names the namespaces first, because that is what an operator acts on, then the

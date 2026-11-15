@@ -2,6 +2,7 @@ package composition
 
 import (
 	"context"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestChartRenderable_RecoversFromFalseToTrue(t *testing.T) {
 	}
 
 	// Arm 1: a failure stamps False with a classifying reason.
-	if err := setChartRenderableCondition(mg, metav1.ConditionFalse, reasonInspectorUnavailable,
+	if err := setChartRenderableCondition(mg, conditionreason.ChartInspectorUnavailable,
 		"chart-inspector failed to render the chart (HTTP 500)"); err != nil {
 		t.Fatalf("setChartRenderableCondition: %v", err)
 	}

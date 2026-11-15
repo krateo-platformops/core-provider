@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -16,7 +16,6 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -49,7 +48,7 @@ type ManagedResource struct {
 // Comparing Status closes that: a stored condition that disagrees with the one being written is
 // always repaired. Message is still compared so a genuinely unchanged condition is not rewritten
 // every reconcile (which would churn lastTransitionTime and the resourceVersion).
-func setReadyCondition(mg *unstructured.Unstructured, reason readyreason.Reason, message string, force bool) error {
+func setReadyCondition(mg *unstructured.Unstructured, reason conditionreason.Reason, message string, force bool) error {
 	cond := reason.WithMessage(message)
 	if !force {
 		if cur := unstructuredtools.GetCondition(mg, cond.Type, cond.Reason); cur != nil &&
@@ -64,7 +63,7 @@ func setReadyCondition(mg *unstructured.Unstructured, reason readyreason.Reason,
 }
 
 func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.Available, message, force)
+	return setReadyCondition(mg, conditionreason.Available, message, force)
 }
 
 // setAvailablePartialCoverageStatus stamps Ready=TRUE with reason AvailablePartialCoverage: the
@@ -75,36 +74,36 @@ func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool)
 // long as its widgets publish no conditions, which is indefinitely (#72). Only the reason moves, so
 // a gate or dashboard can distinguish the two without parsing the message's prose.
 func setAvailablePartialCoverageStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.AvailablePartialCoverage, message, force)
+	return setReadyCondition(mg, conditionreason.AvailablePartialCoverage, message, force)
 }
 
 // Also Type=Ready (reason ReconcileGracefullyPaused), so it could hold the same contradiction.
 func setGracefullyPausedCondition(mg *unstructured.Unstructured, force bool) error {
-	return setReadyCondition(mg, readyreason.ReconcileGracefullyPaused, "Composition is gracefully paused.", force)
+	return setReadyCondition(mg, conditionreason.ReconcileGracefullyPaused, "Composition is gracefully paused.", force)
 }
 
 // Creating and Unavailable carried the identical defect — #119 names only setAvaibleStatus, but all
 // three shared the same Type+Reason+Message comparison, so any of them could leave a contradictory
 // status in place. Routed through the same helper rather than fixing one and leaving two.
 func setCreatingStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.Creating, message, force)
+	return setReadyCondition(mg, conditionreason.Creating, message, force)
 }
 
 func setUnavailableStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.Unavailable, message, force)
+	return setReadyCondition(mg, conditionreason.Unavailable, message, force)
 }
 
 // setZeroEvidenceStatus stamps Ready=Unknown/ZeroEvidence: the composition's health could not be
 // assessed at all (#165). Routed through the same helper as the other three so it cannot reintroduce
 // #119's contradictory-status comparison.
 func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.ZeroEvidence, message, force)
+	return setReadyCondition(mg, conditionreason.ZeroEvidence, message, force)
 }
 
 // setChildrenForbiddenStatus stamps Ready=Unknown/ChildrenForbidden (#318, #430). Built here for the
 // same reason as setInventoryNotRecordedStatus: only this rollup can produce it.
 func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.ChildrenForbidden, message, force)
+	return setReadyCondition(mg, conditionreason.ChildrenForbidden, message, force)
 }
 
 // setInventoryNotRecordedStatus stamps Ready=Unknown/InventoryNotRecorded.
@@ -114,7 +113,7 @@ func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, f
 // reason ReasonAvailablePartialCoverage lives in this repo. A constant in the runtime would invite
 // another component to report a missing composition inventory, which only this code can know about.
 func setInventoryNotRecordedStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, readyreason.InventoryNotRecorded, message, force)
+	return setReadyCondition(mg, conditionreason.InventoryNotRecorded, message, force)
 }
 
 type ConditionType string
@@ -320,8 +319,9 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 			api, aerr := h.apiResolver.Resolve(ctx, mg)
 			switch {
 			case aerr != nil:
-				reason, message := apiResolvedFailure(aerr)
-				if cerr := setApiResolvedCondition(mg, metav1.ConditionFalse, reason, message); cerr != nil {
+				failed := apiResolvedFailure(aerr)
+				reason := failed.Reason
+				if cerr := setApiResolvedCondition(mg, failed); cerr != nil {
 					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
 				}
 				h.eventRecorder.Event(mg, event.Warning(reasonApiRefUnresolved, "Observe", aerr))
@@ -332,14 +332,14 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 				// treated as success, because an empty .api and a resolved .api project
 				// identically — the projection just skips — and that is the ambiguity #251 exists
 				// to remove.
-				if cerr := setApiResolvedCondition(mg, metav1.ConditionFalse, reasonApiEmpty,
-					"apiRef resolved without error but returned no data; .api source is unavailable"); cerr != nil {
+				if cerr := setApiResolvedCondition(mg, conditionreason.ApiEmpty.WithMessage(
+					"apiRef resolved without error but returned no data; .api source is unavailable")); cerr != nil {
 					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
 				}
 			default:
 				resolved["api"] = api
-				if cerr := setApiResolvedCondition(mg, metav1.ConditionTrue, reasonApiResolved,
-					"apiRef resolved; .api projection source is available"); cerr != nil {
+				if cerr := setApiResolvedCondition(mg, conditionreason.ApiResolved.WithMessage(
+					"apiRef resolved; .api projection source is available")); cerr != nil {
 					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
 				}
 			}
