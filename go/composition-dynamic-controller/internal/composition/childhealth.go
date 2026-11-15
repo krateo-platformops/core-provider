@@ -3,6 +3,7 @@ package composition
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	"strings"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
@@ -615,12 +616,12 @@ const readyMessageAvailable = "Composition is up-to-date"
 // `managed: []`, present and empty, and it reports Ready=TRUE/Available (see the first branch of
 // rollupManagedChildren). It has never reported ZeroEvidence, which is the part of installer's
 // justification that was wrong about this code rather than merely out of date.
-const ReasonInventoryNotRecorded = "InventoryNotRecorded"
+const ReasonInventoryNotRecorded = readyreason.ReasonInventoryNotRecorded
 
 // ReasonAvailablePartialCoverage is Available where the rollup assessed a MINORITY of the children
 // it names. Still Ready=True — those children are unevaluated, not unhealthy — but the claim covers
 // less than half of what it is about, which is a different statement from Available.
-const ReasonAvailablePartialCoverage = "AvailablePartialCoverage"
+const ReasonAvailablePartialCoverage = readyreason.ReasonAvailablePartialCoverage
 
 // ReasonChildrenForbidden is Ready=Unknown where NOT ONE child could be assessed and at least one
 // of them was REFUSED a read by RBAC (#318).
@@ -635,7 +636,7 @@ const ReasonAvailablePartialCoverage = "AvailablePartialCoverage"
 //
 // Do not rename it here alone, and do not "normalise" it to Forbidden. See
 // reasoncontract_test.go, which pins the value for exactly this reason.
-const ReasonChildrenForbidden = "ChildrenForbidden"
+const ReasonChildrenForbidden = readyreason.ReasonChildrenForbidden
 
 // availableReason distinguishes "I assessed most of this composition" from "I assessed a minority of
 // it", because Ready=True means materially different things in the two cases and nothing a machine

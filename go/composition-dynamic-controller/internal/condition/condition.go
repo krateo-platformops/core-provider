@@ -32,21 +32,11 @@ func SyncedGracefulPausePending() metav1.Condition {
 	}
 }
 
-// ReconcileGracefullyPaused is the READINESS half of a graceful pause: Ready stays TRUE.
-//
-// A pause is a deliberate operator action, not a failure. Its children are still running and
-// nothing has regressed, so every readiness-gating consumer — the installer's chart gate and
-// operator gate, the cdc's own parent rollup, the portal's bucketing — is unaffected by someone
-// pausing a composition. #241 considered flipping this to False and chose not to: readiness and
-// liveness are different axes, and flipping Ready moves all four consumers at once.
-func ReconcileGracefullyPaused() metav1.Condition {
-	return metav1.Condition{
-		Type:               condition.TypeReady,
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonReconcileGracefullyPaused,
-	}
-}
+// The READINESS half of a graceful pause (Ready=True/ReconcileGracefullyPaused) is
+// readyreason.ReconcileGracefullyPaused (core-provider#515: every Ready condition is built there).
+// Ready stays TRUE: a pause is a deliberate operator action, not a failure, and #241 chose not to
+// flip it, because readiness and liveness are different axes and flipping Ready moves every
+// readiness-gating consumer at once.
 
 // SyncedGracefullyPaused is the LIVENESS half: Synced=False, because nothing is converging this.
 //

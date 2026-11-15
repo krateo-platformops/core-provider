@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
 
@@ -89,11 +88,11 @@ const (
 
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
-	reasonPendingHelmOperation = "PendingHelmOperation"
+	reasonPendingHelmOperation = readyreason.ReasonPendingHelmOperation
 
 	// Ready-condition reason written BEFORE an install or uninstall starts (#410), so an operation
 	// that runs long (a slow hook) is visible on the composition instead of leaving it without status.
-	reasonHelmOperationInProgress = "HelmOperationInProgress"
+	reasonHelmOperationInProgress = readyreason.ReasonHelmOperationInProgress
 
 	// Event reasons
 	reasonCreated = "CompositionCreated"
@@ -360,7 +359,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			ResourceExists:   true,
 			ResourceUpToDate: true,
 			Conditions: []metav1.Condition{
-				compositionCondition.ReconcileGracefullyPaused(),
+				readyreason.ReconcileGracefullyPaused.Condition(),
 				compositionCondition.SyncedGracefullyPaused(),
 			},
 		}, nil
@@ -508,10 +507,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			// inverse is just as wrong: a stale ReconcileError from an earlier attempt would persist
 			// here unchanged. Report the wait explicitly instead; the next reconcile past the grace
 			// period rolls the lock back and the normal conditions take over.
-			pendingCond := condition.FailWithReason(reasonPendingHelmOperation)
-			pendingCond.Message = fmt.Sprintf(
+			pendingCond := readyreason.PendingHelmOperation.WithMessage(fmt.Sprintf(
 				"waiting for an in-flight helm operation to settle (status %s, pending for %s)",
-				string(rel.Status), pendingFor.Truncate(time.Second))
+				string(rel.Status), pendingFor.Truncate(time.Second)))
 			unstructuredtools.SetConditions(mg, pendingCond)
 			_, uerr := updateStatus(ctx, mg, updateOpts)
 			if err := pendingConditionWriteOutcome(uerr); err != nil {

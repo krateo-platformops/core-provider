@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	compositionCondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/readyreason"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/processor"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -49,8 +49,8 @@ type ManagedResource struct {
 // Comparing Status closes that: a stored condition that disagrees with the one being written is
 // always repaired. Message is still compared so a genuinely unchanged condition is not rewritten
 // every reconcile (which would churn lastTransitionTime and the resourceVersion).
-func setReadyCondition(mg *unstructured.Unstructured, cond metav1.Condition, message string, force bool) error {
-	cond.Message = message
+func setReadyCondition(mg *unstructured.Unstructured, reason readyreason.Reason, message string, force bool) error {
+	cond := reason.WithMessage(message)
 	if !force {
 		if cur := unstructuredtools.GetCondition(mg, cond.Type, cond.Reason); cur != nil &&
 			cur.Message == message && cur.Status == cond.Status {
@@ -64,7 +64,7 @@ func setReadyCondition(mg *unstructured.Unstructured, cond metav1.Condition, mes
 }
 
 func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, condition.Available(), message, force)
+	return setReadyCondition(mg, readyreason.Available, message, force)
 }
 
 // setAvailablePartialCoverageStatus stamps Ready=TRUE with reason AvailablePartialCoverage: the
@@ -75,50 +75,36 @@ func setAvaibleStatus(mg *unstructured.Unstructured, message string, force bool)
 // long as its widgets publish no conditions, which is indefinitely (#72). Only the reason moves, so
 // a gate or dashboard can distinguish the two without parsing the message's prose.
 func setAvailablePartialCoverageStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, availablePartialCoverageCondition(), message, force)
-}
-
-// availablePartialCoverageCondition is Available's condition with a different reason. Built here
-// rather than in internal/condition because the distinction is this rollup's, not the shared
-// vocabulary's — nothing outside the child-health rollup can produce it.
-func availablePartialCoverageCondition() metav1.Condition {
-	c := condition.Available()
-	c.Reason = ReasonAvailablePartialCoverage
-	return c
+	return setReadyCondition(mg, readyreason.AvailablePartialCoverage, message, force)
 }
 
 // Also Type=Ready (reason ReconcileGracefullyPaused), so it could hold the same contradiction.
 func setGracefullyPausedCondition(mg *unstructured.Unstructured, force bool) error {
-	return setReadyCondition(mg, compositionCondition.ReconcileGracefullyPaused(), "Composition is gracefully paused.", force)
+	return setReadyCondition(mg, readyreason.ReconcileGracefullyPaused, "Composition is gracefully paused.", force)
 }
 
 // Creating and Unavailable carried the identical defect — #119 names only setAvaibleStatus, but all
 // three shared the same Type+Reason+Message comparison, so any of them could leave a contradictory
 // status in place. Routed through the same helper rather than fixing one and leaving two.
 func setCreatingStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, condition.Creating(), message, force)
+	return setReadyCondition(mg, readyreason.Creating, message, force)
 }
 
 func setUnavailableStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, condition.Unavailable(), message, force)
+	return setReadyCondition(mg, readyreason.Unavailable, message, force)
 }
 
 // setZeroEvidenceStatus stamps Ready=Unknown/ZeroEvidence: the composition's health could not be
 // assessed at all (#165). Routed through the same helper as the other three so it cannot reintroduce
 // #119's contradictory-status comparison.
 func setZeroEvidenceStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, condition.ZeroEvidence(), message, force)
+	return setReadyCondition(mg, readyreason.ZeroEvidence, message, force)
 }
 
 // setChildrenForbiddenStatus stamps Ready=Unknown/ChildrenForbidden (#318, #430). Built here for the
 // same reason as setInventoryNotRecordedStatus: only this rollup can produce it.
 func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, metav1.Condition{
-		Type:               condition.TypeReady,
-		Status:             metav1.ConditionUnknown,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonChildrenForbidden,
-	}, message, force)
+	return setReadyCondition(mg, readyreason.ChildrenForbidden, message, force)
 }
 
 // setInventoryNotRecordedStatus stamps Ready=Unknown/InventoryNotRecorded.
@@ -128,12 +114,7 @@ func setChildrenForbiddenStatus(mg *unstructured.Unstructured, message string, f
 // reason ReasonAvailablePartialCoverage lives in this repo. A constant in the runtime would invite
 // another component to report a missing composition inventory, which only this code can know about.
 func setInventoryNotRecordedStatus(mg *unstructured.Unstructured, message string, force bool) error {
-	return setReadyCondition(mg, metav1.Condition{
-		Type:               condition.TypeReady,
-		Status:             metav1.ConditionUnknown,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonInventoryNotRecorded,
-	}, message, force)
+	return setReadyCondition(mg, readyreason.InventoryNotRecorded, message, force)
 }
 
 type ConditionType string
