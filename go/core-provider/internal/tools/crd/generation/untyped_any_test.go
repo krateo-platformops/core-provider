@@ -55,3 +55,44 @@ func TestGeneratedCRDAdmitsAnyValueAtAnUntypedNode(t *testing.T) {
 		t.Error("an integer was admitted into a string list: the validator is not judging")
 	}
 }
+
+// plumbing v1.82.0 (plumbing#189), the two narrowing arms #186 left: an untyped node whose
+// oneOf/anyOf members diverge, and an allOf with no object member. Both degraded to `type: object`
+// and refused the very values their members accept. Each case names values the source schema
+// accepts and asserts the generated CRD admits them, judged by the apiserver's own validator.
+func TestGeneratedCRDAdmitsWhatAUnionOrAllOfAccepts(t *testing.T) {
+	cases := []struct {
+		name   string
+		node   string
+		admits []any
+	}{
+		{"divergent anyOf (string or list)", `{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]}`,
+			[]any{"one", []any{"a", "b"}}},
+		{"divergent oneOf (integer or object)", `{"oneOf":[{"type":"integer"},{"type":"object","properties":{"k":{"type":"string"}}}]}`,
+			[]any{int64(3), map[string]any{"k": "v"}}},
+		{"allOf with no object member", `{"allOf":[{"type":"string"},{"minLength":1}]}`,
+			[]any{"cert-manager"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g, err := GenerateCRDWithWarnings([]byte(`{"type":"object","properties":{"f":`+c.node+`}}`),
+				schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v0-1-0", Kind: "UnionProbe"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var internal apiext.JSONSchemaProps
+			if err := apiextv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(g.CRD.Spec.Versions[0].Schema.OpenAPIV3Schema, &internal, nil); err != nil {
+				t.Fatal(err)
+			}
+			v, _, err := validation.NewSchemaValidator(&internal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, val := range c.admits {
+				if errs := validation.ValidateCustomResource(field.NewPath(""), map[string]any{"spec": map[string]any{"f": val}}, v); len(errs) != 0 {
+					t.Errorf("%#v, which the source schema accepts, was refused: %v", val, errs)
+				}
+			}
+		})
+	}
+}

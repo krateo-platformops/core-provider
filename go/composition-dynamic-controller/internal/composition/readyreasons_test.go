@@ -46,6 +46,13 @@ func rollupVerdict(t *testing.T, r conditionreason.Reason) string {
 
 func renderReadyReasons(t *testing.T) string {
 	var b strings.Builder
+	// THE TABLE'S COLUMN NAMES ARE A CONTRACT. Two CI gates outside this repo parse the rendered
+	// docs/ready-reasons.md by header NAME: installer's ready-classify (installer#947) and the
+	// portal's scripts/test-ready-reasons.py (portal#444/#445/#448). Keep the names `condition`,
+	// `reason`, `status`, `writer` and `parent verdict` exactly as written below. Reordering the
+	// columns or adding new ones is fine; renaming or removing one breaks both gates. Announce any
+	// new Ready=False reason whose parent verdict is `converging` in its PR: the portal shows the
+	// converging set differently and adds each member by hand.
 	b.WriteString(`---
 type: API
 title: core-provider — condition reasons of a composition
