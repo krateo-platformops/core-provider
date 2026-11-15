@@ -1084,6 +1084,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		if owner != nil {
 			// #362: the owner generates the CRD and reports on it; a follower has no verdict of its own.
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
+			cr.SetConditions(specSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
 		}
 		// #387: the owner now, so a follower's Ready message no longer describes this definition.
@@ -1119,6 +1120,23 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if !statusChanged {
 		log.Debug("CRD status changed", "gvr", gvr.String())
 		markUpdatePending(cr, "the generated CRD differs from the served one")
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
+	// #534: the spec schema of the served version, against today's render. A provably looser render
+	// routes to Update, whose ProjectWrite writes it; anything else keeps the served schema and is
+	// reported on SpecSchemaCurrent.
+	specCond, refresh, drift, err := specDriftDecision(crd, genCRD)
+	if err != nil {
+		return reconciler.ExternalObservation{}, err
+	}
+	cr.SetConditions(specCond)
+	if refresh {
+		log.Info("The generated spec schema is looser than the served one; refreshing it", "gvr", gvr.String(), "version", drift.Version)
+		markUpdatePending(cr, "the generated spec schema is looser than the served one")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,

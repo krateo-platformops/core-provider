@@ -194,6 +194,19 @@ func ProjectWrite(live, newcrd *apiextensionsv1.CustomResourceDefinition, drop m
 		mutated = true
 	}
 
+	// #534: a served version's SPEC schema is refreshed too, but only when the generated one is
+	// provably looser (every difference is a known loosening, generation.CompareSpec). Before this
+	// the spec schema was written only when the version was appended, so a generator fix never
+	// reached a version already served. A difference that is not provably looser keeps the served
+	// schema; the definition's SpecSchemaCurrent condition reports it.
+	drift, err := generation.CompareSpec(crd, nc)
+	if err != nil {
+		return nil, false, fmt.Errorf("error comparing CRD spec schema: %w", err)
+	}
+	if drift.Looser() && generation.ReplaceSpec(crd, nc) {
+		mutated = true
+	}
+
 	if !generation.GVKExists(crd, schema.GroupVersionKind{Group: nc.Spec.Group, Kind: nc.Spec.Names.Kind, Version: version}) {
 		appended, err := generation.AppendVersion(*crd, *nc)
 		if err != nil {
