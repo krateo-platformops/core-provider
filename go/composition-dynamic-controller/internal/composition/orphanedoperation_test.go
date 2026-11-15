@@ -73,7 +73,7 @@ func TestHelmOperationRecord(t *testing.T) {
 	if rec["phase"] != "rollback" || rec["startedBy"] != "ns/p" || rec["startedAt"] != at.Format(time.RFC3339Nano) {
 		t.Errorf("record = %v", rec)
 	}
-	clearHelmOperationRecord(mg)
+	clearOwnHelmOperationRecord(mg)
 	if _, found, _ := unstructured.NestedMap(mg.Object, "status", "helmOperation"); found {
 		t.Error("clear left the record")
 	}
