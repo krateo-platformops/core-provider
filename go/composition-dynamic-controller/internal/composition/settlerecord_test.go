@@ -12,7 +12,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func goneLookup(gone string) podLookup {
@@ -93,4 +95,40 @@ func TestClearOwnHelmOperationRecord(t *testing.T) {
 			t.Errorf("startedBy %q: record found=%v after clearing, want cleared=%v", tc.by, found, tc.wantClear)
 		}
 	}
+}
+
+// #526: the reconcile's record hook returns a record that did not land, so plumbing aborts the
+// revision; a record that landed returns nil and keeps the record it replaced for the settle.
+func TestOperationRecorder(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a lost race is returned, so the operation does not start", func(t *testing.T) {
+		dyn := srFakeDyn(srPortal("2", "newer"))
+		dyn.PrependReactor("update", "portals", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if ua, ok := a.(clienttesting.UpdateAction); ok && ua.GetSubresource() == "status" {
+				return true, nil, apierrors.NewConflict(schema.GroupResource{Group: srGVR.Group, Resource: srGVR.Resource}, "portal", nil)
+			}
+			return false, nil, nil
+		})
+		mg := srPortal("1", "stale")
+		var prior map[string]interface{}
+		if err := operationRecorder(&mg, &prior, srOpts(dyn), logging.NewNopLogger())(ctx); err == nil {
+			t.Fatal("a conflicted record must be returned, so plumbing aborts the revision")
+		}
+	})
+	t.Run("a landed record returns nil and keeps the replaced one", func(t *testing.T) {
+		obj := srPortal("1", "x")
+		_ = unstructured.SetNestedStringMap(obj.Object, map[string]string{"phase": "install", "startedBy": "ns/old"}, "status", "helmOperation")
+		dyn := srFakeDyn(obj.DeepCopy())
+		mg := obj.DeepCopy()
+		var prior map[string]interface{}
+		if err := operationRecorder(&mg, &prior, srOpts(dyn), logging.NewNopLogger())(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if prior["startedBy"] != "ns/old" {
+			t.Fatalf("prior = %v, want the replaced record (startedBy ns/old)", prior)
+		}
+		if rec, _, _ := unstructured.NestedStringMap(mg.Object, "status", "helmOperation"); rec["phase"] != "reconcile" {
+			t.Fatalf("mg record = %v, want this reconcile's", rec)
+		}
+	})
 }

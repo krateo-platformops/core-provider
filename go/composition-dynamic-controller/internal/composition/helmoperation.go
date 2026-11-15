@@ -270,3 +270,26 @@ func orphanedOperation(ctx context.Context, mg *unstructured.Unstructured, rel *
 		return false, "could not look up the starter pod: " + lerr.Error()
 	}
 }
+
+// operationRecorder is the BeforeRevision hook both reconciles pass to plumbing (#461): it records
+// the operation, as this pod's, just before Reconcile writes a revision, keeping the record it
+// replaces in *prior for settleHelmOperationRecord (#520).
+//
+// A record that did not land is returned, and plumbing then aborts the revision (#526): a helm
+// operation must not start unrecorded. recordHelmOperation returns a lost race (a status computed
+// from a stale read); the next pass recomputes from the current object. A draining controller ran an
+// upgrade past exactly that conflict, the drain cancelled it, and the release sat pending with no
+// record for the full grace (krateo-057, installer-platform, 2026-11-15). Other write failures are
+// not returned by recordHelmOperation (a report must not gate the operation), as on Create.
+func operationRecorder(mg **unstructured.Unstructured, prior *map[string]interface{}, opts tools.UpdateOptions, log logging.Logger) func(context.Context) error {
+	return func(ctx context.Context) error {
+		*prior = priorHelmOperationRecord(*mg)
+		updated, err := recordHelmOperation(ctx, *mg, "reconcile", time.Now(), opts, log)
+		*mg = updated
+		if err != nil {
+			log.Info("Could not record the reconcile's helm operation; not starting it", "error", err.Error())
+			return err
+		}
+		return nil
+	}
+}

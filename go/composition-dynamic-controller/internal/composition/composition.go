@@ -661,13 +661,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 
 	// #461: record the starter pod just before a revision is written (never on a steady reconcile).
 	var priorRecord map[string]interface{}
-	recordRevision := func(ctx context.Context) {
-		var rerr error
-		priorRecord = priorHelmOperationRecord(mg)
-		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
-			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
-		}
-	}
+	recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
 	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
 		return hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
 			ChartVersion:          pkg.Version,
@@ -1278,13 +1272,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	var reconcileRes *helmconfig.ReconcileResult
 	// #461: record the starter pod just before a revision is written, as Observe does.
 	var priorRecord map[string]interface{}
-	recordRevision := func(ctx context.Context) {
-		var rerr error
-		priorRecord = priorHelmOperationRecord(mg)
-		if mg, rerr = recordHelmOperation(ctx, mg, "reconcile", time.Now(), updateOpts, log); rerr != nil {
-			log.Debug("Could not record the reconcile's helm operation; continuing (best-effort)", "error", rerr.Error())
-		}
-	}
+	recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
 	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
 			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
