@@ -35,6 +35,9 @@ func reconcileDiffFields(res *helmconfig.ReconcileResult) []any {
 		return nil
 	}
 	return []any{
+		// Why a revision was written when the request changed (plumbing #182): "chart version a -> b"
+		// or "values", and whether a retiring controller held it instead (#519). Empty for drift.
+		"desiredStateChange", res.DesiredStateChange, "desiredStateHeld", res.DesiredStateHeld,
 		"created", res.Created, "deleted", res.Deleted, "patched", res.PatchedUpdated,
 		"intendedDeletions", res.IntendedDeletions,
 		"intendedDeletionsCount", len(res.IntendedDeletions),

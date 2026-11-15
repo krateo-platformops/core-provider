@@ -107,9 +107,13 @@ func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
 // reconcileConfig is upgradeConfig for a Reconcile, plus the #461 hook: before Reconcile writes a
 // revision (and only then; a steady reconcile writes nothing), record which pod started it. The
 // recording is best-effort, as plumbing requires: a lost race is logged, never an abort.
-func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context)) *helmconfig.UpgradeConfig {
+//
+// hold is set for a retiring controller (retiringController, core-provider#519): Reconcile then heals
+// drift but never moves the release to a changed chart or values.
+func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context), hold bool) *helmconfig.UpgradeConfig {
 	cfg := upgradeConfig(ac)
 	cfg.BeforeRevision = record
+	cfg.HoldDesiredStateChange = hold
 	return cfg
 }
 

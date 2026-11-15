@@ -86,6 +86,12 @@ var (
 const (
 	reasonReconciliationGracefullyPaused event.Reason = "ReconciliationGracefullyPaused"
 
+	// #519: a retiring controller's stand-downs, as Events on the composition so they outlive the
+	// retiring pod (its log goes with its Deployment). Events, not conditions: no Ready reason.
+	reasonRetiringHeldChange   event.Reason = "RetiringControllerHeldChange"
+	reasonRetiringLeftInstall  event.Reason = "RetiringControllerLeftInstall"
+	reasonRetiringLeftRecovery event.Reason = "RetiringControllerLeftRecovery"
+
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
 	reasonPendingHelmOperation = readyreason.ReasonPendingHelmOperation
@@ -399,6 +405,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	if err != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("getting package info: %w", err)
 	}
+	retiring, retiringWhy := retiringController(pkg)
 
 	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
@@ -425,6 +432,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		return controller.ExternalObservation{}, fmt.Errorf("finding helm release: %w", err)
 	}
 	if rel == nil {
+		if retiring {
+			// #519: the install is the current version's controller's, not a retiring one's.
+			log.Info("Release not found; this controller is retiring and leaves the install to the current version's controller.",
+				"reason", retiringWhy)
+			h.eventRecorder.Event(mg, event.Normal(reasonRetiringLeftInstall, "Observe",
+				"Release not found; this controller is retiring and leaves the install to the current version's controller: "+retiringWhy))
+			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		}
 		log.Debug("Release not found.")
 		return controller.ExternalObservation{
 			ResourceExists:   false,
@@ -492,7 +507,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			log.Info("Incomplete helm operation was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
 				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", why)
 		}
-		if pendingFor < pendingOperationGrace && !orphan {
+		if retiring {
+			// #519: recovery is the current version's controller's; two controllers rolling back one
+			// release would collide. Reported as waiting, like an operation in flight.
+			log.Info("Release has an incomplete helm operation; this controller is retiring and leaves its recovery to the current version's controller.",
+				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", retiringWhy)
+			h.eventRecorder.Event(mg, event.Normal(reasonRetiringLeftRecovery, "Observe",
+				fmt.Sprintf("Release is %s; this controller is retiring and leaves its recovery to the current version's controller: %s", rel.Status, retiringWhy)))
+		}
+		if (pendingFor < pendingOperationGrace && !orphan) || retiring {
 			// Recent => legitimately in flight. Do NOT roll it back and do NOT start a concurrent
 			// operation; report up-to-date so the in-flight op settles and the next reconcile proceeds.
 			log.Debug("Release operation in progress; waiting for it to settle.",
@@ -662,9 +685,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			TakeOwnership: true,
 			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
 			Timeout: helmOperationTimeout,
-		}, recordRevision))
+		}, recordRevision, retiring))
 	})
 	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
+		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
+			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
+		h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
+			fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
+	}
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
 	}
@@ -925,6 +954,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
 	}
+	if retiring, why := retiringController(pkg); retiring {
+		// #519: the install is the current version's controller's. Reached only if Observe ran
+		// before the definition moved; the error keeps the composition honest (Ready names why).
+		return fmt.Errorf("not installing: this controller is retiring (%s); the current version's controller installs it", why)
+	}
 	// Stamp the owning CompositionDefinition identity (name/namespace/GVR) onto the instance. Observe
 	// used to do this on every reconcile, but Observe is now a pure read; the archive getter reads
 	// these def-ref labels to disambiguate the owning CD across chart-version bumps, so they are
@@ -1162,6 +1196,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		return fmt.Errorf("getting package info: %w", err)
 	}
+	retiring, retiringWhy := retiringController(pkg)
 
 	// Keep the CompositionDefinition def-ref labels current on the instance (mutating phase); Observe
 	// no longer persists them (same rationale as Create).
@@ -1262,7 +1297,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				PostRenderer:          postrenderLabels,
 				TakeOwnership:         true,
 				Timeout:               helmOperationTimeout, // #410
-			}, recordRevision))
+			}, recordRevision, retiring))
 			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {
@@ -1273,6 +1308,12 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		})
 	})
 	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
+		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
+			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
+		h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
+			fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
+	}
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // what this Update wrote; the runtime marks the pass acted itself
 	}
