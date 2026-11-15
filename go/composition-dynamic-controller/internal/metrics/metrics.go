@@ -35,9 +35,16 @@ type Config struct {
 }
 
 // Metrics exposes composition-dynamic-controller metrics.
+//
+// A Metrics is a VIEW: shared instruments plus the attributes it adds to every point. The instance
+// Setup builds adds only the process identity; With adds a controller's (krateo.composition.gvr,
+// docs/design/cdc-pooling.md step 3), so controllers sharing a process stay attributable.
 type Metrics struct {
 	log            logging.Logger
 	deploymentName string
+
+	// extra are this view's attributes, added to every point after the process identity.
+	extra []attribute.KeyValue
 
 	// Chart Inspector metrics
 	chartInspectorDuration metric.Float64Histogram
@@ -314,12 +321,59 @@ func newMetrics(meter metric.Meter, log logging.Logger, deploymentName string) (
 // instanceAttrs returns metric attributes for instance identification.
 // This enables metrics exported to Prometheus to include service.instance.id as exported_instance.
 func (m *Metrics) instanceAttrs() []attribute.KeyValue {
-	if m == nil || m.deploymentName == "" {
+	if m == nil {
 		return nil
 	}
-	return []attribute.KeyValue{
-		attribute.String("service.instance.id", m.deploymentName),
+	var attrs []attribute.KeyValue
+	if m.deploymentName != "" {
+		attrs = append(attrs, attribute.String("service.instance.id", m.deploymentName))
 	}
+	return append(attrs, m.extra...)
+}
+
+// With returns a view of m that adds attrs to every point, sharing m's instruments. A nil m returns
+// nil, like every other method.
+func (m *Metrics) With(attrs ...attribute.KeyValue) *Metrics {
+	if m == nil {
+		return nil
+	}
+	v := *m
+	v.extra = append(append([]attribute.KeyValue(nil), m.extra...), attrs...)
+	return &v
+}
+
+// AttrCompositionGVR names the controller on every cdc signal: metric points, reconcile root spans
+// and log records (docs/design/cdc-pooling.md step 3). The value is <group>/<version>/<plural>, the
+// same as the process-wide resource attribute krateo.io/composition-gvr, but it travels on each
+// signal, so it stays right when one process hosts several controllers. A dedicated cdc sets it
+// too, so a query keyed on it works the same before and after pooling (observability, 2026-11-15).
+const AttrCompositionGVR = attribute.Key("krateo.composition.gvr")
+
+// ControllerAttr is the krateo.composition.gvr attribute for the controller of group/version/resource.
+func ControllerAttr(group, version, resource string) attribute.KeyValue {
+	return AttrCompositionGVR.String(group + "/" + version + "/" + resource)
+}
+
+type viewKey struct{}
+
+// NewContext carries a controller's view in ctx, so the timers below record it without a global.
+// A nil view leaves ctx unchanged.
+func NewContext(ctx context.Context, m *Metrics) context.Context {
+	if m == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, viewKey{}, m)
+}
+
+// FromContext returns the controller's view carried in ctx, or the process instance when ctx carries
+// none (nil when metrics are off).
+func FromContext(ctx context.Context) *Metrics {
+	if ctx != nil {
+		if m, ok := ctx.Value(viewKey{}).(*Metrics); ok && m != nil {
+			return m
+		}
+	}
+	return GetInstance()
 }
 
 // Chart Inspector methods

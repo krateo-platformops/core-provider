@@ -210,6 +210,11 @@ func main() {
 	// — when OTEL_LOGS_ENABLED — teed to the OTLP pipeline. The shared handler lives in
 	// unstructured-runtime (pkg/logging) so every composition controller is consistent.
 	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *otelServiceName)))
+	// Pool step 3: name this controller on every signal, not only on the process resource. The same
+	// attribute goes on every log record (here), on every metric point (the runtime's and the cdc's
+	// views below) and on every reconcile root span.
+	controllerAttr := metrics.ControllerAttr(*resourceGroup, *resourceVersion, *resourceName)
+	log = log.WithValues(string(controllerAttr.Key), controllerAttr.Value.AsString())
 
 	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this
 	// controller running", without needing an OTel pipeline or a metrics scrape (#105).
@@ -429,6 +434,7 @@ func main() {
 		StatusDataTemplate: statusMappings,
 		APIResolver:        apiResolver,
 		Audit:              auditRecorder,
+		Metrics:            metrics.GetInstance().With(controllerAttr),
 	})
 
 	opts := []builder.FuncOption{
@@ -442,7 +448,8 @@ func main() {
 			LabelSelector: ptr.To(labelselector.String()),
 		}),
 		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
-		builder.WithTelemetryMetrics(telemetryMetrics),
+		builder.WithTelemetryMetrics(telemetryMetrics.With(controllerAttr)),
+		builder.WithSpanAttributes(controllerAttr),
 	}
 	// Pool step 2 (core-provider docs/design/cdc-pooling.md): reconcile only while holding this
 	// Kind x version's Lease, so a second controller for it waits instead of writing alongside.

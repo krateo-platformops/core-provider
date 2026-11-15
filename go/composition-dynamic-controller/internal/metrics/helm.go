@@ -17,7 +17,7 @@ func NewHelmMetrics(ctx context.Context) *HelmMetrics {
 
 // RecordInstall records metrics for Helm install operation
 func (h *HelmMetrics) RecordInstall(duration float64, err error) {
-	m := GetInstance()
+	m := FromContext(h.ctx)
 	if m == nil {
 		return
 	}
@@ -30,7 +30,7 @@ func (h *HelmMetrics) RecordInstall(duration float64, err error) {
 
 // RecordUpgrade records metrics for Helm upgrade operation
 func (h *HelmMetrics) RecordUpgrade(duration float64, err error) {
-	m := GetInstance()
+	m := FromContext(h.ctx)
 	if m == nil {
 		return
 	}
@@ -43,7 +43,7 @@ func (h *HelmMetrics) RecordUpgrade(duration float64, err error) {
 
 // RecordUninstall records metrics for Helm uninstall operation
 func (h *HelmMetrics) RecordUninstall(duration float64, err error) {
-	m := GetInstance()
+	m := FromContext(h.ctx)
 	if m == nil {
 		return
 	}
@@ -96,7 +96,7 @@ func (h *HelmMetrics) TimedUpgradeWithResult(fn func() (*helmconfig.Release, err
 
 // RecordRBAC records metrics for RBAC operations (apply/uninstall)
 func (h *HelmMetrics) RecordRBAC(duration float64, err error) {
-	m := GetInstance()
+	m := FromContext(h.ctx)
 	if m == nil {
 		return
 	}

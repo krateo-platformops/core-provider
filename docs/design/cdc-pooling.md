@@ -106,7 +106,7 @@ When a definition stops naming it, it cancels that controller.
 | 0 | profile the floor | no | **done**: #182 took it from about 88 MiB (inferred) to 19.5–20 MiB (measured) |
 | 1 | `spec.controller.pool`, **inert**: field, validation, status surface; no render change | no | **cut** |
 | 2 | **reconcile-time ownership guard**, inert: one reconciler per Kind × version, refusing a second | no | **done**: a Lease per Kind × version (Diego, 2026-11-14), below |
-| 3 | **per-controller telemetry**: GVR as a per-controller metric/span/log attribute; metrics keyed per member | no | **cut**; blocks step 5 |
+| 3 | **per-controller telemetry**: GVR as a per-controller metric/span/log attribute; metrics keyed per member | no | **done**: `krateo.composition.gvr` on every signal (below) |
 | 4 | cdc **multi-GVR manager**, shipped hosting exactly one GVR: a pure refactor, proven by byte-identical rendered Deployments | no | next, after 1–3 |
 | 5 | pool object set, membership watch, ref-counted lifecycle | **yes** | **unfunded** |
 | 6 | migrate the idle cohort (page/portal and CRD-only Kinds), measure, stop | **yes** | **unfunded** |
@@ -141,6 +141,18 @@ takes one such Lease per member it hosts.
   attributed metric streams. There is no production observation planned. One would need a read on a
   real cluster after a release, which is Diego's call each time.
 - **Step 4:** byte-identical rendered Deployments before and after, plus the existing integration suite.
+
+### Step 3 as built
+
+`krateo.composition.gvr` = `<group>/<version>/<plural>` on every metric point, reconcile root span
+and log record of every cdc, dedicated ones included (agreed with observability, so their queries
+migrate once). Mechanism: unstructured-runtime v1.20.0's `telemetry.Metrics.With` (a per-controller
+view over shared instruments, with its own in-flight count) and `builder.WithSpanAttributes`; the
+cdc's own metrics view (`metrics.Metrics.With`) rides in each handler entry's `ctx`
+(`metrics.NewContext`/`FromContext`), so step 4's multi-GVR manager gives each hosted controller its
+view by giving it its own handler. Process-level signals stay process-level: CPU saturation, and the
+resource attributes (`krateo.io/composition-gvr`, `service.instance.id`), which a pool will set to the
+pool. Proven by two views in one process recording distinct streams, in both the runtime and the cdc.
 
 ## 6. Not in scope
 
