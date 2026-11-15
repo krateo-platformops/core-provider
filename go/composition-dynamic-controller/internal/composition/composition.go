@@ -86,6 +86,12 @@ var (
 const (
 	reasonReconciliationGracefullyPaused event.Reason = "ReconciliationGracefullyPaused"
 
+	// #519: a retiring controller's stand-downs, as Events on the composition so they outlive the
+	// retiring pod (its log goes with its Deployment). Events, not conditions: no Ready reason.
+	reasonRetiringHeldChange   event.Reason = "RetiringControllerHeldChange"
+	reasonRetiringLeftInstall  event.Reason = "RetiringControllerLeftInstall"
+	reasonRetiringLeftRecovery event.Reason = "RetiringControllerLeftRecovery"
+
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
 	reasonPendingHelmOperation = readyreason.ReasonPendingHelmOperation
@@ -430,6 +436,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			// #519: the install is the current version's controller's, not a retiring one's.
 			log.Info("Release not found; this controller is retiring and leaves the install to the current version's controller.",
 				"reason", retiringWhy)
+			h.eventRecorder.Event(mg, event.Normal(reasonRetiringLeftInstall, "Observe",
+				"Release not found; this controller is retiring and leaves the install to the current version's controller: "+retiringWhy))
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 		}
 		log.Debug("Release not found.")
@@ -504,6 +512,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			// release would collide. Reported as waiting, like an operation in flight.
 			log.Info("Release has an incomplete helm operation; this controller is retiring and leaves its recovery to the current version's controller.",
 				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", retiringWhy)
+			h.eventRecorder.Event(mg, event.Normal(reasonRetiringLeftRecovery, "Observe",
+				fmt.Sprintf("Release is %s; this controller is retiring and leaves its recovery to the current version's controller: %s", rel.Status, retiringWhy)))
 		}
 		if (pendingFor < pendingOperationGrace && !orphan) || retiring {
 			// Recent => legitimately in flight. Do NOT roll it back and do NOT start a concurrent
@@ -681,6 +691,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
 		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
 			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
+		h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
+			fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
 	}
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
@@ -1299,6 +1311,8 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
 		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
 			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
+		h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
+			fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
 	}
 	if reconcileRes != nil && reconcileRes.Changed {
 		markWrote(ctx, writeHelmReconcile) // what this Update wrote; the runtime marks the pass acted itself
