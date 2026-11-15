@@ -435,7 +435,12 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// A non-nil error is a marker write that lost an optimistic-lock race. Nothing has been applied
 	// yet, so the pass ends here; it wraps tools.ErrStatusConflict, and the runtime requeues it
 	// quietly. ctx becomes the act's context, so children are stamped from the act step.
-	actCtx, endAct, aerr := controller.StartAct(ctx, mg, "apply")
+	// DeferActedMark (Diego, 2026-11-14: "mark only on a real write"): this apply path runs on EVERY
+	// resync, and most passes change nothing, so the pass is marked acted (controller.MarkActed)
+	// only where something was written: derived RBAC created or changed, a stuck-release rollback,
+	// or a helm reconcile that changed the cluster. Otherwise a tail sampler keeping acted roots
+	// keeps every resync.
+	actCtx, endAct, aerr := controller.StartAct(ctx, mg, "apply", controller.DeferActedMark())
 	if aerr != nil {
 		return controller.ExternalObservation{}, fmt.Errorf("writing the trace continuation marker before applying: %w", aerr)
 	}
@@ -453,7 +458,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// composition for 22 hours, because the one block able to re-subject it was sequenced behind the
 	// operation that needed it. ApplyRBAC can always fix this: the static baseline grants
 	// rbac.authorization.k8s.io/{roles,rolebindings,clusterroles,clusterrolebindings}.
-	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+	written, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName)
+	if written > 0 {
+		markWrote(ctx, writeDerivedRBAC) // RBAC created or changed, possibly before an error
+	}
+	if err != nil {
 		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, err, updateOpts)
 	}
 
@@ -518,6 +527,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
 			return releaseOf(op), err
 		})
+		markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
 		clearHelmOperationRecord(mg)
 		if err != nil {
 			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
@@ -646,6 +656,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		}, recordRevision))
 	})
 	clearHelmOperationRecord(mg) // #461: the operation returned; the next status write drops the record
+	if reconcileRes != nil && reconcileRes.Changed {
+		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
+	}
 	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 	if err != nil {
@@ -848,6 +861,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationCreate)
 
 	log := xcontext.Logger(ctx)
 	log = log.WithValues("op", "Create").
@@ -927,7 +941,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// Behaviour preserved deliberately: the error text differs ("applying rbac" rather than
 	// "installing rbac") and nothing matches on it -- checked, no test or consumer greps either
 	// string.
-	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+	if _, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
 		return err
 	}
 
@@ -998,6 +1012,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
+		markWrote(ctx, writeHelmUpgrade) // the upgrade ran, which writes, whether or not it then failed
 		// Unchecked, a failed upgrade left rel nil and the status write below dereferenced it: the
 		// controller panicked mid-reconcile. Reproduced on a fresh vcluster child, where the portal's
 		// first install outlived pendingOperationGrace, was rolled back, and this upgrade then ran
@@ -1016,6 +1031,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 				return releaseOf(op), err
 			})
 		})
+		markWrote(ctx, writeHelmInstall) // the install ran, which writes, whether or not it then failed
 		if err != nil {
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
@@ -1071,6 +1087,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationUpdate)
 
 	// RESOLVED, NOT READ OFF THE LABEL (#335). This read the label, and on #303's adoption path the
 	// label does not exist: its absence is what triggers adoption. So Update got "" and every helm
@@ -1241,6 +1258,9 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		})
 	})
 	clearHelmOperationRecord(mg) // #461
+	if reconcileRes != nil && reconcileRes.Changed {
+		markWrote(ctx, writeHelmReconcile) // what this Update wrote; the runtime marks the pass acted itself
+	}
 	if err != nil {
 		return fmt.Errorf("upgrading helm chart: %w", err)
 	}
@@ -1339,6 +1359,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
 	mg = mg.DeepCopy()
+	markOperation(ctx, operationDelete)
 
 	// RESOLVED HERE TOO (#335), for the same reason as Update -- and with a guard, because this is
 	// a teardown path. A composition deleted before any phase persisted the label would otherwise
@@ -1452,7 +1473,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Deliberately NOT fatal, unlike the Observe path. A teardown must not become impossible because
 	// chart-inspector is unavailable — that trades one wedge for another. Say so and carry on with
 	// whatever grants are already in place; the uninstall may well succeed on them.
-	if err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+	if _, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
 		log.Info("Could not refresh derived RBAC before teardown; continuing with the grants already in place",
 			"release", releaseName, "error", err.Error())
 		h.eventRecorder.Event(mg, event.Warning(reasonRBACRefreshSkipped, "Delete", err))
@@ -1540,6 +1561,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			return err
 		})
 	})
+	markWrote(ctx, writeHelmUninstall) // the uninstall ran, which writes, whether or not it then failed
 	if err != nil {
 		// #497: the call RETURNED; whatever lock helm left (uninstalling) is not in flight. Say so in
 		// the record, so the next Delete clears it at once instead of waiting the pending grace. A
@@ -1606,10 +1628,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 // else repoints the binding, so between a bump and the next successful apply the composition holds a
 // binding naming a ServiceAccount that no longer exists — RBAC is name-based, so it resolves against
 // nothing and the controller silently runs on the static baseline alone (core-provider#166).
-func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, dyn dynamic.Interface, releaseName string) error {
+func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, dyn dynamic.Interface, releaseName string) (written int, err error) {
 	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
 	if err != nil {
-		return fmt.Errorf("converting GVK to GVR: %w", err)
+		return 0, fmt.Errorf("converting GVK to GVR: %w", err)
 	}
 
 	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
@@ -1635,7 +1657,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
 		}
 		setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
-		return fmt.Errorf("generating RBAC using chart-inspector: %w", err)
+		return 0, fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
 	// #402: record this composition as an owner of every derived object, so its Delete can release
@@ -1655,10 +1677,11 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		xcontext.Logger(ctx).Info("Skipped RBAC into namespaces being deleted",
 			"skipped", describeSkipped(report.SkippedTerminating))
 	}
+	// Written is reported on the error path too: an apply can write some objects and then fail.
 	if applyErr != nil {
-		return fmt.Errorf("applying rbac: %w", applyErr)
+		return report.Written, fmt.Errorf("applying rbac: %w", applyErr)
 	}
-	return nil
+	return report.Written, nil
 }
 
 // isVersionMigrationHandover reports whether this composition CR is being deleted as part of a

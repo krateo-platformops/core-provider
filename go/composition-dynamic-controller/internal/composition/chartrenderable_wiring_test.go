@@ -52,7 +52,7 @@ func TestApplyDerivedRBAC_MarksChartRenderableOnSuccess(t *testing.T) {
 	// The RBAC APPLY will fail against an empty fake client, and that is fine and deliberate: the
 	// condition is stamped after Generate succeeds and before the apply, so this exercises exactly
 	// the arm under test without needing a cluster that accepts RBAC writes.
-	_ = h.applyDerivedRBAC(context.Background(), mg, pkg, fakeDynWith(), "fw-abcdefgh")
+	_, _ = h.applyDerivedRBAC(context.Background(), mg, pkg, fakeDynWith(), "fw-abcdefgh")
 
 	status, reason, found := readChartRenderable(t, mg)
 	if !found {
@@ -92,7 +92,7 @@ func TestApplyDerivedRBAC_MarksChartRenderableFalseOnFailure(t *testing.T) {
 		GVR: schema.GroupVersionResource{Group: "core.krateo.io", Version: "v1alpha1", Resource: "compositiondefinitions"},
 	}}
 
-	if err := h.applyDerivedRBAC(context.Background(), mg, pkg, fakeDynWith(), "fw-abcdefgh"); err == nil {
+	if _, err := h.applyDerivedRBAC(context.Background(), mg, pkg, fakeDynWith(), "fw-abcdefgh"); err == nil {
 		t.Fatal("applyDerivedRBAC returned nil on a 422 from chart-inspector")
 	}
 
