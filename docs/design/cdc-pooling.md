@@ -154,6 +154,66 @@ view by giving it its own handler. Process-level signals stay process-level: CPU
 resource attributes (`krateo.io/composition-gvr`, `service.instance.id`), which a pool will set to the
 pool. Proven by two views in one process recording distinct streams, in both the runtime and the cdc.
 
+## 5b. Sizing, measured (2026-11-15, krateo-057, read-only)
+
+Measured before funding step 5, as §4 requires, not assumed.
+
+**Data.** observability's ClickHouse, last 24h, one row per cdc Deployment:
+- memory: container working set, kubeletstats 60 s samples, so a peak under 60 s is not seen;
+- CPU: p95 and max;
+- reconciles and in-flight: from the runtime's own metrics.
+
+Joined to the 73 cdc Deployments running on 057 at measurement time (70 matched), with instance
+counts per Kind × version taken from the cluster. Point snapshot (`kubectl top`) for the process
+floor.
+
+| | today |
+|---|---|
+| cdc pods | 73, one per Kind × version |
+| memory, 24h max per pod | median 69 MiB, p90 83, max 160 (installers) |
+| memory requested / limit | 128Mi / 512Mi each: 9,344 MiB requested, 2.4x the snapshot's actual use |
+| process floor (a cdc with 0 instances) | 22 MiB (3 of 3, snapshot) |
+| instances per controller | 69 of 73 have exactly one; 3 have none; 1 has 6-20 |
+| concurrency | `in_flight_max` <= 1 for every controller over 24h: none ever ran two reconciles at once |
+| CPU, 24h p95 | median 48m; 21 controllers at >= 100m, 12 at >= 250m |
+
+**Findings.**
+1. **Worker demand is negligible.** No controller needed a second worker in 24h, so pool-wide
+   workers sized to about 2 per pool cover the idle cohort.
+2. **The page/portal Kinds are not idle.** §4 step 6 named them the idle cohort. Measured, the ten
+   frontend pages run 141-537m CPU p95, and only 4 of the 17 page/portal Kinds are under 100m. The
+   idle cohort is the provider and CRD-only Kinds, minus kagentcrds (462m) and frontendcrds (358m).
+3. **The busy controllers stay dedicated**, among them installers (1.2 cores p95, 138-185 MiB),
+   agentgatewaycontrollers (2.5 cores p95, 160 MiB) and builderpublishes (921m).
+4. **Pooling saves the process floor, not the working set.** A member keeps its instance's
+   helm-render working set, about 31 MiB above the floor for one instance. What is shared is the
+   ~22 MiB floor per member, plus the per-pod scheduling overhead.
+
+**Model: the idle cohort, CPU p95 < 100m, 49 controllers.** Each member beyond the first stops
+paying the floor. Per-pod maxima are summed, which assumes their peaks coincide, so this is
+conservative.
+
+| pools of | pods (from 49) | peak memory sum | requests at 1.5x peak |
+|---|---|---|---|
+| 5 | 10 | 2,300 MiB (-27%) | ~3,450 MiB (vs 6,272 today) |
+| 10 | 5 | 2,190 MiB (-31%) | ~3,285 MiB |
+| 20 | 3 | 2,146 MiB (-32%) | ~3,219 MiB |
+
+The memory saving flattens past about 10 members per pool, while the failure domain (§3.3) grows
+linearly. Requested memory halves at any pool size, mostly because 128Mi per idle cdc is about twice
+its peak, not because of pooling as such: right-sizing the dedicated request is a separate,
+cheaper lever.
+
+**Not measured, and a caveat on each.**
+- Memory peaks under 60 s.
+- Shared caches a pool would add savings from (discovery, the helm chart cache).
+- The RBAC union per pool (§3.1). A pool's ServiceAccount holds the union of its members'
+  permissions, so pools must group Kinds with similar permissions, and that grouping is not
+  derived from these numbers.
+- The runtime's reconcile-duration histogram uses millisecond-style default bucket bounds on a
+  seconds metric, so its p95 is unusable here (reported by observability; an unstructured-runtime
+  fix).
+
 ## 6. Not in scope
 
 Scale-to-zero (provider-runtime#39) removes controllers whose Kind has **no** instances. That was 2
