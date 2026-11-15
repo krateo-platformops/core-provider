@@ -68,15 +68,50 @@ The unstructured-runtime rows are written by the runtime on the same composition
 - **status** is the status the reason is always written with.
 - **parent verdict** is how this controller's child rollup reads a composition child carrying it,
   computed by ` + "`krateoReady`" + `. ` + "`converging`" + ` keeps the parent ` + "`Ready=False/Creating`" + `.
+- **expected to clear** is how long the reason should last: ` + "`steady`" + ` (the end state), ` + "`timer`" + ` (bounded by a
+  named timer: wait for it), ` + "`next pass`" + ` (re-read after the next reconcile) or ` + "`indefinite`" + ` (lasts until
+  something outside the controller changes). Each timer is printed with its default and the
+  environment variable that overrides it, so a deployment can differ.
 - **written by** names the code that writes it.
 
-| reason | status | writer | parent verdict | written by |
-|---|---|---|---|---|
+| reason | status | writer | parent verdict | expected to clear | written by |
+|---|---|---|---|---|---|
 `)
 	for _, r := range readyreason.Table() {
-		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s |\n", r, r.Status(), r.Writer(), rollupVerdict(t, r), r.Meaning())
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %s |\n", r, r.Status(), r.Writer(), rollupVerdict(t, r), renderClearance(t, r), r.Meaning())
 	}
 	return b.String()
+}
+
+// clearanceTimers are the controller timers a Clearance note may name, with the variable that sets
+// each (core-provider#522). The values are the code's own, so a changed default changes the file.
+func clearanceTimers() map[string]string {
+	return map[string]string{
+		"{helmOperationTimeout}":  fmt.Sprintf("%s (%s)", helmOperationTimeout, helmTimeoutEnvvar),
+		"{pendingOperationGrace}": fmt.Sprintf("%s (%s)", pendingOperationGrace, pendingGraceEnvvar),
+		"{childTeardownGrace}":    fmt.Sprintf("%s (%s)", childTeardownGrace, childTeardownGraceEnvvar),
+	}
+}
+
+func renderClearance(t *testing.T, r readyreason.Reason) string {
+	t.Helper()
+	c := r.Clears()
+	switch c.Kind {
+	case readyreason.Steady, readyreason.Timer, readyreason.NextPass, readyreason.Indefinite:
+	default:
+		t.Fatalf("%s (%s): no expected-to-clear class (%q); every reason needs one", r, r.Writer(), c.Kind)
+	}
+	note := c.Note
+	for key, value := range clearanceTimers() {
+		note = strings.ReplaceAll(note, key, value)
+	}
+	if strings.ContainsAny(note, "{}") {
+		t.Fatalf("%s (%s): note names an unknown timer: %q", r, r.Writer(), note)
+	}
+	if c.Kind == readyreason.Timer && note == c.Note {
+		t.Fatalf("%s (%s): a timer reason must name its timer", r, r.Writer())
+	}
+	return "`" + string(c.Kind) + "`: " + note
 }
 
 // The rendered table is committed, and stale is a failure: a reason added, removed, re-statused or

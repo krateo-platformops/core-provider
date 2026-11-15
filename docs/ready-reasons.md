@@ -20,21 +20,25 @@ The unstructured-runtime rows are written by the runtime on the same composition
 - **status** is the status the reason is always written with.
 - **parent verdict** is how this controller's child rollup reads a composition child carrying it,
   computed by `krateoReady`. `converging` keeps the parent `Ready=False/Creating`.
+- **expected to clear** is how long the reason should last: `steady` (the end state), `timer` (bounded by a
+  named timer: wait for it), `next pass` (re-read after the next reconcile) or `indefinite` (lasts until
+  something outside the controller changes). Each timer is printed with its default and the
+  environment variable that overrides it, so a deployment can differ.
 - **written by** names the code that writes it.
 
-| reason | status | writer | parent verdict | written by |
-|---|---|---|---|---|
-| `Available` | True | composition-dynamic-controller | healthy | stampReady: the health verdict is healthy, over most of the children it names |
-| `AvailablePartialCoverage` | True | composition-dynamic-controller | healthy | stampReady: healthy, but the rollup assessed a minority of the children it names (#297) |
-| `ReconcileGracefullyPaused` | True | composition-dynamic-controller | healthy | Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half) |
-| `Creating` | False | composition-dynamic-controller | converging | stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating) |
-| `Unavailable` | False | composition-dynamic-controller | failed | stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error |
-| `HelmOperationInProgress` | False | composition-dynamic-controller | converging | recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound |
-| `PendingHelmOperation` | False | composition-dynamic-controller | converging | Observe: a release is pending within its grace period, so this reconcile stands down |
-| `ZeroEvidence` | Unknown | composition-dynamic-controller | unevaluated (rolls up as healthy) | stampReady: no child could be assessed at all (#165) |
-| `ChildrenForbidden` | Unknown | composition-dynamic-controller | converging | stampReady: no child could be assessed, and at least one read was refused by RBAC (#318) |
-| `InventoryNotRecorded` | Unknown | composition-dynamic-controller | converging | stampReady: the managed-children inventory was never recorded |
-| `ReconcilePaused` | True | unstructured-runtime | healthy | krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half) |
-| `Creating` | False | unstructured-runtime | converging | worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error) |
-| `ObserveFailed` | Unknown | unstructured-runtime | unevaluated (rolls up as healthy) | Observe failed and the handler did not wrap its error with ReadyAssessed |
-| `Deleting` | False | unstructured-runtime | converging | Delete is in progress or failed (message: the error, on failure) |
+| reason | status | writer | parent verdict | expected to clear | written by |
+|---|---|---|---|---|---|
+| `Available` | True | composition-dynamic-controller | healthy | `steady`: the healthy end state | stampReady: the health verdict is healthy, over most of the children it names |
+| `AvailablePartialCoverage` | True | composition-dynamic-controller | healthy | `steady`: the healthy end state, over a minority of the children named | stampReady: healthy, but the rollup assessed a minority of the children it names (#297) |
+| `ReconcileGracefullyPaused` | True | composition-dynamic-controller | healthy | `steady`: until krateo.io/gracefully-paused is removed; paired with Synced=False/ReconcileGracefullyPaused | Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half) |
+| `Creating` | False | composition-dynamic-controller | converging | `indefinite`: until the converging child converges; no deadline (core-provider#498 adds one) | stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating) |
+| `Unavailable` | False | composition-dynamic-controller | failed | `indefinite`: until the failing child, or the observation, recovers | stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error |
+| `HelmOperationInProgress` | False | composition-dynamic-controller | converging | `timer`: until the install or uninstall returns; each hook and each wait must finish within 15m0s (COMPOSITION_CONTROLLER_HELM_TIMEOUT), and the message carries the start time | recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound |
+| `PendingHelmOperation` | False | composition-dynamic-controller | converging | `timer`: until the pending operation settles; otherwise rolled back once pending longer than 16m0s (COMPOSITION_CONTROLLER_PENDING_GRACE) (at once when the pod that started it is gone); the message says how long it has been pending | Observe: a release is pending within its grace period, so this reconcile stands down |
+| `ZeroEvidence` | Unknown | composition-dynamic-controller | unevaluated (rolls up as healthy) | `indefinite`: until at least one child can be assessed | stampReady: no child could be assessed at all (#165) |
+| `ChildrenForbidden` | Unknown | composition-dynamic-controller | converging | `indefinite`: until the controller may read its children (an RBAC change) | stampReady: no child could be assessed, and at least one read was refused by RBAC (#318) |
+| `InventoryNotRecorded` | Unknown | composition-dynamic-controller | converging | `next pass`: the next Update records the inventory (core-provider#326) | stampReady: the managed-children inventory was never recorded |
+| `ReconcilePaused` | True | unstructured-runtime | healthy | `steady`: until krateo.io/paused is removed; paired with Synced=False/ReconcilePaused | krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half) |
+| `Creating` | False | unstructured-runtime | converging | `indefinite`: retried with backoff until the write succeeds | worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error) |
+| `ObserveFailed` | Unknown | unstructured-runtime | unevaluated (rolls up as healthy) | `next pass`: the next observation, after the retry backoff | Observe failed and the handler did not wrap its error with ReadyAssessed |
+| `Deleting` | False | unstructured-runtime | converging | `timer`: until deletion completes: finalizer-bearing children get 5m0s (COMPOSITION_CONTROLLER_CHILD_TEARDOWN_GRACE), then the release is uninstalled with each hook and wait within 15m0s (COMPOSITION_CONTROLLER_HELM_TIMEOUT) | Delete is in progress or failed (message: the error, on failure) |
