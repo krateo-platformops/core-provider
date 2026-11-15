@@ -15,10 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller/builder"
-	ctrlevent "github.com/krateo-platformops/unstructured-runtime/pkg/controller/event"
-	"github.com/krateo-platformops/unstructured-runtime/pkg/metrics/server"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/telemetry"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 
@@ -27,12 +24,12 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/authn"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/composition"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/health"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/manager"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/ownership"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
-	"github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
@@ -42,10 +39,7 @@ import (
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/saturation"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
-	"github.com/krateo-platformops/unstructured-runtime/pkg/workqueue"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -210,11 +204,6 @@ func main() {
 	// — when OTEL_LOGS_ENABLED — teed to the OTLP pipeline. The shared handler lives in
 	// unstructured-runtime (pkg/logging) so every composition controller is consistent.
 	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *otelServiceName)))
-	// Pool step 3: name this controller on every signal, not only on the process resource. The same
-	// attribute goes on every log record (here), on every metric point (the runtime's and the cdc's
-	// views below) and on every reconcile root span.
-	controllerAttr := metrics.ControllerAttr(*resourceGroup, *resourceVersion, *resourceName)
-	log = log.WithValues(string(controllerAttr.Key), controllerAttr.Value.AsString())
 
 	// Announce the build stamp first: `kubectl logs` alone should answer "which commit is this
 	// controller running", without needing an OTel pipeline or a metrics scrape (#105).
@@ -369,21 +358,6 @@ func main() {
 		}
 	}()
 
-	// Create a label requirement for the composition version.
-	//
-	// EXACT equality, and this is the constraint the whole label exists to satisfy: an instance
-	// whose label does not match this controller's --resource-version is never delivered here at
-	// all. It works only because the MutatingAdmissionPolicy re-stamps on UPDATE as well as
-	// CREATE, which is what moves a CR written at the old version into the new controller's view
-	// after a CRD re-point. That also means the label is NOT an origin version — see
-	// core-provider's internal/tools/policy (versionLabel) for what it does and does not mean.
-	labelreq, err := labels.NewRequirement(meta.CompositionVersionLabel, selection.Equals, []string{*resourceVersion})
-	if err != nil {
-		log.Error(err, "Creating label requirement.")
-		os.Exit(1)
-	}
-	labelselector := labels.NewSelector().Add(*labelreq)
-
 	mapper, err := dynamic.NewRESTMapper(cfg)
 	if err != nil {
 		log.Error(err, "Creating RESTMapper.")
@@ -412,57 +386,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = auditLogsShutdown(context.Background()) }()
-	auditRecorder, err := auditrec.New(cfg, *resourceName, *saNamespace, *saName, auditLogs)
-	if err != nil {
-		log.Error(err, "Creating the audit recorder")
-		os.Exit(1)
-	}
 	if auditrec.Actor(*saNamespace, *saName) == "" {
 		log.Info("COMPOSITION_CONTROLLER_SA_NAME or _NAMESPACE is unset: audit records will name no actor and be marked incomplete")
-	}
-
-	handler := composition.NewHandler(&composition.HandlerOptions{
-		Kubeconfig:         cfg,
-		Pluralizer:         pluralizer,
-		PackageInfoGetter:  pig,
-		EventRecorder:      *apiRecorder,
-		ChartInspectorUrl:  *urlChartInspector,
-		SaName:             *saName,
-		SaNamespace:        *saNamespace,
-		SafeReleaseName:    *safeReleaseName,
-		Mapper:             mapper,
-		StatusDataTemplate: statusMappings,
-		APIResolver:        apiResolver,
-		Audit:              auditRecorder,
-		Metrics:            metrics.GetInstance().With(controllerAttr),
-	})
-
-	opts := []builder.FuncOption{
-		builder.WithLogger(log),
-		builder.WithNamespace(*namespace),
-		builder.WithResyncInterval(*resyncInterval),
-		builder.WithGlobalRateLimiter(workqueue.NewExponentialTimedFailureRateLimiter[any](*minErrorRetryInterval, *maxErrorRetryInterval)),
-		builder.WithMaxRetries(*maxErrorRetry),
-		builder.WithGracefulShutdownTimeout(*gracefulShutdownTimeout),
-		builder.WithListWatcher(controller.ListWatcherConfiguration{
-			LabelSelector: ptr.To(labelselector.String()),
-		}),
-		builder.WithActionEvent(ctrlevent.CRUpdated, ctrlevent.Observe),
-		builder.WithTelemetryMetrics(telemetryMetrics.With(controllerAttr)),
-		builder.WithSpanAttributes(controllerAttr),
-	}
-	// Pool step 2 (core-provider docs/design/cdc-pooling.md): reconcile only while holding this
-	// Kind x version's Lease, so a second controller for it waits instead of writing alongside.
-	ownershipOpt, err := ownership.Option(*leaseName, os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME"))
-	if err != nil {
-		log.Error(err, "Configuring the ownership lease")
-		os.Exit(1)
-	}
-	if ownershipOpt != nil {
-		opts = append(opts, ownershipOpt)
-		log.Info("Ownership lease enabled", "lease", os.Getenv("POD_NAMESPACE")+"/"+*leaseName, "identity", os.Getenv("POD_NAME"))
-	} else {
-		log.Info("Ownership lease disabled: COMPOSITION_CONTROLLER_LEASE_NAME is unset")
 	}
 
 	gov, err := saturation.NewGovernor(*saturationEnabled, *cpuPressureThreshold, *workers, log)
@@ -470,46 +395,69 @@ func main() {
 		log.Error(err, "Invalid CPU-saturation configuration")
 		os.Exit(1)
 	}
-	if gov != nil {
-		opts = append(opts, builder.WithRateLimitGovernor(gov))
-	}
 
-	metricsServerBindAddress := ""
+	metricsBindAddress := ""
 	if ptr.Deref(metricsServerPort, 0) != 0 {
-		log.Info("Metrics server enabled", "bindAddress", fmt.Sprintf(":%d", *metricsServerPort))
-		metricsServerBindAddress = fmt.Sprintf(":%d", *metricsServerPort)
-		opts = append(opts, builder.WithMetrics(server.Options{
-			BindAddress: metricsServerBindAddress,
-		}))
+		metricsBindAddress = fmt.Sprintf(":%d", *metricsServerPort)
+		log.Info("Metrics server enabled", "bindAddress", metricsBindAddress)
 	} else {
 		log.Info("Metrics server disabled")
 	}
 
-	controller, err := builder.Build(ctx, builder.Configuration{
-		Config: cfg,
-		GVR: schema.GroupVersionResource{
-			Group:    *resourceGroup,
-			Version:  *resourceVersion,
-			Resource: *resourceName,
-		},
-		ProviderName: serviceName,
-	}, opts...)
+	// Pool step 4 (core-provider docs/design/cdc-pooling.md): what the process shares, and the
+	// members it hosts. Today exactly one member, from this controller's flags.
+	process := manager.Process{
+		Config:                  cfg,
+		Log:                     log,
+		ProviderName:            serviceName,
+		Pluralizer:              pluralizer,
+		PackageInfoGetter:       pig,
+		EventRecorder:           *apiRecorder,
+		Mapper:                  mapper,
+		ChartInspectorURL:       *urlChartInspector,
+		SAName:                  *saName,
+		SANamespace:             *saNamespace,
+		SafeReleaseName:         *safeReleaseName,
+		AuditLogs:               auditLogs,
+		TelemetryMetrics:        telemetryMetrics,
+		Governor:                gov,
+		Namespace:               *namespace,
+		ResyncInterval:          *resyncInterval,
+		MinErrorRetryInterval:   *minErrorRetryInterval,
+		MaxErrorRetryInterval:   *maxErrorRetryInterval,
+		MaxErrorRetries:         *maxErrorRetry,
+		GracefulShutdownTimeout: *gracefulShutdownTimeout,
+		Workers:                 *workers,
+		PodNamespace:            os.Getenv("POD_NAMESPACE"),
+		PodName:                 os.Getenv("POD_NAME"),
+		MetricsBindAddress:      metricsBindAddress,
+	}
+	members := []manager.Member{{
+		GVR:                schema.GroupVersionResource{Group: *resourceGroup, Version: *resourceVersion, Resource: *resourceName},
+		LeaseName:          *leaseName,
+		StatusDataTemplate: statusMappings,
+		APIResolver:        apiResolver,
+	}}
+	if *leaseName != "" {
+		log.Info("Ownership lease enabled", "lease", process.PodNamespace+"/"+*leaseName, "identity", process.PodName)
+	} else {
+		log.Info("Ownership lease disabled: COMPOSITION_CONTROLLER_LEASE_NAME is unset")
+	}
+
+	built, err := manager.Build(ctx, process, members)
 	if err != nil {
 		log.Error(err, "Creating controller.")
 		os.Exit(1)
 	}
 
-	controller.SetExternalClient(handler)
-
-	// Probes start BEFORE Run, because Run begins by waiting for the informer's first list, and
-	// that wait is exactly the window /readyz exists to report (#333): a controller whose list
-	// never succeeds stays inside it forever, answering not-ready. The server outlives the
-	// SIGTERM ctx so liveness keeps answering through the graceful drain; it stops when main
-	// returns.
+	// Probes start BEFORE Run, because Run begins by waiting for the informers' first list, and
+	// that wait is exactly the window /readyz exists to report (#333). The process is ready only
+	// when every member is. The server outlives the SIGTERM ctx so liveness keeps answering
+	// through the graceful drain; it stops when main returns.
 	if *healthProbePort != 0 {
 		healthCtx, stopHealth := context.WithCancel(context.Background())
 		defer stopHealth()
-		addr, err := health.Serve(healthCtx, fmt.Sprintf(":%d", *healthProbePort), controller,
+		addr, err := health.Serve(healthCtx, fmt.Sprintf(":%d", *healthProbePort), manager.Readiness(built),
 			func(err error) { log.Error(err, "Health probe server failed.") })
 		if err != nil {
 			log.Error(err, "Starting health probe server.")
@@ -521,7 +469,7 @@ func main() {
 		log.Info("Health probe server disabled")
 	}
 
-	err = controller.Run(ctx, *workers)
+	err = manager.Run(ctx, process, built)
 	if ownership.Lost(err) {
 		// Exiting restarts the container, which then waits for the Lease again.
 		log.Error(err, "Lost the ownership lease; exiting so the restarted controller waits for it again.")

@@ -107,7 +107,7 @@ When a definition stops naming it, it cancels that controller.
 | 1 | `spec.controller.pool`, **inert**: field, validation, status surface; no render change | no | **cut** |
 | 2 | **reconcile-time ownership guard**, inert: one reconciler per Kind × version, refusing a second | no | **done**: a Lease per Kind × version (Diego, 2026-11-14), below |
 | 3 | **per-controller telemetry**: GVR as a per-controller metric/span/log attribute; metrics keyed per member | no | **done**: `krateo.composition.gvr` on every signal (below) |
-| 4 | cdc **multi-GVR manager**, shipped hosting exactly one GVR: a pure refactor, proven by byte-identical rendered Deployments | no | next, after 1–3 |
+| 4 | cdc **multi-GVR manager**, shipped hosting exactly one GVR: a pure refactor, proven by byte-identical rendered Deployments | no | **done**: `internal/manager` (below) |
 | 5 | pool object set, membership watch, ref-counted lifecycle | **yes** | **unfunded** |
 | 6 | migrate the idle cohort (page/portal and CRD-only Kinds), measure, stop | **yes** | **unfunded** |
 
@@ -141,6 +141,21 @@ takes one such Lease per member it hosts.
   attributed metric streams. There is no production observation planned. One would need a read on a
   real cluster after a release, which is Diego's call each time.
 - **Step 4:** byte-identical rendered Deployments before and after, plus the existing integration suite.
+
+### Step 4 as built
+
+`go/composition-dynamic-controller/internal/manager` splits the process from its controllers.
+`Process` is what every member shares (REST config, event recorder, chart getter, REST mapper and its
+CRD watch, the saturation governor, retry and resync settings, and the two process servers: one
+metrics server for the shared registry, one health endpoint). `Member` is one Kind x version: its
+label selector, ownership Lease, status projections, apiRef resolver, audit recorder, handler and
+metrics/span view. main.go builds the Process from its flags and exactly one Member, so nothing a
+cluster sees changes: no chart or ConfigMap change, the same controller options, the same probes.
+Proven by unit tests (no member and a duplicate refused; one controller per member; readiness names
+the member that is not ready) and an envtest hosting two Kinds in one process (Ready only once both
+have listed, a ready member beside an unserved one keeps the process not-ready and names it, clean
+stop). Left to step 5 and stated as provisional in the package: /readyz needs every member, and a
+member that fails (a lost Lease included) stops the process.
 
 ### Step 3 as built
 
