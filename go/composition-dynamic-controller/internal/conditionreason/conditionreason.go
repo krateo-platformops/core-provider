@@ -154,6 +154,9 @@ var (
 		"worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error)", Clearance{Indefinite, "retried with backoff until the write succeeds"})
 	runtimeObserveFailed = ready(condition.ReasonObserveFailed, metav1.ConditionUnknown, WriterRuntime,
 		"Observe failed and the handler did not wrap its error with ReadyAssessed", Clearance{NextPass, "the next observation, after the retry backoff"})
+	runtimeCreateOutcomeUnknown = ready(condition.ReasonCreateOutcomeUnknown, metav1.ConditionFalse, WriterRuntime,
+		"worker: a create whose outcome cannot be determined is not repeated (krateo.io/external-create-pending set, the existence check failed); message: the cause and the remediation (unstructured-runtime#93)",
+		Clearance{Indefinite, "until an existence check succeeds (retried every resync; a transient cause clears by itself) or a human, having verified the external state, removes krateo.io/external-create-pending"})
 	runtimeDeleting = ready(condition.ReasonDeleting, metav1.ConditionFalse, WriterRuntime,
 		"Delete is in progress or failed (message: the error, on failure)", Clearance{Timer, "until deletion completes: finalizer-bearing children get {childTeardownGrace}, then the release is uninstalled with each hook and wait within {helmOperationTimeout}"})
 )
@@ -296,7 +299,7 @@ func Table() []Reason {
 		Available, AvailablePartialCoverage, ReconcileGracefullyPaused,
 		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation,
 		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded,
-		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeDeleting,
+		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,
 		ChartRenderable, ChartUnservedKind, ChartValuesSchemaViolation, ChartInspectorRejected, ChartInspectorUnavailable,
@@ -316,6 +319,7 @@ func RuntimeConstructors() []metav1.Condition {
 		condition.Unavailable(),
 		condition.Available(),
 		condition.ZeroEvidence(),
+		condition.CreateOutcomeUnknown(""),
 		// Synced, written by the runtime (#528). ReconcilePaused shares its string with Ready's
 		// ReadyPaused, which is why this is a list keyed by type and reason, not a map by reason.
 		condition.ReconcileSuccess(),
