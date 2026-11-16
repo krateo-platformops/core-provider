@@ -417,6 +417,7 @@ func (e *external) handOverController(ctx context.Context, cr *compositiondefini
 		SkipCRD:                true,
 		KeepShared:             true,
 		DynamicClient:          e.dynamic,
+		HubDynamicClient:       e.mgmtDynamic,
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ServiceTemplatePath:    ServiceTemplatePath,
