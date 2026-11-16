@@ -2,6 +2,8 @@ package composition
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
@@ -80,6 +82,24 @@ var (
 	podNamespace = env.String("POD_NAMESPACE", "")
 )
 
+// processID identifies THIS process, distinct across container restarts in the same pod. The pod name
+// alone could not tell them apart: a controller that lost its ownership Lease exits by design, the
+// kubelet restarts the container IN THE SAME POD, and the new process read its dead predecessor's
+// record as "started by this pod", so a release left pending by the dead process waited the full
+// pendingOperationGrace (16m) instead of the orphan fast path (openstack r067: gnocchi, 08:27:48 ->
+// 08:44:30, after an API-server outage crossed the Lease renew deadline).
+var processID = newProcessID()
+
+func newProcessID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand does not fail on supported platforms; a constant here would only make every
+		// process look like the same one, which is today's behaviour, never a false orphan.
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
 // orphanWindow bounds how long before the pending revision's LastDeployed a record may have been
 // written and still be ITS record (#461). The cdc writes the record immediately before calling helm,
 // and both timestamps come from the same starter pod's clock, so the real gap is the record write
@@ -93,6 +113,9 @@ func setHelmOperationRecord(mg *unstructured.Unstructured, phase string, started
 	rec := map[string]any{"phase": phase, "startedAt": started.UTC().Format(time.RFC3339Nano)}
 	if podName != "" && podNamespace != "" {
 		rec["startedBy"] = podNamespace + "/" + podName
+		if processID != "" {
+			rec["startedByProcess"] = processID
+		}
 	}
 	_ = unstructured.SetNestedMap(mg.Object, rec, "status", "helmOperation")
 }
@@ -113,7 +136,7 @@ func markHelmOperationReturned(mg *unstructured.Unstructured, returned time.Time
 // CRD's status schema is CLOSED there (core-provider statics/status.schema.json), so a key missing
 // from it is pruned by the apiserver on every write and the behaviour built on it silently never
 // engages. helmoperation_schema_test.go holds the two together.
-var helmOperationRecordKeys = []string{"phase", "startedAt", "startedBy", "returnedAt"}
+var helmOperationRecordKeys = []string{"phase", "startedAt", "startedBy", "startedByProcess", "returnedAt"}
 
 // returnedOperation reports whether rel's lock was left by a recorded operation whose call has
 // RETURNED (#497, Diego 2026-11-14), so it can be cleared now instead of after the pending grace.
@@ -214,6 +237,10 @@ func clearOwnHelmOperationRecord(mg *unstructured.Unstructured) {
 	if by := rec["startedBy"]; by != "" && by != podNamespace+"/"+podName {
 		return
 	}
+	// Same pod, earlier process: not this process's record to clear (orphanedOperation owns it).
+	if p := rec["startedByProcess"]; p != "" && processID != "" && p != processID {
+		return
+	}
 	unstructured.RemoveNestedField(mg.Object, "status", "helmOperation")
 }
 
@@ -259,7 +286,14 @@ func orphanedOperation(ctx context.Context, mg *unstructured.Unstructured, rel *
 		return false, "no starter recorded"
 	}
 	if ns == podNamespace && name == podName {
-		return false, "started by this pod"
+		// The same pod, but is it the same PROCESS? A record from an earlier process of this pod (the
+		// container restarted) is orphaned: that process is gone, whatever the pod's name says. A
+		// record with no process identity (written by an older controller) keeps the old answer, the
+		// conservative one: wait the grace rather than guess.
+		if p := rec["startedByProcess"]; p != "" && processID != "" && p != processID {
+			return true, "started by an earlier process of this pod (the container restarted), which is gone"
+		}
+		return false, "started by this process"
 	}
 	switch lerr := lookup(ctx, ns, name); {
 	case lerr == nil:

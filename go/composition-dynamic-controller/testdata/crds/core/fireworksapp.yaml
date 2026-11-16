@@ -307,6 +307,9 @@ spec:
                     format: date-time
                   startedBy:
                     type: string
+                  startedByProcess:
+                    type: string
+                    description: "The process that started the operation, distinct across container restarts in the same pod: a record naming this pod but another process belongs to a process that is gone (the container restarted), so its pending release is orphaned."
                   returnedAt:
                     type: string
                     format: date-time
