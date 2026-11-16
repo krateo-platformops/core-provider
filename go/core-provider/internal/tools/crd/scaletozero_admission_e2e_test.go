@@ -41,14 +41,16 @@ func TestScaleToZeroIsRejectedOnRemoteDefinitions(t *testing.T) {
 	// PREMISE: the rule under test is in the generated CRD, so a pass below cannot be a CRD that
 	// simply has no rule (every case would then be accepted, and the reject case would fail, but the
 	// failure message would point at the apiserver rather than at a missing marker).
+	// The REMOTE rule is the one naming both scaleToZero and targetRef: spec also carries pool step 5's
+	// rule that excludes pool with scaleToZero (§5c), which names scaleToZero but is not under test here.
 	found := 0
 	for _, r := range crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].XValidations {
-		if strings.Contains(r.Rule, "scaleToZero") {
+		if strings.Contains(r.Rule, "scaleToZero") && strings.Contains(r.Rule, "targetRef") {
 			found++
 		}
 	}
 	if found != 1 {
-		t.Fatalf("premise: the generated CRD carries %d scaleToZero rules on spec, want 1", found)
+		t.Fatalf("premise: the generated CRD carries %d remote scaleToZero rules on spec, want 1", found)
 	}
 
 	existing := &apiextensionsv1.CustomResourceDefinition{}
