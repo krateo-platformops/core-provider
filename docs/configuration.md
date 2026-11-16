@@ -114,8 +114,11 @@ rule off. It holds pressure less tightly than the old rule did: peak avg10 PSI w
 shape and one limit.
 
 **The chart default stays off.** Diego decided on 2026-11-16, with these numbers in front of him, to
-enable the rule for every composition controller on the Krateo platform. That is set through
-installer's `cdc.env` values, at threshold 50, and is not a change to this chart's default. On
+enable the rule for every composition controller on the Krateo platform. That is set in the
+installer chart's **core-provider subchart values** (the top-level `core-provider:` block, installer
+#997), at threshold 50. It is not a change to this chart's default, and not an Installer CR
+`componentValues` entry: core-provider is a subchart there, not a pinned component, and a key set
+under `componentValues.core-provider` would be pruned silently. On
 krateo-057 no controller ran more than one reconcile at a time over 24h (`in_flight_max <= 1`,
 docs/design/cdc-pooling.md §5b), and the rule's floor is 1, so the enablement is expected to change
 nothing measurable there today. It is measured before and after the roll all the same.
