@@ -141,6 +141,7 @@ func (e *external) retiredUndeployOptions(cr *compositiondefinitionsv1alpha1.Com
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 		ServiceTemplatePath:    ServiceTemplatePath,
 		DynamicClient:          e.dynamic,
+		HubDynamicClient:       e.mgmtDynamic,
 		Spec:                   spec,
 		GVR:                    retired,
 		KubeClient:             e.kube,
