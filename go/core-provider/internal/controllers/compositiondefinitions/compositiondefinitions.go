@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
+	appsv1 "k8s.io/api/apps/v1"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,6 +199,11 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		Watches(&compositiondefinitionsv1alpha1.CompositionDefinition{},
 			handler.EnqueueRequestsFromMapFunc(enqueueSiblingDefinitions(cli)),
 			builder.WithPredicates(siblingHandoverPredicate())).
+		// Wake a definition when its composition controller's rollout changes state, so Ready turns
+		// Available (or Unavailable) when the Deployment does, not at the next poll (controllerwatch.go).
+		Watches(&appsv1.Deployment{},
+			handler.EnqueueRequestsFromMapFunc(enqueueForControllerDeployment(cli)),
+			builder.WithPredicates(controllerDeploymentPredicate())).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
@@ -834,7 +841,7 @@ func statusFieldsFromSpec(cr *compositiondefinitionsv1alpha1.CompositionDefiniti
 // verdict — including Ready=True — is never disturbed.
 func seedReadyIfAbsent(cr *compositiondefinitionsv1alpha1.CompositionDefinition) {
 	if cr.GetCondition(rtv1.TypeReady).Reason == "" {
-		cr.SetConditions(rtv1.Creating())
+		cr.SetConditions(cdreason.Creating.Condition())
 	}
 }
 
@@ -855,7 +862,7 @@ func markUpdatePending(cr *compositiondefinitionsv1alpha1.CompositionDefinition,
 		// rather than whichever drift was first seen (review of #434, nit). Any other Creating, and
 		// every real verdict, is left alone.
 		cur.Reason == rtv1.ReasonCreating && strings.HasPrefix(cur.Message, updatePendingPrefix):
-		cr.SetConditions(rtv1.Creating().WithMessage(updatePendingPrefix + why))
+		cr.SetConditions(cdreason.Creating.WithMessage(updatePendingPrefix + why))
 	}
 }
 
@@ -943,6 +950,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if err != nil {
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting spec schema: %w", err), log)
 	}
+	// A schema no CRD can be generated from is a config error in the chart, and says so on Ready
+	// before anything else runs, a new definition included: without this the CRD-not-found return
+	// below hands it to Create, whose failure the runtime reports as Ready=False/Creating, converging
+	// for ever. Not on a definition being deleted: its teardown must not depend on its chart.
+	if !deleted {
+		if obs, err, stop := schemaContradiction(cr, specSchemaBytes, chartGVK); stop {
+			return obs, err
+		}
+	}
 
 	gvr, err := e.pluralizer.GVKtoGVR(chartGVK)
 	if err != nil {
@@ -986,7 +1002,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	if crd == nil {
 		log.Debug("CRD not found", "gvr", gvr.String())
-		cr.SetConditions(rtv1.Unavailable().
+		// Creating, not Unavailable: the runtime's Create follows in this same pass and creates it, so
+		// this is converging, and Unavailable on a definition means failed (cdreason, Diego 2026-11-16).
+		cr.SetConditions(cdreason.Creating.
 			WithMessage(fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())))
 		return reconciler.ExternalObservation{
 			ResourceExists:   false,
@@ -1001,11 +1019,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if !existVersion {
 		log.Debug("CRD version not found", "gvr", gvr.String())
 		// #484: say WHY when the add is waiting for a vacated version's grace, from the same plan
-		// Update acts on, so the message and the behaviour cannot disagree. Same condition and reason
-		// as before; only the message is specific.
+		// Update acts on, so the message and the behaviour cannot disagree.
 		// #494 likewise: a held version and no room. The plan measures the write Update would make, so
 		// it needs the generated CRD Update would add.
-		msg := fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())
 		generated, gerr := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
 		if gerr != nil {
 			return reconciler.ExternalObservation{}, fmt.Errorf("generating the CRD to plan the served-version add: %w", gerr)
@@ -1014,10 +1030,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		if perr != nil {
 			return reconciler.ExternalObservation{}, perr
 		}
-		if r := plan.refusal(); r != nil {
-			msg = r.Error()
-		}
-		cr.SetConditions(rtv1.Unavailable().WithMessage(msg))
+		servedVersionAddReady(cr, plan, gvr)
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1334,7 +1347,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// populated here. Gating on a GENERATED crd would wedge every definition at Creating forever.
 	if !crdclient.IsReady(crd) {
 		log.Debug("CRD accepted but not yet Established", "gvr", gvr.String())
-		cr.SetConditions(rtv1.Creating().
+		cr.SetConditions(cdreason.Creating.
 			WithMessage(fmt.Sprintf("crd for '%s' is accepted but not yet Established", gvr.String())))
 		// Still up-to-date: there is nothing to DO about this, and returning false would dispatch an
 		// Update that cannot help and would run again on every resync until the apiserver catches up.
@@ -1344,13 +1357,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
-	// Ready and ControllerActive from the controller Deployment's replicas (#393): a declared zero is
-	// Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running controller
-	// is Available with ControllerActive=True/Running. A remote definition keeps plain Available.
-	if ready, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
-		cr.SetConditions(ready, active)
-	} else {
-		cr.SetConditions(rtv1.Available())
+	// Ready and ControllerActive from the controller Deployment (#393, and Diego 2026-11-16): a declared
+	// zero is Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running
+	// controller is Available only once its rollout is complete (controllerReadiness). An unreadable
+	// Deployment is returned as an error, so the runtime reports NotObserved rather than a Ready this
+	// pass could not establish. A remote definition keeps plain Available.
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, gvr)
+	if err := applyControllerConditions(cr, ready, active, ok, readErr, func(c rtv1.Condition) rtv1.Condition { return c }, cdreason.Available.Condition()); err != nil {
+		return reconciler.ExternalObservation{}, err
 	}
 
 	return reconciler.ExternalObservation{
@@ -1656,10 +1670,9 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	// Service DNS / localhost / private IP) resolves on the hub but not on the spoke, so the
 	// composition would silently fail. Surface it as a condition instead of projecting it.
 	if pkgURL := pkgFS.PackageURL(); deploy.IsClusterLocalChartURL(pkgURL) {
-		cond := rtv1.Unavailable().WithMessage(fmt.Sprintf(
+		cond := cdreason.RemoteChartUnreachable.WithMessage(fmt.Sprintf(
 			"chart %q is cluster-local to the management cluster and unreachable from the remote target; "+
 				"publish it to a spoke-reachable registry (public OCI/HTTPS)", pkgURL))
-		cond.Reason = "RemoteChartUnreachable"
 		cr.SetConditions(cond)
 		return fmt.Errorf("remote chart %q is cluster-local and unreachable from the target", pkgURL)
 	}
@@ -1943,11 +1956,27 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if getErr != nil || liveCRD == nil {
 		liveCRD = crd
 	}
+	servedBefore := cr.Status.ApiVersion
 	if err := status.RefreshCompositionDefinitionStatus(cr, liveCRD, gvr, gvk, pkgFS.PackageURL()); err != nil {
 		return fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
+	readyOnVersionSwitch(cr, servedBefore)
 
 	return nil
+}
+
+// readyOnVersionSwitch keeps Ready about what status names (openstack's catch, Diego 2026-11-16).
+// During a chart bump the definition keeps its last Ready while status still names the old version
+// (servedVersionAddReady). When this Update switches status.apiVersion to the new version, that Ready
+// describes the OLD version's controller, and the runtime does not re-observe until the next pass, so
+// a gate reading "apiVersion == X and Ready=True" would pass before X's controller was looked at. So
+// the switch says Creating, and the next Observe, woken by the controller Deployment's own events,
+// decides Available from X's controller.
+func readyOnVersionSwitch(cr *compositiondefinitionsv1alpha1.CompositionDefinition, servedBefore string) {
+	if cr.Status.ApiVersion == servedBefore || servedBefore == "" {
+		return
+	}
+	cr.SetConditions(cdreason.Creating.WithMessage("now serving " + cr.Status.ApiVersion + "; its controller has not been observed yet"))
 }
 
 // deployController is Update's apply of this definition's CRD version and composition controller,
@@ -2097,7 +2126,7 @@ func statusGVR(cr *compositiondefinitionsv1alpha1.CompositionDefinition) (schema
 // the handshake closes instead of hanging. The condition set here names the chart error so the
 // cause is visible on the object without waiting for that.
 func (e *external) observeWithoutChart(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, cause error, log logging.Logger) (reconciler.ExternalObservation, error) {
-	cr.SetConditions(rtv1.Unavailable().
+	cr.SetConditions(cdreason.Unavailable.
 		WithMessage(fmt.Sprintf("chart could not be read: %v", cause)))
 
 	gvr, ok := statusGVR(cr)
@@ -2131,7 +2160,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	log := logging.WithContext(e.log, ctx).WithValues("operation", "delete")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 
-	cr.SetConditions(rtv1.Deleting())
+	cr.SetConditions(cdreason.Deleting.Condition())
 
 	// DELETE NEEDS THE GVK, NOT THE CHART — and it must not wedge when the chart is unreadable
 	// (#314). This used to return on any chart-read failure, BEFORE every guard below, and that

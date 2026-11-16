@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"sort"
 	"strings"
 	"time"
@@ -307,4 +308,26 @@ func settleAddWait(log logging.Logger, err error) (stop bool, out error) {
 		return true, nil
 	}
 	return false, err
+}
+
+// servedVersionAddReady sets the Ready a pending add of gvr's version implies. Only a REFUSED add is a
+// failure: a held version and no room (#494), which no timer clears, is Ready=False/Unavailable naming
+// the holders. Every other add is a chart-version bump in progress while the old version keeps
+// serving, one Update makes now or one waiting out a vacated version's prune grace (#484, bounded by
+// servedVersionPruneGrace). Those follow the #395 rule, markUpdatePending: keep the last real Ready,
+// or say Creating "update pending" when there is none (Diego, 2026-11-16).
+//
+// This used to write Unavailable for all three, and a parent composition's rollup reads Unavailable as
+// a FAILED child. installer's umbrella composition renders the definitions, so every chart bump put a
+// failed child under it for up to the poll interval.
+func servedVersionAddReady(cr *compositiondefinitionsv1alpha1.CompositionDefinition, plan servedVersionAddPlan, gvr schema.GroupVersionResource) {
+	if plan.tooLarge != nil {
+		cr.SetConditions(cdreason.Unavailable.WithMessage(plan.tooLarge.Error()))
+		return
+	}
+	pending := fmt.Sprintf("adding served version %s to crd for %q", gvr.Version, gvr.GroupResource().String())
+	if plan.wait != nil {
+		pending = plan.wait.Error()
+	}
+	markUpdatePending(cr, pending)
 }
