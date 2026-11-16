@@ -121,6 +121,10 @@
           "type": "string",
           "format": "date-time",
           "description": "When the controller's call for this operation RETURNED with an error, leaving helm's lock behind (#497). Written only on that path. A record carrying it describes an operation that is provably no longer in flight, so the next controller clears the lock at once instead of waiting the pending grace. Absent while the operation runs, and on a record from a controller that predates it (then the grace applies, as before)."
+        },
+        "startedByProcess": {
+          "type": "string",
+          "description": "The process that started the operation, distinct across container restarts in the same pod: a record naming this pod but another process belongs to a process that is gone (the container restarted), so its pending release is orphaned."
         }
       }
     }
