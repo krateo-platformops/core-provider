@@ -27,6 +27,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NS = "load"
+# #313 (core-provider 2.13.84+): a local definition's controller runs in the management namespace,
+# not the definition's. Compositions, sentinels and the CompositionDefinition stay in NS.
+CTRL_NS = "krateo-system"
 PLURAL = "loadcharts"
 CDC = "loadcharts-v0-2-0-controller"
 ENV_CM = "loadcharts-v0-2-0-configmap"
@@ -82,7 +85,7 @@ def sentinels(marker):
 
 
 def cdc_pod():
-    pods = json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"]
+    pods = json.loads(kubectl("-n", CTRL_NS, "get", "pods", "-o", "json"))["items"]
     live = [p for p in pods if p["metadata"]["name"].startswith(CDC) and "deletionTimestamp" not in p["metadata"]]
     if len(live) != 1:
         sys.exit(f"want one cdc pod, found {[p['metadata']['name'] for p in live]}")
@@ -109,8 +112,8 @@ def set_arm(limit, threshold):
             "OTEL_ENABLED": "true", "OTEL_EXPORT_INTERVAL": "5s"}
     deadline = time.time() + 300
     while True:
-        data = json.loads(kubectl("-n", NS, "get", "cm", ENV_CM, "-o", "json")).get("data", {})
-        dep = json.loads(kubectl("-n", NS, "get", "deploy", CDC, "-o", "json"))
+        data = json.loads(kubectl("-n", CTRL_NS, "get", "cm", ENV_CM, "-o", "json")).get("data", {})
+        dep = json.loads(kubectl("-n", CTRL_NS, "get", "deploy", CDC, "-o", "json"))
         got = dep["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"]
         conds = json.loads(kubectl("-n", NS, "get", "compositiondefinition", "loadchart", "-o", "json"))["status"]["conditions"]
         synced = next((c for c in conds if c["type"] == "Synced"), {})
@@ -122,8 +125,8 @@ def set_arm(limit, threshold):
         time.sleep(5)
 
     # The env arrives by ConfigMap, which a running pod does not re-read.
-    kubectl("-n", NS, "rollout", "restart", f"deploy/{CDC}")
-    kubectl("-n", NS, "rollout", "status", f"deploy/{CDC}", "--timeout=300s")
+    kubectl("-n", CTRL_NS, "rollout", "restart", f"deploy/{CDC}")
+    kubectl("-n", CTRL_NS, "rollout", "status", f"deploy/{CDC}", "--timeout=300s")
     settle("the cdc Deployment, one pod, no rollout", cdc_stable)
 
 
@@ -148,9 +151,9 @@ def one_core_provider():
 
 
 def cdc_stable():
-    d = json.loads(kubectl("-n", NS, "get", "deploy", CDC, "-o", "json"))
+    d = json.loads(kubectl("-n", CTRL_NS, "get", "deploy", CDC, "-o", "json"))
     st, want = d.get("status", {}), d["spec"].get("replicas", 1)
-    pods = [p for p in json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"] if p["metadata"]["name"].startswith(CDC)]
+    pods = [p for p in json.loads(kubectl("-n", CTRL_NS, "get", "pods", "-o", "json"))["items"] if p["metadata"]["name"].startswith(CDC)]
     return (st.get("observedGeneration") == d["metadata"]["generation"] and st.get("updatedReplicas") == want
             and st.get("readyReplicas") == want and st.get("replicas") == want and len(pods) == want)
 
@@ -226,7 +229,7 @@ def wait_no_pods():
     """The backlog must arrive with no controller alive, or the old pod starts working it."""
     deadline = time.time() + 180
     while time.time() < deadline:
-        pods = json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"]
+        pods = json.loads(kubectl("-n", CTRL_NS, "get", "pods", "-o", "json"))["items"]
         if not [p for p in pods if p["metadata"]["name"].startswith(CDC)]:
             return
         time.sleep(1)
@@ -237,7 +240,7 @@ def wait_ready_pod():
     """The new controller, once Ready. Polls rather than waits on a name that does not exist yet."""
     deadline = time.time() + 300
     while time.time() < deadline:
-        pods = json.loads(kubectl("-n", NS, "get", "pods", "-o", "json"))["items"]
+        pods = json.loads(kubectl("-n", CTRL_NS, "get", "pods", "-o", "json"))["items"]
         for p in pods:
             if not p["metadata"]["name"].startswith(CDC) or "deletionTimestamp" in p["metadata"]:
                 continue
@@ -255,10 +258,10 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
         # restores a Deployment scaled by hand, so it has to stop first or the pod comes back.
         kubectl("-n", "krateo-system", "scale", "deploy/core-provider", "--replicas=0")
         kubectl("-n", "krateo-system", "rollout", "status", "deploy/core-provider", "--timeout=120s")
-        kubectl("-n", NS, "scale", f"deploy/{CDC}", "--replicas=0")
+        kubectl("-n", CTRL_NS, "scale", f"deploy/{CDC}", "--replicas=0")
         wait_no_pods()
         apply_all(n, marker, count, payload)
-        kubectl("-n", NS, "scale", f"deploy/{CDC}", "--replicas=1")
+        kubectl("-n", CTRL_NS, "scale", f"deploy/{CDC}", "--replicas=1")
         pod = wait_ready_pod()
     else:
         pod = cdc_pod()
@@ -303,7 +306,7 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
     if threshold != "off" and not locals_:
         sys.exit(f"an on-arm collected no `local` samples: the collector is not receiving ({limit}, {threshold})")
     live = cdc_pod()
-    unhealthy = json.loads(kubectl("-n", NS, "get", "events", "--field-selector",
+    unhealthy = json.loads(kubectl("-n", CTRL_NS, "get", "events", "--field-selector",
                                    f"involvedObject.name={name},reason=Unhealthy", "-o", "json"))["items"]
     result = {
         "mode": mode, "limit": limit, "threshold": threshold, "run": run,
