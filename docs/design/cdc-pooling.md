@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: "Design: an opt-in controller pool for the CDC, to reduce pod count"
-description: Reopens #181's design with pod count as the goal - a named, opt-in pool for composition controllers, built in #181's step order with steps 5-6 unfunded.
+description: Reopens #181's design with pod count as the goal - a named, opt-in pool for composition controllers, built in #181's step order; step 5 funded 2026-11-16 (pools of about 10), step 6 unfunded.
 resource: ghcr.io/krateo-platformops/composition-dynamic-controller
 tags: [design, scaling, cdc, pool]
 status: approved
@@ -10,7 +10,7 @@ timestamp: 2026-11-08T00:00:00Z
 
 # Design: an opt-in controller pool for the CDC, to reduce pod count
 
-**Status:** design approved (Diego, 2026-11-08); steps 1–3 cut, step 4 next, steps 5–6 **unfunded**.
+**Status:** design approved (Diego, 2026-11-08); steps 1–4 done; step 5 **funded** (Diego, 2026-11-16, pools of about 10; §5c); step 6 **unfunded**.
 **Supersedes:** the closed design in PR #181, whose text argued from memory. This document keeps its
 design and its step numbering and replaces its premise.
 
@@ -108,7 +108,7 @@ When a definition stops naming it, it cancels that controller.
 | 2 | **reconcile-time ownership guard**, inert: one reconciler per Kind × version, refusing a second | no | **done**: a Lease per Kind × version (Diego, 2026-11-14), below |
 | 3 | **per-controller telemetry**: GVR as a per-controller metric/span/log attribute; metrics keyed per member | no | **done**: `krateo.composition.gvr` on every signal (below) |
 | 4 | cdc **multi-GVR manager**, shipped hosting exactly one GVR: a pure refactor, proven by byte-identical rendered Deployments | no | **done**: `internal/manager` (below) |
-| 5 | pool object set, membership watch, ref-counted lifecycle | **yes** | **unfunded** |
+| 5 | pool object set, membership watch, ref-counted lifecycle | **yes** | **funded** (Diego, 2026-11-16; design §5c) |
 | 6 | migrate the idle cohort (page/portal and CRD-only Kinds), measure, stop | **yes** | **unfunded** |
 
 Steps 1–3 add no failure domain and are each worth having alone. Step 4 is most of the work, and it
@@ -228,6 +228,100 @@ cheaper lever.
 - The runtime's reconcile-duration histogram uses millisecond-style default bucket bounds on a
   seconds metric, so its p95 is unusable here (reported by observability; an unstructured-runtime
   fix).
+
+## 5c. Step 5 design (funded by Diego 2026-11-16: pools of about 10)
+
+Step 5 is the first step that removes pods. Everything below is opt-in. A definition without
+`spec.controller.pool` renders exactly what it renders today. Step 6, moving the idle cohort on
+krateo-057, is a separate roll that waits for Diego's go.
+
+### Scope
+Local definitions only, for the same reason as `scaleToZero`. A remote definition's controller runs
+on its spoke, where a pool would span clusters. A CEL rule on `spec.controller` refuses `pool` on a
+remote definition. `pool` and `scaleToZero` are mutually exclusive. A pool's process is shared, so
+one member scaling to zero would stop the others.
+
+### Objects
+A pool `<p>` lives in the management namespace (`controllerNamespace`, krateo-system), beside the
+dedicated controllers it replaces:
+
+| object | name | holds |
+|---|---|---|
+| Deployment | `cdc-pool-<p>` | one cdc process in pool mode |
+| ServiceAccount | `cdc-pool-<p>` | the subject of every member's derived RBAC, hence the union (§3.1) |
+| ConfigMap | `cdc-pool-<p>-configmap` | process-level env: pool-wide workers, OTEL, saturation |
+| ConfigMap | `cdc-pool-<p>-members` | the membership index: one key per member, value = its env ConfigMap name |
+| Service | `cdc-pool-<p>` | metrics, when enabled |
+
+Each member keeps its per-Kind × version objects under today's names: its env ConfigMap
+`<resource>-<version>-configmap`, its derived RBAC, its ownership Lease grant and its RESTAction RBAC.
+Only their subject changes, from the member's ServiceAccount to the pool's. A member gets **no**
+Deployment, ServiceAccount or Service of its own.
+
+### Membership: the pool watches an index, it is not told (refines §3.2)
+§3.2 had the pool watch CompositionDefinitions. Built that way, the cdc would have to re-derive each
+member's configuration (chart inspection, status projections, apiRef), which core-provider already
+derives and renders as the member's env ConfigMap. So the pool consumes core-provider's output, not
+its input:
+
+- core-provider writes `cdc-pool-<p>-members` as a pure function of the live local definitions
+  naming `<p>`, recomputed on every member reconcile. There is no increment or decrement to drift.
+- The pool **watches** that one ConfigMap by name, and reads each member's env ConfigMap. A key
+  added starts that member. A key removed stops it (drain, then release its Lease). A member's env
+  ConfigMap changing restarts that member only. Nothing restarts the process.
+- **Least privilege:** the pool's Role grants `get`/`watch` on its index and `get` on each member's
+  env ConfigMap, by `resourceNames`. Watching by label would need a namespace-wide ConfigMap read in
+  krateo-system, which RBAC cannot narrow by label. core-provider rewrites the Role as members join
+  and leave.
+
+### Lifecycle, ref-counted by recomputation
+On each reconcile of a definition naming `<p>`, core-provider applies the pool objects (idempotent),
+labels and binds the member, and recomputes the index. A definition that stops naming `<p>`, or is
+deleted, is removed from the index. When the recomputed set is empty, the **last leaver** deletes
+the pool's objects. A failed list removes nothing (the rule the teardown paths already follow).
+
+### Cutover, stop-before-start, by step 2's Lease
+Joining a pool and leaving a dedicated controller are one reconcile. core-provider adds the member
+to the index and deletes its dedicated Deployment. The pool's member starts its informer at once
+(so readiness keeps meaning "can see its resource"), but its workers start only on the Lease. The
+dedicated controller releases the Lease after its drain. There is never a second writer, and
+nothing else needs to coordinate. Leaving a pool is the mirror image.
+
+### Failure isolation, which step 4 left provisional
+Step 4 stops the whole process when a member fails, a lost Lease included. In a pool that would
+turn one member's fault into an outage for all of them (§3.3), so pool mode changes it:
+- A member that fails, or loses its Lease, **is stopped and restarted alone**, with backoff. The
+  others keep running.
+- Only process-level failures stop the process: the REST config, the metrics or health server,
+  the shared informer cache.
+- `/readyz` stays "every member has synced". `/healthz` stays process-only (#333). A member that keeps
+  failing is reported on its own definition as `ControllerActive=False`, with a reason naming the
+  member, so the pool's pod is not killed for it.
+
+### Sizing and workers
+Workers are capped **pool-wide**: the pool's `workers` is the process total, and no member takes
+more than its own `spec.controller.workers`. The default pool request comes from §5b: the members'
+summed peak × 1.5, so ~660 MiB for 10 idle members, against 1,280 MiB requested by ten dedicated
+controllers today.
+
+### How step 5 is proven
+- **Unit:** the index is a pure function of the definitions (join, leave, rename, delete, a failed
+  list removes nothing); the Role's `resourceNames` track the index; the CEL rules refuse a remote
+  pool and `pool` with `scaleToZero`.
+- **Envtest:** a pool hosting two members; a member added and removed at runtime without the process
+  restarting; a member that loses its Lease is restarted alone while the other keeps reconciling.
+- **Integration (kind):** a definition moves dedicated → pool → dedicated, and stop-before-start
+  holds (sampled, as #313's migration test does). The last leaver deletes the pool.
+- **Golden:** a definition without `pool` renders byte-identical objects (step 1's test, kept).
+
+### Build order
+1. core-provider: the pool objects, the index, member RBAC bound to the pool's ServiceAccount,
+   dedicated cutover, CEL rules. Inert until a definition sets `pool`.
+2. cdc: pool mode (the index watch; members added, removed and restarted at runtime; per-member
+   failure isolation).
+3. Envtest and integration, then a release.
+
+Step 6, the 057 roll, follows on Diego's go.
 
 ## 6. Not in scope
 
