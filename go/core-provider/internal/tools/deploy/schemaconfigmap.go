@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -106,4 +107,80 @@ func applySchemaConfigMap(ctx context.Context, opts DeployOptions, controllerObj
 		}
 	}
 	return cm, nil
+}
+
+// THE SAME RULE FOR EVERY DEFINITION (Diego, 2026-11-16: "every CD's namespace"). A follower, a
+// definition whose Kind+version's controller another definition owns, never runs Deploy, so the
+// copy Deploy writes lands only in the OWNER's namespace and a tenant reading its own follower's
+// namespace found nothing. The helpers below let the controller write, check and remove a
+// definition's own copy outside Deploy. Equal chart references give the same Kind+version, and so
+// the same schema, so a follower's copy is the owner's content under the follower's namespace.
+
+// DefinitionSchemaConfigMapNN is where a definition in cdNamespace publishes gvr's schema.
+func DefinitionSchemaConfigMapNN(cdNamespace string, gvr schema.GroupVersionResource) types.NamespacedName {
+	return schemaConfigMapNN(cdNamespace, types.NamespacedName{Name: resourceNamer(gvr.Resource, gvr.Version)})
+}
+
+// ApplyDefinitionSchemaConfigMap writes a definition's own schema ConfigMap, on the hub.
+func ApplyDefinitionSchemaConfigMap(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace, templatePath string, schemaBytes []byte) error {
+	if cdNamespace == "" {
+		return fmt.Errorf("writing the JSON schema ConfigMap: the CompositionDefinition's namespace is empty")
+	}
+	cm, err := renderJSONSchemaConfigMap(gvr, DefinitionSchemaConfigMapNN(cdNamespace, gvr), templatePath, schemaBytes)
+	if err != nil {
+		return err
+	}
+	if _, err := kubecli.Apply(ctx, hub, configMapGVR, &cm, kubecli.ApplyOptions{}); err != nil {
+		return fmt.Errorf("error applying ConfigMap for JSON schema: %w", err)
+	}
+	return nil
+}
+
+// DefinitionSchemaConfigMapCurrent reports whether the definition's own copy exists with exactly
+// the data this schema renders, and if not, why. A read that fails is an error, never "current".
+func DefinitionSchemaConfigMapCurrent(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace, templatePath string, schemaBytes []byte) (bool, string, error) {
+	nn := DefinitionSchemaConfigMapNN(cdNamespace, gvr)
+	want, err := renderJSONSchemaConfigMap(gvr, nn, templatePath, schemaBytes)
+	if err != nil {
+		return false, "", err
+	}
+	got, err := hub.Resource(configMapGVR).Namespace(nn.Namespace).Get(ctx, nn.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, fmt.Sprintf("its JSON schema ConfigMap %s is missing", nn), nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("reading the JSON schema ConfigMap %s: %w", nn, err)
+	}
+	data, _, err := unstructured.NestedStringMap(got.Object, "data")
+	if err != nil {
+		return false, "", fmt.Errorf("reading the JSON schema ConfigMap %s: %w", nn, err)
+	}
+	if !reflect.DeepEqual(data, want.Data) {
+		return false, fmt.Sprintf("its JSON schema ConfigMap %s differs from the chart's schema", nn), nil
+	}
+	return true, "", nil
+}
+
+// DefinitionSchemaConfigMapExists reports whether a definition's own copy exists. A read that
+// fails is an error, never "absent".
+func DefinitionSchemaConfigMapExists(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace string) (bool, error) {
+	nn := DefinitionSchemaConfigMapNN(cdNamespace, gvr)
+	_, err := hub.Resource(configMapGVR).Namespace(nn.Namespace).Get(ctx, nn.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading the JSON schema ConfigMap %s: %w", nn, err)
+	}
+	return true, nil
+}
+
+// RemoveDefinitionSchemaConfigMap removes a definition's own copy by its exact name; already gone is
+// success. The caller decides that no other definition in that namespace publishes the same object.
+func RemoveDefinitionSchemaConfigMap(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace string) error {
+	nn := DefinitionSchemaConfigMapNN(cdNamespace, gvr)
+	if err := hub.Resource(configMapGVR).Namespace(nn.Namespace).Delete(ctx, nn.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("removing the JSON schema ConfigMap %s: %w", nn, err)
+	}
+	return nil
 }

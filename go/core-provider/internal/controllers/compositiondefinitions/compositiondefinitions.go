@@ -1085,7 +1085,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			// #362: the owner generates the CRD and reports on it; a follower has no verdict of its own.
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(specSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
-			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner)
+			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner, specSchemaBytes)
 		}
 		// #387: the owner now, so a follower's Ready message no longer describes this definition.
 		if c, ok := readyOnBecomingOwner(cr.GetCondition(rtv1.TypeReady), gvr); ok {
@@ -1765,6 +1765,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	var gvr schema.GroupVersionResource
 	if owner != nil {
 		gvr, err = e.yieldController(ctx, cr, gvk, owner, log)
+		// A follower publishes the schema in its own namespace too (definitionschema.go): only the
+		// owner runs Deploy, which writes the owner's copy.
+		if err == nil {
+			err = e.publishOwnSchema(ctx, cr, gvr, specSchemaBytes)
+		}
 	} else {
 		gvr, err = e.deployController(ctx, cr, gvk, crd, specSchemaBytes, log)
 	}
@@ -2339,6 +2344,11 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 		if successor != nil {
 			if err := e.handOverController(ctx, cr, cr.Spec.Chart.DeepCopy(), gvr, successor, log); err != nil {
+				return err
+			}
+			// A hand-over returns before Undeploy, which is where an owner's copy is removed, so the
+			// copy this definition published in its own namespace is removed here (definitionschema.go).
+			if err := e.removeOwnSchema(ctx, cr, gvk, gvr, log); err != nil {
 				return err
 			}
 			return e.teardownRemoteSeedIfNeeded(ctx, cr)
