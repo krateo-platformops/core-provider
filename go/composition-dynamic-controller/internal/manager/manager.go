@@ -96,6 +96,11 @@ type Member struct {
 	// projections and apiRef resolver (nil: none).
 	StatusDataTemplate []statusprojection.Mapping
 	APIResolver        composition.APIResolver
+	// Workers and ResyncInterval override the process's for this member; zero means the process
+	// value. A dedicated controller leaves them zero (its flags set the process's); a pool member
+	// takes them from its own configuration (docs/design/cdc-pooling.md §5c).
+	Workers        int
+	ResyncInterval time.Duration
 }
 
 // Built is a member's controller, ready to run.
@@ -169,7 +174,7 @@ func (p Process) build(ctx context.Context, m Member) (*controller.Controller, e
 	opts := []builder.FuncOption{
 		builder.WithLogger(log),
 		builder.WithNamespace(p.Namespace),
-		builder.WithResyncInterval(p.ResyncInterval),
+		builder.WithResyncInterval(m.resync(p)),
 		builder.WithGlobalRateLimiter(workqueue.NewExponentialTimedFailureRateLimiter[any](p.MinErrorRetryInterval, p.MaxErrorRetryInterval)),
 		builder.WithMaxRetries(p.MaxErrorRetries),
 		builder.WithGracefulShutdownTimeout(p.GracefulShutdownTimeout),
@@ -242,7 +247,7 @@ func Run(ctx context.Context, p Process, built []Built) error {
 	errs := make(chan error, len(built))
 	for _, b := range built {
 		go func(b Built) {
-			err := b.Controller.Run(runCtx, p.Workers)
+			err := b.Controller.Run(runCtx, b.Member.workers(p))
 			if err != nil {
 				err = fmt.Errorf("%s: %w", b.Member.GVR, err)
 			}
@@ -257,4 +262,20 @@ func Run(ctx context.Context, p Process, built []Built) error {
 		}
 	}
 	return first
+}
+
+// workers is the member's worker count: its own when set, else the process's.
+func (m Member) workers(p Process) int {
+	if m.Workers > 0 {
+		return m.Workers
+	}
+	return p.Workers
+}
+
+// resync is the member's resync interval: its own when set, else the process's.
+func (m Member) resync(p Process) time.Duration {
+	if m.ResyncInterval > 0 {
+		return m.ResyncInterval
+	}
+	return p.ResyncInterval
 }
