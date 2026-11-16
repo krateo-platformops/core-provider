@@ -560,12 +560,30 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 const followerMarker = " is run by CompositionDefinition "
 
 func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
-	return cdreason.Available.WithMessage("composition controller for " + gvr.String() + followerMarker + owner.Namespace + "/" + owner.Name)
+	return cdreason.Available.WithMessage(followerRole(owner, gvr))
 }
 
-// isFollowerCondition reports whether c is the Ready condition observeFollower wrote.
+func followerRole(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) string {
+	return "composition controller for " + gvr.String() + followerMarker + owner.Namespace + "/" + owner.Name
+}
+
+// followerReady is a follower's Ready: the SHARED controller's readiness, as the owner reports it
+// (controllerReadiness), naming the owner. A follower is Available only when the controller it runs on
+// is (Diego, 2026-11-16: Available means the controller is up), and otherwise carries the same
+// Creating or Unavailable, with the role appended, so #387 still recognises it.
+func followerReady(controller rtv1.Condition, owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
+	if cdreason.Available.Is(controller) {
+		return followerCondition(owner, gvr)
+	}
+	c := controller
+	c.Message = controller.Message + "; " + followerRole(owner, gvr)
+	return c
+}
+
+// isFollowerCondition reports whether c is a Ready condition observeFollower wrote, whatever the
+// shared controller's state was.
 func isFollowerCondition(c rtv1.Condition) bool {
-	return c.Type == rtv1.TypeReady && c.Reason == rtv1.ReasonAvailable && strings.Contains(c.Message, followerMarker)
+	return c.Type == rtv1.TypeReady && strings.Contains(c.Message, followerMarker)
 }
 
 // readyOnBecomingOwner is what Ready must say when Observe finds this definition owns the controller
@@ -648,11 +666,13 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 		return reconciler.ExternalObservation{}, fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
 	cr.Status.Digest = ""
-	cr.SetConditions(followerCondition(owner, gvr))
-	// A follower reports ControllerActive for the SHARED controller it runs on (#393). Its Ready stays
-	// followerCondition: #387 reads the follower marker in that message.
-	if _, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
-		cr.SetConditions(active)
+	// A follower reports the SHARED controller it runs on (#393): ControllerActive, and Ready through
+	// followerReady, which keeps the follower marker #387 reads. An unreadable Deployment is returned,
+	// as on the owner's path: it cannot vouch for Available.
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, gvr)
+	asFollower := func(c rtv1.Condition) rtv1.Condition { return followerReady(c, owner, gvr) }
+	if err := applyControllerConditions(cr, ready, active, ok, readErr, asFollower, followerCondition(owner, gvr)); err != nil {
+		return reconciler.ExternalObservation{}, err
 	}
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }

@@ -32,14 +32,14 @@ listed here.
 
 | condition | reason | status | writer | parent verdict | written by |
 |---|---|---|---|---|---|
-| Ready | `Available` | True | core-provider | healthy | Observe: the CRD serves the version and the controller runs; on a follower, the message names the definition that owns the controller |
+| Ready | `Available` | True | core-provider | healthy | Observe: the CRD serves the version and is Established, and the controller Deployment has rolled out and is available for its current generation (Diego, 2026-11-16); on a follower, the shared controller, and the message names the definition that owns it |
 | Ready | `ScaledToZero` | True | core-provider | healthy | Observe: the controller is at 0 replicas and the definition opted into scale-to-zero (#393); it wakes on the first instance |
-| Ready | `Creating` | False | core-provider | converging | Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387) |
-| Ready | `Unavailable` | False | core-provider | failed | Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, or adding the served version is refused (a held version, no room); the message says which |
+| Ready | `Creating` | False | core-provider | converging | Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, the controller Deployment is absent or rolling out, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387). Update: the pass that switches status to a new version, until Observe looks at its controller |
+| Ready | `Unavailable` | False | core-provider | failed | Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, or adding the served version is refused (a held version, no room); the message says which |
 | Ready | `RemoteChartUnreachable` | False | core-provider | failed | remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it |
 | Ready | `SchemaDefaultContradiction` | False | core-provider | failed | Observe: a `default` in the chart's values.schema.json that crdgen carries into the CRD fails its own subschema, so no CRD is generated; the message names each JSON pointer (plumbing#205). Nothing is applied, and a definition that worked before keeps serving its last CRD |
 | Ready | `Deleting` | False | core-provider | converging | Delete: the definition is being deleted |
-| Ready | `NotObserved` | Unknown | provider-runtime | unevaluated (rolls up as healthy) | Connect or Observe returned an error not marked ReadyAssessed; the error is on Synced |
+| Ready | `NotObserved` | Unknown | provider-runtime | unevaluated (rolls up as healthy) | Connect or Observe returned an error not marked ReadyAssessed (for example, the controller Deployment could not be read); the error is on Synced |
 | Ready | `Creating` | False | provider-runtime | converging | the create path: written with every Create outcome, success or failure (the error, if any, is on Synced) |
 | Ready | `Deleting` | False | provider-runtime | converging | the delete path, and an Observe error on a definition being deleted |
 | Synced | `ReconcileSuccess` | True | provider-runtime | — | the pass completed |

@@ -119,13 +119,13 @@ func (r Reason) Is(c rtv1.Condition) bool {
 // The Ready reasons core-provider writes.
 var (
 	Available = ready(rtv1.ReasonAvailable, metav1.ConditionTrue, WriterCoreProvider, Healthy,
-		"Observe: the CRD serves the version and the controller runs; on a follower, the message names the definition that owns the controller")
+		"Observe: the CRD serves the version and is Established, and the controller Deployment has rolled out and is available for its current generation (Diego, 2026-11-16); on a follower, the shared controller, and the message names the definition that owns it")
 	ScaledToZero = ready(conditions.ReasonScaledToZero, metav1.ConditionTrue, WriterCoreProvider, Healthy,
 		"Observe: the controller is at 0 replicas and the definition opted into scale-to-zero (#393); it wakes on the first instance")
 	Creating = ready(rtv1.ReasonCreating, metav1.ConditionFalse, WriterCoreProvider, Converging,
-		"Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387)")
+		"Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, the controller Deployment is absent or rolling out, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387). Update: the pass that switches status to a new version, until Observe looks at its controller")
 	Unavailable = ready(rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider, Failed,
-		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, or adding the served version is refused (a held version, no room); the message says which")
+		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, or adding the served version is refused (a held version, no room); the message says which")
 	RemoteChartUnreachable = ready(ReasonRemoteChartUnreachable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it")
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
@@ -138,7 +138,7 @@ var (
 // must not write them itself.
 var (
 	runtimeNotObserved = ready(rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterRuntime, Unevaluated,
-		"Connect or Observe returned an error not marked ReadyAssessed; the error is on Synced")
+		"Connect or Observe returned an error not marked ReadyAssessed (for example, the controller Deployment could not be read); the error is on Synced")
 	runtimeCreating = ready(rtv1.ReasonCreating, metav1.ConditionFalse, WriterRuntime, Converging,
 		"the create path: written with every Create outcome, success or failure (the error, if any, is on Synced)")
 	runtimeDeleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterRuntime, Converging,

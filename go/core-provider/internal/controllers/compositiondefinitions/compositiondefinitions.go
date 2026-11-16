@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
+	appsv1 "k8s.io/api/apps/v1"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,6 +199,11 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		Watches(&compositiondefinitionsv1alpha1.CompositionDefinition{},
 			handler.EnqueueRequestsFromMapFunc(enqueueSiblingDefinitions(cli)),
 			builder.WithPredicates(siblingHandoverPredicate())).
+		// Wake a definition when its composition controller's rollout changes state, so Ready turns
+		// Available (or Unavailable) when the Deployment does, not at the next poll (controllerwatch.go).
+		Watches(&appsv1.Deployment{},
+			handler.EnqueueRequestsFromMapFunc(enqueueForControllerDeployment(cli)),
+			builder.WithPredicates(controllerDeploymentPredicate())).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
@@ -1351,13 +1357,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, nil
 	}
 
-	// Ready and ControllerActive from the controller Deployment's replicas (#393): a declared zero is
-	// Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running controller
-	// is Available with ControllerActive=True/Running. A remote definition keeps plain Available.
-	if ready, active, ok := e.controllerConditions(ctx, cr, gvr); ok {
-		cr.SetConditions(ready, active)
-	} else {
-		cr.SetConditions(cdreason.Available.Condition())
+	// Ready and ControllerActive from the controller Deployment (#393, and Diego 2026-11-16): a declared
+	// zero is Ready=True/ScaledToZero, an undeclared one is Ready=False/Unavailable, and a running
+	// controller is Available only once its rollout is complete (controllerReadiness). An unreadable
+	// Deployment is returned as an error, so the runtime reports NotObserved rather than a Ready this
+	// pass could not establish. A remote definition keeps plain Available.
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, gvr)
+	if err := applyControllerConditions(cr, ready, active, ok, readErr, func(c rtv1.Condition) rtv1.Condition { return c }, cdreason.Available.Condition()); err != nil {
+		return reconciler.ExternalObservation{}, err
 	}
 
 	return reconciler.ExternalObservation{
@@ -1949,11 +1956,27 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if getErr != nil || liveCRD == nil {
 		liveCRD = crd
 	}
+	servedBefore := cr.Status.ApiVersion
 	if err := status.RefreshCompositionDefinitionStatus(cr, liveCRD, gvr, gvk, pkgFS.PackageURL()); err != nil {
 		return fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
+	readyOnVersionSwitch(cr, servedBefore)
 
 	return nil
+}
+
+// readyOnVersionSwitch keeps Ready about what status names (openstack's catch, Diego 2026-11-16).
+// During a chart bump the definition keeps its last Ready while status still names the old version
+// (servedVersionAddReady). When this Update switches status.apiVersion to the new version, that Ready
+// describes the OLD version's controller, and the runtime does not re-observe until the next pass, so
+// a gate reading "apiVersion == X and Ready=True" would pass before X's controller was looked at. So
+// the switch says Creating, and the next Observe, woken by the controller Deployment's own events,
+// decides Available from X's controller.
+func readyOnVersionSwitch(cr *compositiondefinitionsv1alpha1.CompositionDefinition, servedBefore string) {
+	if cr.Status.ApiVersion == servedBefore || servedBefore == "" {
+		return
+	}
+	cr.SetConditions(cdreason.Creating.WithMessage("now serving " + cr.Status.ApiVersion + "; its controller has not been observed yet"))
 }
 
 // deployController is Update's apply of this definition's CRD version and composition controller,
