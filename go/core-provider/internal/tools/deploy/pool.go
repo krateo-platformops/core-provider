@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -52,20 +53,39 @@ func MemberEnvConfigMapName(gvr schema.GroupVersionResource) string {
 	return getCDCConfigmapNN(types.NamespacedName{Name: MemberKey(gvr)}).Name
 }
 
-// RenderPoolIndex is the membership index: one key per member (MemberKey), valued with that
-// member's env ConfigMap name. It is a pure function of the members, so rewriting it on every member
+// PoolMember is one member as the index records it: its Kind x version, and the data of its env
+// ConfigMap as rendered, whose checksum the index carries.
+type PoolMember struct {
+	GVR       schema.GroupVersionResource
+	EnvConfig map[string]string
+}
+
+// PoolIndexEntry is one member's value in the index, read by the cdc's pool (manager.IndexEntry):
+// the member's env ConfigMap, and that ConfigMap's checksum, so a change to a member's configuration
+// changes the index and the pool restarts exactly that member.
+type PoolIndexEntry struct {
+	ConfigMap string `json:"configMap"`
+	Checksum  string `json:"checksum"`
+}
+
+// RenderPoolIndex is the membership index: one key per member (MemberKey), valued with its
+// PoolIndexEntry as JSON. It is a pure function of the members, so rewriting it on every member
 // reconcile cannot drift, and an empty pool renders an empty index (the caller deletes the pool).
-func RenderPoolIndex(pool, namespace string, members []schema.GroupVersionResource) corev1.ConfigMap {
+func RenderPoolIndex(pool, namespace string, members []PoolMember) (corev1.ConfigMap, error) {
 	names := PoolNames(pool)
 	data := make(map[string]string, len(members))
-	for _, gvr := range members {
-		data[MemberKey(gvr)] = MemberEnvConfigMapName(gvr)
+	for _, m := range members {
+		b, err := json.Marshal(PoolIndexEntry{ConfigMap: MemberEnvConfigMapName(m.GVR), Checksum: configChecksum(m.EnvConfig)})
+		if err != nil {
+			return corev1.ConfigMap{}, fmt.Errorf("encoding the index entry for %s: %w", m.GVR, err)
+		}
+		data[MemberKey(m.GVR)] = string(b)
 	}
 	return corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: names.Index, Namespace: namespace, Labels: map[string]string{PoolLabel: pool}},
 		Data:       data,
-	}
+	}, nil
 }
 
 // PoolIndexMembers reads an index back into its member keys, sorted.

@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,25 +34,35 @@ func TestValidatePoolName(t *testing.T) {
 }
 
 // The index names each member by its dedicated object stem and points at its env ConfigMap, the
-// names a dedicated controller already uses, so the pool reads exactly what core-provider renders.
+// names a dedicated controller already uses, with that ConfigMap's checksum, so the pool reads
+// exactly what core-provider renders and restarts a member whose configuration changed.
 func TestRenderPoolIndex(t *testing.T) {
 	portals := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-8-129", Resource: "portals"}
 	pages := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-8-129", Resource: "searchpages"}
-	cm := RenderPoolIndex("pages", "krateo-system", []schema.GroupVersionResource{portals, pages})
+	envA := map[string]string{"COMPOSITION_CONTROLLER_RESOURCE": "portals"}
+	cm, err := RenderPoolIndex("pages", "krateo-system", []PoolMember{{GVR: portals, EnvConfig: envA}, {GVR: pages}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cm.Name != "cdc-pool-pages-members" || cm.Namespace != "krateo-system" || cm.Labels[PoolLabel] != "pages" {
 		t.Fatalf("index metadata = %s/%s %v", cm.Namespace, cm.Name, cm.Labels)
 	}
-	want := map[string]string{
-		"portals-v1-8-129":     "portals-v1-8-129-configmap",
-		"searchpages-v1-8-129": "searchpages-v1-8-129-configmap",
+	var e PoolIndexEntry
+	if err := json.Unmarshal([]byte(cm.Data["portals-v1-8-129"]), &e); err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cm.Data, want) {
-		t.Fatalf("index data = %v, want %v", cm.Data, want)
+	if e.ConfigMap != "portals-v1-8-129-configmap" || e.Checksum != configChecksum(envA) {
+		t.Fatalf("portals entry = %+v", e)
 	}
 	if got := PoolIndexMembers(cm); !reflect.DeepEqual(got, []string{"portals-v1-8-129", "searchpages-v1-8-129"}) {
 		t.Fatalf("PoolIndexMembers = %v", got)
 	}
-	if empty := RenderPoolIndex("pages", "krateo-system", nil); len(empty.Data) != 0 {
+	// A configuration change changes the entry, which is what restarts that member in the pool.
+	changed, _ := RenderPoolIndex("pages", "krateo-system", []PoolMember{{GVR: portals, EnvConfig: map[string]string{"COMPOSITION_CONTROLLER_RESOURCE": "portals", "X": "1"}}})
+	if changed.Data["portals-v1-8-129"] == cm.Data["portals-v1-8-129"] {
+		t.Fatal("a changed member configuration left its index entry unchanged")
+	}
+	if empty, _ := RenderPoolIndex("pages", "krateo-system", nil); len(empty.Data) != 0 {
 		t.Fatalf("an empty pool renders %v", empty.Data)
 	}
 }
