@@ -6,6 +6,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/authn"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +33,10 @@ const (
 	reasonResolveFailed    = conditionreason.ReasonResolveFailed
 )
 
-const reasonApiRefUnresolved event.Reason = "ApiRefUnresolved"
+const (
+	reasonApiRefUnresolved        event.Reason = "ApiRefUnresolved"
+	reasonApiRefPartiallyResolved event.Reason = "ApiRefPartiallyResolved"
+)
 
 // apiResolvedFailure classifies a resolution error into a condition reason and message.
 //
@@ -78,6 +82,46 @@ func apiResolvedFailure(err error) metav1.Condition {
 	}
 
 	return conditionreason.ApiResolveFailed.WithMessage(fmt.Sprintf("the apiRef could not be resolved: %v", err))
+}
+
+// apiResolvedFromOutcomes is the condition for a resolve that answered with data, from snowplow's
+// verdict on the RESTAction's stages (Diego, 2026-11-16: True ONLY on `[]`).
+//
+// A 200 is not a complete resolve. A stage with continueOnError can fail and the reply is still a
+// 200, with that stage's data missing: authn pointed a RESTAction at a missing Bundle, snowplow
+// logged "partial body served (200)", ApiResolved stayed True and the projected field silently
+// went absent. Only the X-Snowplow-Stage-Outcomes header says so, so:
+//   - `[]`: True/Resolved;
+//   - failed rows or the truncated form: False/ApiPartiallyResolved, naming each stage and its code
+//     verbatim (the set is snowplow's and may grow);
+//   - no header, or one that cannot be read: Unknown/StageOutcomesUnknown. Never success, per
+//     snowplow's own contract, and no version check: a missing header is the capability test.
+//
+// In every case the data that did resolve is projected. The partial case is the only
+// ApiResolved=False with data, which a consumer short-circuiting on False must not miss.
+func apiResolvedFromOutcomes(o snowplow.StageOutcomes) metav1.Condition {
+	switch {
+	case o.Complete():
+		return conditionreason.ApiResolved.WithMessage(
+			"apiRef resolved and snowplow confirmed every RESTAction stage succeeded; the .api projection source is available")
+	case !o.Present:
+		return conditionreason.ApiStageOutcomesUnknown.WithMessage(
+			"apiRef resolved, but snowplow sent no " + snowplow.StageOutcomesHeader + " header (snowplow older than 1.12.57), " +
+				"so whether every RESTAction stage succeeded is unknown; the .api source is projected as received")
+	case !o.Known():
+		return conditionreason.ApiStageOutcomesUnknown.WithMessage(fmt.Sprintf(
+			"apiRef resolved, but snowplow's %s header could not be read (%s), so whether every RESTAction stage succeeded "+
+				"is unknown; the .api source is projected as received", snowplow.StageOutcomesHeader, o.Unreadable))
+	default:
+		n := o.FailedCount()
+		stages := "stages"
+		if n == 1 {
+			stages = "stage"
+		}
+		return conditionreason.ApiPartiallyResolved.WithMessage(fmt.Sprintf(
+			"apiRef resolved partially: %d RESTAction %s did not succeed: %s. The .api source is projected without "+
+				"them; status.unrefreshedFields names the status fields this pass could not refresh", n, stages, o.Summary()))
+	}
 }
 
 func causeSuffix(s *authn.StatusError) string {

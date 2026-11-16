@@ -67,9 +67,14 @@ func TestE2E_ApiRefChain_AuthnJWT_Snowplow_Extras(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	api, err := resolver.Resolve(ctx, mg)
+	res, err := resolver.Resolve(ctx, mg)
 	if err != nil {
 		t.Fatalf("Resolve (real authn JWT + real snowplow): %v", err)
+	}
+	api := res.API
+	// A real snowplow (1.12.57+) sends the stage verdict on every RESTAction reply.
+	if !res.Outcomes.Complete() {
+		t.Errorf("stage outcomes = %+v, want snowplow's confirmation that every stage succeeded", res.Outcomes)
 	}
 	t.Logf("resolved .api = %#v", api)
 

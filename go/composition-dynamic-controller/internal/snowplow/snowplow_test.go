@@ -29,7 +29,7 @@ func TestResolve(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, func(context.Context) (string, error) { return "jwt-123", nil })
-	api, err := c.Resolve(context.Background(),
+	res, err := c.Resolve(context.Background(),
 		ApiRef{Name: "status-sources", Namespace: "demo"},
 		map[string]any{"compositionId": "9b1c", "namespace": "apps"},
 	)
@@ -53,6 +53,7 @@ func TestResolve(t *testing.T) {
 	}
 
 	// the keyed .api map is returned
+	api := res.API
 	wantHealth := map[string]any{"status": "UP"}
 	if h, _ := api["health"].(map[string]any); !reflect.DeepEqual(h, wantHealth) {
 		t.Errorf("api.health = %v, want %v", api["health"], wantHealth)

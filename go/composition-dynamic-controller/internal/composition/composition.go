@@ -14,6 +14,7 @@ import (
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/chartinspector"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 
@@ -155,9 +156,10 @@ type HandlerOptions struct {
 }
 
 // APIResolver resolves the apiRef's RESTAction (via snowplow, under the CDC's authn identity)
-// to the keyed `.api.<callName>` source map for a specific composition instance.
+// to the keyed `.api.<callName>` source map for a specific composition instance, with snowplow's
+// verdict on the RESTAction's stages (a 200 can still be partial).
 type APIResolver interface {
-	Resolve(ctx context.Context, mg *unstructured.Unstructured) (map[string]any, error)
+	Resolve(ctx context.Context, mg *unstructured.Unstructured) (snowplow.Resolution, error)
 }
 
 func NewHandler(opts *HandlerOptions) controller.ExternalClient {

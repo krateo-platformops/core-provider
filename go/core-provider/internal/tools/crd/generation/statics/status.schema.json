@@ -78,6 +78,13 @@
       "type": "integer",
       "description": "How many managed children this controller's ServiceAccount was REFUSED a read of (HTTP 403). Non-zero is a gap in the generated RBAC, not a problem with the children; the child names are in the Ready condition message."
     },
+    "unrefreshedFields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The status paths (each statusDataTemplate forPath, exactly as declared) whose field holds a value that this reconcile's projection did NOT write: the mapping produced no output (e.g. `// empty`) or failed, so the value is whatever an earlier pass left. Written on every projection, an empty list included; absent means no projection ran (paused, or no statusDataTemplate). A field written as null is not listed. Read it with ApiResolved: under ApiPartiallyResolved it names the fields a failed RESTAction stage left stale."
+    },
     "unevaluatedChildren": {
       "type": "object",
       "description": "Why the managed children that could not be health-evaluated were not, counted by cause. Every cause is written on every rollup, zero included. The counts sum to managedChildrenCount minus healthEvaluatedChildren minus unreadableChildrenCount. None of them changes Ready; they say what to do about a composition at Ready=Unknown/ZeroEvidence.",
