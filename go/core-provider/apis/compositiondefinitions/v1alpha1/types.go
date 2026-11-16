@@ -142,6 +142,11 @@ type DeploymentTarget struct {
 // Rejected at admission so nobody believes the opt-in is active when it is not. (No quote characters in
 // the rule: gofmt's doc-comment formatter rewrites two single quotes into a typographic quote.)
 // +kubebuilder:validation:XValidation:rule="!(has(self.controller) && has(self.controller.scaleToZero) && self.controller.scaleToZero) || !(has(self.deploy) && has(self.deploy.targetRef) && size(self.deploy.targetRef.name) > 0)",message="spec.controller.scaleToZero is supported for local definitions only; for a remote spec.deploy.targetRef see core-provider#442"
+// A pool is local-only and excludes scale-to-zero (docs/design/cdc-pooling.md §5c, Diego 2026-11-16).
+// A remote definition's controller runs on its spoke, where a pool in the management namespace would
+// span clusters; and a pool's process is shared, so one member scaling to zero would stop the others.
+// +kubebuilder:validation:XValidation:rule="!(has(self.controller) && has(self.controller.pool)) || !(has(self.deploy) && has(self.deploy.targetRef) && size(self.deploy.targetRef.name) > 0)",message="spec.controller.pool is supported for local definitions only (docs/design/cdc-pooling.md §5c)"
+// +kubebuilder:validation:XValidation:rule="!(has(self.controller) && has(self.controller.pool) && has(self.controller.scaleToZero) && self.controller.scaleToZero)",message="spec.controller.pool and spec.controller.scaleToZero are mutually exclusive: a pool's process is shared by every member"
 type CompositionDefinitionSpec struct {
 	// rtv1.ManagedSpec `json:",inline"`
 	Chart *ChartInfo `json:"chart,omitempty"`
@@ -224,14 +229,15 @@ type ControllerConfig struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
 	ResyncInterval *string `json:"resyncInterval,omitempty"`
 
-	// Pool names a shared controller pool this Kind's controller will run in (docs/design/cdc-pooling.md).
-	// INERT in this release: the field is accepted and validated and changes nothing. Absent, and set,
-	// render the same dedicated controller, byte for byte. It exists first so the API is settled before
-	// the pool lifecycle (design step 5) is built. A name, not a boolean, because a pool's identity holds
-	// the union of its members' permissions, and names let Kinds with similar permissions share one.
+	// Pool names a shared controller pool this Kind's controller runs in (docs/design/cdc-pooling.md §5c).
+	// Absent, the definition has its own dedicated controller, exactly as before. Set, its controller is
+	// a member of the pool cdc-pool-<pool> in the management namespace, which holds the union of its
+	// members' permissions; names let Kinds with similar permissions share one. Local definitions only,
+	// and not with scaleToZero. At most 54 characters, so the pool's object names (cdc-pool-<pool>) stay
+	// valid DNS-1123 labels.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:MaxLength=54
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Pool *string `json:"pool,omitempty"`
 

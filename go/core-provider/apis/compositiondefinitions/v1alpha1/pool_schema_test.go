@@ -40,12 +40,13 @@ func TestPoolSchemaAcceptsOnlyDNS1123Labels(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"frontend-pages", "a", "a1", "0", strings.Repeat("a", 63)} {
+		// 54: the pool's object names are cdc-pool-<pool>, which must stay a 63-character label.
+		for _, name := range []string{"frontend-pages", "a", "a1", "0", strings.Repeat("a", 54)} {
 			if r := validator.Validate(name); !r.IsValid() {
 				t.Errorf("version %s: %q must be accepted: %v", v.Name, name, r.Errors)
 			}
 		}
-		for _, name := range []string{"", "Frontend", "-a", "a-", "a_b", "a.b", "a b", strings.Repeat("a", 64)} {
+		for _, name := range []string{"", "Frontend", "-a", "a-", "a_b", "a.b", "a b", strings.Repeat("a", 55)} {
 			if r := validator.Validate(name); r.IsValid() {
 				t.Errorf("version %s: %q must be refused (not a DNS-1123 label)", v.Name, name)
 			}
