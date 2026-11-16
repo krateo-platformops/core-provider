@@ -58,7 +58,10 @@ type UndeployOptions struct {
 	DiscoveryClient discovery.CachedDiscoveryInterface
 	KubeClient      client.Client
 	DynamicClient   dynamic.Interface
-	Namespace       string
+	// HubDynamicClient is the management cluster's dynamic client, where the CD's schema ConfigMap
+	// lives. Nil means the same cluster as DynamicClient (a local definition).
+	HubDynamicClient dynamic.Interface
+	Namespace        string
 	// ControllerNamespace is where this version's controller ITSELF lives: its Deployment,
 	// ServiceAccount, ConfigMaps and Service (#313). It is required: an empty value is an error,
 	// never a fall-back to Namespace, so no caller can keep the old placement by omission.
@@ -521,13 +524,10 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	jsonSchemaConfigmap, err := renderJSONSchemaConfigMap(opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath, opts.JsonSchemaBytes)
+	// The CD's published schema: in the CD's own namespace, on the hub (schemaconfigmap.go).
+	jsonSchemaConfigmap, err := applySchemaConfigMap(ctx, opts, namespacedName, applyOpts, log)
 	if err != nil {
 		return "", err
-	}
-	_, err = kubecli.Apply(ctx, opts.DynClient, configMapGVR, &jsonSchemaConfigmap, applyOpts)
-	if err != nil {
-		return "", fmt.Errorf("error applying ConfigMap for JSON schema: %w", err)
 	}
 	err = hsh.SumHash(jsonSchemaConfigmap.ObjectMeta.Name, jsonSchemaConfigmap.ObjectMeta.Namespace)
 	if err != nil {
@@ -661,16 +661,26 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 
 	jsonSchemaConfigmap := corev1.ConfigMap{}
-	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath,
+	hub := hubOr(opts.HubDynamicClient, opts.DynamicClient)
+	schemaNN := schemaConfigMapNN(opts.Namespace, namespacedName)
+	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, schemaNN, opts.JsonSchemaTemplatePath,
 		"schema", string(opts.JsonSchemaBytes),
 	)
 	if err != nil {
 		return fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
-	_, err = kubecli.Uninstall(ctx, opts.DynamicClient, configMapGVR, &jsonSchemaConfigmap, kubecli.UninstallOptions{})
+	_, err = kubecli.Uninstall(ctx, hub, configMapGVR, &jsonSchemaConfigmap, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "Error uninstalling ConfigMap for JSON schema")
 		return err
+	}
+	// The legacy controller-namespace copy, under the same guard as Deploy.
+	if legacy := getJsonSchemaConfigmapNN(namespacedName); legacy != schemaNN {
+		if ok, _ := legacySchemaConfigMapRemovable(ctx, hub, opts.ControllerNamespace, opts.Namespace, opts.GVR); ok {
+			if err := removeLegacySchemaConfigMap(ctx, hub, legacy); err != nil {
+				return err
+			}
+		}
 	}
 	log.Debug("JSON Schema ConfigMap successfully uninstalled", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace)
 
@@ -941,13 +951,13 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 
 	jsonSchemaConfigmap := corev1.ConfigMap{}
-	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath,
+	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, schemaConfigMapNN(opts.Namespace, namespacedName), opts.JsonSchemaTemplatePath,
 		"schema", string(opts.JsonSchemaBytes),
 	)
 	if err != nil {
 		return "", fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
-	err = kubecli.Get(ctx, opts.DynClient, configMapGVR, &jsonSchemaConfigmap)
+	err = kubecli.Get(ctx, hubOr(opts.HubDynClient, opts.DynClient), configMapGVR, &jsonSchemaConfigmap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("JSON Schema ConfigMap not found", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace)
