@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -164,6 +165,11 @@ func assessRehomeFollower(ctx context.Context, t *testing.T, cfg *envconf.Config
 	if rehomeControllerIn(ctx, t, r, rehomeNamespace) {
 		t.Fatalf("follower deployed its own controller in %s: two controllers on one Kind+version", rehomeNamespace)
 	}
+	// A follower runs no Deploy, yet a tenant of its namespace reads the schema there
+	// (definitionschema.go). Settled means Observe found its own copy current, so it exists.
+	if nn := deploy.DefinitionSchemaConfigMapNN(rehomeNamespace, rehomeGVR); r.Get(ctx, nn.Name, nn.Namespace, &corev1.ConfigMap{}) != nil {
+		t.Fatalf("the follower settled with no JSON schema ConfigMap %s in its own namespace", nn)
+	}
 	if rehomeControllerIn(ctx, t, r, namespace) {
 		t.Fatalf("a controller is in the owner's namespace %s: #313 places it in %s", namespace, mgmtNamespace)
 	}
@@ -259,6 +265,11 @@ func assessRehomeHandover(ctx context.Context, t *testing.T, cfg *envconf.Config
 	}
 	if err := wait.For(conditions.New(r).ResourceDeleted(&moved), wait.WithTimeout(5*time.Minute), wait.WithInterval(5*time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	// A hand-over returns before Undeploy, so the leaving definition's own schema ConfigMap used to be
+	// left behind. rehome-system holds no other definition, so nothing else publishes it there.
+	if nn := deploy.DefinitionSchemaConfigMapNN(rehomeNamespace, rehomeGVR); !apierrors.IsNotFound(r.Get(ctx, nn.Name, nn.Namespace, &corev1.ConfigMap{})) {
+		t.Fatalf("the JSON schema ConfigMap %s survived its definition's hand-over delete", nn)
 	}
 	if err := r.Get(ctx, rehomeCRD, "", &apiextensionsv1.CustomResourceDefinition{}); err != nil {
 		t.Fatalf("CRD after a back-to-back hand-over: %v", err)
