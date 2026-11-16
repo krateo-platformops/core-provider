@@ -890,7 +890,20 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	}, nil
 }
 
-func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
+func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (err error) {
+	// WHETHER A FAILED CREATE MAY BE RETRIED AT ONCE (unstructured-runtime#97, v1.22.0). The runtime
+	// re-creates immediately only after a failure the handler classified as not committed; any
+	// other failure is confirmed absent first (Observe), and an absent release waits out a 2m grace.
+	// Every return before the helm call starts wrote no release, so it is not committed: a chart
+	// that cannot be fetched or a refused RBAC apply retries exactly as before. From the helm call
+	// on, a release may exist (helm stores one before it applies), so the failure is left
+	// unclassified and the existence check decides.
+	helmCalled := false
+	defer func() {
+		if err != nil && !helmCalled {
+			err = controller.CreateNotCommitted(err)
+		}
+	}()
 	ctx = h.withMetrics(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationCreate)
@@ -1043,6 +1056,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 	if rel != nil {
 		log.Debug("Release already exists, upgrading instead of installing.")
+		helmCalled = true
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
 				op, err := hc.Upgrade(ctx, releaseName, pkg.URL, upgradeConfig(actionConfig))
@@ -1061,6 +1075,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			return fmt.Errorf("upgrading existing helm release: %w", err)
 		}
 	} else {
+		helmCalled = true
 		rel, err = helmPhase(log, "install", releaseName, func() (*helmconfig.Release, error) {
 			return helmMetrics.TimedInstallWithResult(func() (*helmconfig.Release, error) {
 				op, err := hc.Install(ctx, releaseName, pkg.URL, &helmconfig.InstallConfig{
