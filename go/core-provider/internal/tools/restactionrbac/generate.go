@@ -235,17 +235,32 @@ func GenerateClusterScoped(readSet []Resource, group, name string) (*rbacv1.Clus
 // buildRules aggregates rows by (apiGroup, verb) into PolicyRules, sorted for
 // determinism. Each row contributes its resource under its own verb.
 func buildRules(rows []Resource) []rbacv1.PolicyRule {
-	// key = apiGroup + "\x00" + verb → set of resources
+	// A row naming ONE object (snowplow sets Name when the read's path names it, e.g.
+	// GET /apis/trust.cert-manager.io/v1alpha1/bundles/krateo-internal-ca) is granted on that object
+	// only, through resourceNames. Rows were aggregated by group and verb alone, so Name was decoded
+	// and dropped: a read of one Bundle became `get` on EVERY Bundle (authn, measured on kind at
+	// 2.13.105). A name interpolated at runtime reaches here empty and stays unscoped.
+	//
+	// Unnamed rows keep the old shape: key = apiGroup + verb → set of resources.
 	type key struct{ group, verb string }
 	agg := map[key]map[string]struct{}{}
+	type namedKey struct{ group, verb, resource string }
+	named := map[namedKey]map[string]struct{}{}
 	for _, r := range rows {
+		if r.Name != "" {
+			nk := namedKey{group: r.Group, verb: r.Verb, resource: r.Resource}
+			if named[nk] == nil {
+				named[nk] = map[string]struct{}{}
+			}
+			named[nk][r.Name] = struct{}{}
+			continue
+		}
 		k := key{group: r.Group, verb: r.Verb}
 		if agg[k] == nil {
 			agg[k] = map[string]struct{}{}
 		}
 		agg[k][r.Resource] = struct{}{}
 	}
-
 	keys := make([]key, 0, len(agg))
 	for k := range agg {
 		keys = append(keys, k)
@@ -256,8 +271,7 @@ func buildRules(rows []Resource) []rbacv1.PolicyRule {
 		}
 		return keys[i].verb < keys[j].verb
 	})
-
-	rules := make([]rbacv1.PolicyRule, 0, len(keys))
+	rules := make([]rbacv1.PolicyRule, 0, len(keys)+len(named))
 	for _, k := range keys {
 		resources := make([]string, 0, len(agg[k]))
 		for res := range agg[k] {
@@ -268,6 +282,39 @@ func buildRules(rows []Resource) []rbacv1.PolicyRule {
 			APIGroups: []string{k.group},
 			Resources: resources,
 			Verbs:     []string{k.verb},
+		})
+	}
+	// Named rules, in a stable order. One already covered by an unnamed rule for the same group,
+	// verb and resource adds nothing (the unnamed grant is the broader one the read set asked for),
+	// so it is left out.
+	nkeys := make([]namedKey, 0, len(named))
+	for nk := range named {
+		if _, covered := agg[key{group: nk.group, verb: nk.verb}][nk.resource]; covered {
+			continue
+		}
+		nkeys = append(nkeys, nk)
+	}
+	sort.Slice(nkeys, func(i, j int) bool {
+		a, b := nkeys[i], nkeys[j]
+		if a.group != b.group {
+			return a.group < b.group
+		}
+		if a.verb != b.verb {
+			return a.verb < b.verb
+		}
+		return a.resource < b.resource
+	})
+	for _, nk := range nkeys {
+		names := make([]string, 0, len(named[nk]))
+		for n := range named[nk] {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups:     []string{nk.group},
+			Resources:     []string{nk.resource},
+			ResourceNames: names,
+			Verbs:         []string{nk.verb},
 		})
 	}
 	return rules
