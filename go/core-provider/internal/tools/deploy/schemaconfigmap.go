@@ -161,6 +161,20 @@ func DefinitionSchemaConfigMapCurrent(ctx context.Context, hub dynamic.Interface
 	return true, "", nil
 }
 
+// DefinitionSchemaConfigMapExists reports whether a definition's own copy exists. A read that
+// fails is an error, never "absent".
+func DefinitionSchemaConfigMapExists(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace string) (bool, error) {
+	nn := DefinitionSchemaConfigMapNN(cdNamespace, gvr)
+	_, err := hub.Resource(configMapGVR).Namespace(nn.Namespace).Get(ctx, nn.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading the JSON schema ConfigMap %s: %w", nn, err)
+	}
+	return true, nil
+}
+
 // RemoveDefinitionSchemaConfigMap removes a definition's own copy by its exact name; already gone is
 // success. The caller decides that no other definition in that namespace publishes the same object.
 func RemoveDefinitionSchemaConfigMap(ctx context.Context, hub dynamic.Interface, gvr schema.GroupVersionResource, cdNamespace string) error {

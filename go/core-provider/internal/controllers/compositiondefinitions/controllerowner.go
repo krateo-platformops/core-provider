@@ -543,7 +543,15 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 			return false, err
 		}
 	}
-	return definitionGone(false, successor != nil, sharesNS, kindHeld, own), nil
+	if !definitionGone(false, successor != nil, sharesNS, kindHeld, own) {
+		return false, nil
+	}
+	// Its published schema is its own too (definitionschema.go): not gone while that copy remains.
+	remains, err := e.ownSchemaRemains(ctx, cr, gvk, gvr)
+	if err != nil {
+		return false, err
+	}
+	return !remains, nil
 }
 
 // followerMarker is the part of a follower's Ready message that names its role. followerCondition

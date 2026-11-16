@@ -10,8 +10,10 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	appsv1 "k8s.io/api/apps/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynfake "k8s.io/client-go/dynamic/fake"
@@ -216,6 +218,76 @@ func TestRemoveOwnSchema(t *testing.T) {
 		}
 		if !cmExists(t, hub, "team-a") {
 			t.Fatal("removed the schema ConfigMap without knowing who else publishes it")
+		}
+	})
+}
+
+// handedOver must not report a deleting definition gone while its own published schema remains: that
+// is what let the finalizer drop with the copy left behind (rehome integration test, CI on #548),
+// because a definition reported gone never reaches Delete, where the copy is removed.
+func TestHandedOverWaitsForItsOwnSchemaConfigMap(t *testing.T) {
+	useTestSchemaTemplate(t)
+	sc := runtime.NewScheme()
+	if err := apis.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(sc); err != nil { // handedOver also looks up the controller Deployment
+		t.Fatal(err)
+	}
+	gvk := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v1-0-0", Kind: "FireworksApp"}
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"}
+	onV1 := func(cd compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.CompositionDefinition {
+		cd.Status.ApiVersion = "composition.krateo.io/v1-0-0"
+		cd.Status.Kind = "FireworksApp"
+		return &cd
+	}
+	leaving := onV1(ownerCD("team-a", "fw", 0))
+	elsewhere := onV1(ownerCD("team-b", "fw", 1))   // a successor in another namespace
+	sameNS := onV1(ownerCD("team-a", "fw-copy", 2)) // a successor sharing leaving's namespace
+	ctx := context.Background()
+
+	check := func(t *testing.T, withCM bool, cds ...*compositiondefinitionsv1alpha1.CompositionDefinition) bool {
+		t.Helper()
+		var objs []client.Object
+		var dynObjs []runtime.Object
+		for _, cd := range cds {
+			objs = append(objs, cd)
+			u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := &unstructured.Unstructured{Object: u}
+			o.SetGroupVersionKind(schema.GroupVersionKind{Group: compositionDefinitionsGVR.Group, Version: compositionDefinitionsGVR.Version, Kind: "CompositionDefinition"})
+			dynObjs = append(dynObjs, o)
+		}
+		cli := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(objs...).Build()
+		dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{compositionDefinitionsGVR: "CompositionDefinitionList", cmGVR: "ConfigMapList"}, dynObjs...)
+		if withCM {
+			if err := deploy.ApplyDefinitionSchemaConfigMap(ctx, dyn, gvr, "team-a", JSONSchemaTemplateConfigmapPath, []byte(followerSchema)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := (&external{mgmt: cli, kube: cli, mgmtDynamic: dyn}).handedOver(ctx, leaving, gvk, gvr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	t.Run("its own copy remains: not handed over, so Delete runs and removes it", func(t *testing.T) {
+		if check(t, true, leaving, elsewhere) {
+			t.Fatal("reported gone with its own schema ConfigMap still in team-a")
+		}
+	})
+	t.Run("the copy is gone: handed over (the control)", func(t *testing.T) {
+		if !check(t, false, leaving, elsewhere) {
+			t.Fatal("not reported gone with nothing of its own left")
+		}
+	})
+	t.Run("a successor in the same namespace publishes the same copy: handed over at once", func(t *testing.T) {
+		if !check(t, true, leaving, sameNS) {
+			t.Fatal("waited on a ConfigMap that is the same-namespace successor's too")
 		}
 	})
 }

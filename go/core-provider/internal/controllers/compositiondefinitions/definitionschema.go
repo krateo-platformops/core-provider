@@ -45,18 +45,45 @@ func schemaSharer(cr *compositiondefinitionsv1alpha1.CompositionDefinition, cds 
 	return nil
 }
 
-// removeOwnSchema removes cr's own copy on a delete that hands the controller over, a path that
-// returns before Undeploy and so used to leave the copy behind. A failed list removes nothing and
-// is returned, so the delete retries: "could not determine" is never "no one else uses it".
-func (e *external) removeOwnSchema(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, log logging.Logger) error {
+// ownSchemaSharer is schemaSharer over the live definitions in cr's namespace. A failed list is an
+// error: "could not determine" is never "no one else uses it".
+func (e *external) ownSchemaSharer(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind) (*compositiondefinitionsv1alpha1.CompositionDefinition, error) {
 	var all compositiondefinitionsv1alpha1.CompositionDefinitionList
 	if err := e.mgmt.List(ctx, &all, client.InNamespace(cr.Namespace)); err != nil {
-		return fmt.Errorf("error listing CompositionDefinitions in %s before removing the JSON schema ConfigMap: %w", cr.Namespace, err)
+		return nil, fmt.Errorf("error listing CompositionDefinitions in %s: %w", cr.Namespace, err)
 	}
-	if sharer := schemaSharer(cr, all.Items, gvk, chartRefOf(cr.Spec.Chart)); sharer != nil {
+	return schemaSharer(cr, all.Items, gvk, chartRefOf(cr.Spec.Chart)), nil
+}
+
+// removeOwnSchema removes cr's own copy on a delete that hands the controller over, a path that
+// returns before Undeploy and so used to leave the copy behind. A failed list removes nothing and
+// is returned, so the delete retries.
+func (e *external) removeOwnSchema(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, log logging.Logger) error {
+	sharer, err := e.ownSchemaSharer(ctx, cr, gvk)
+	if err != nil {
+		return fmt.Errorf("before removing the JSON schema ConfigMap: %w", err)
+	}
+	if sharer != nil {
 		log.Debug("Keeping the JSON schema ConfigMap: another definition in the namespace publishes it",
 			"gvr", gvr.String(), "namespace", cr.Namespace, "by", sharer.Name)
 		return nil
 	}
 	return deploy.RemoveDefinitionSchemaConfigMap(ctx, e.mgmtDynamic, gvr, cr.Namespace)
+}
+
+// ownSchemaRemains reports whether cr's own copy still exists with nobody else in the namespace
+// publishing it, i.e. whether removeOwnSchema still has something to do. handedOver asks it, so a
+// definition being deleted is not reported gone (and Delete skipped) while its copy is left behind:
+// the rehome integration test caught exactly that, the finalizer dropping with the copy in place.
+// It is the same predicate removeOwnSchema acts on, so once Delete has run it answers false.
+func (e *external) ownSchemaRemains(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource) (bool, error) {
+	exists, err := deploy.DefinitionSchemaConfigMapExists(ctx, e.mgmtDynamic, gvr, cr.Namespace)
+	if err != nil || !exists {
+		return exists, err
+	}
+	sharer, err := e.ownSchemaSharer(ctx, cr, gvk)
+	if err != nil {
+		return false, err
+	}
+	return sharer == nil, nil
 }
