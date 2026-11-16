@@ -31,6 +31,8 @@ func baselineStatusWrites() map[string]any {
 		// setStatus, so an undeclared field would be pruned exactly as managedDigest was (#293),
 		// and the whole point of the field is to be readable afterwards.
 		"releaseName": "lab-ha-54xd86b6",
+		// Why the unevaluated children were not evaluated, by cause (Diego, 2026-11-16).
+		"unevaluatedChildren": map[string]any{"noReadyCondition": int64(1), "assertedReady": int64(0), "notObserved": int64(0), "noEvidenceBelow": int64(0)},
 	}
 }
 

@@ -88,6 +88,63 @@ const (
 // A child in one of these groups that we do not model (ConfigMap, Service, RBAC, CRD,
 // ControllerRevision...) is not a gap — those kinds carry no readiness at all, so existence
 // genuinely is health for them.
+// unevaluatedCause says WHY a child could not be health-evaluated, for status.unevaluatedChildren
+// (Diego, 2026-11-16). The verdict is unchanged by it: every cause is still childUnevaluated, which
+// never moves the parent. What it adds is the distinction a consumer needs to act on: a kind that
+// publishes no Ready needs a readiness projection (core-provider#537); an ASSERTED Ready is a
+// question for the kind's producer (oasgen-provider#709); an unobserved child is an outage; a child
+// with no evidence below it has its own children to look at.
+type unevaluatedCause string
+
+const (
+	causeNoReadyCondition unevaluatedCause = "noReadyCondition"
+	causeAssertedReady    unevaluatedCause = "assertedReady"
+	causeNotObserved      unevaluatedCause = "notObserved"
+	causeNoEvidenceBelow  unevaluatedCause = "noEvidenceBelow"
+)
+
+// unevaluatedCauses is every cause, in the order status.unevaluatedChildren lists them. Each is
+// written on every rollup, zero included, so "none of this cause" reads as 0 rather than as an
+// absent key (the #248 lesson coverageScalars records).
+var unevaluatedCauses = []unevaluatedCause{causeNoReadyCondition, causeAssertedReady, causeNotObserved, causeNoEvidenceBelow}
+
+// childEval is a child's state and, when it is childUnevaluated, the cause. One decision per
+// classifier: the childState functions below are thin wrappers over these evaluators, so a state and
+// its cause cannot be decided in two places and drift.
+type childEval struct {
+	state childState
+	cause unevaluatedCause
+}
+
+func is(s childState) childEval { return childEval{state: s} }
+
+func unevaluatedBecause(c unevaluatedCause) childEval {
+	return childEval{state: childUnevaluated, cause: c}
+}
+
+// krateoReady is krateoEval's state, for callers that need no cause.
+func krateoReady(obj *unstructured.Unstructured) childState { return krateoEval(obj).state }
+
+// thirdPartyReady is thirdPartyEval's state.
+func thirdPartyReady(group string, obj *unstructured.Unstructured) childState {
+	return thirdPartyEval(group, obj).state
+}
+
+// thirdPartyKindReady is thirdPartyKindEval's state.
+func thirdPartyKindReady(group string, obj *unstructured.Unstructured, conds []any) childState {
+	return thirdPartyKindEval(group, obj, conds).state
+}
+
+// classifyChild is classifyChildEval's state.
+func classifyChild(group string, obj *unstructured.Unstructured) childState {
+	return classifyChildEval(group, obj).state
+}
+
+// childHealth is childEvalOf's state.
+func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref map[string]any) childState {
+	return h.childEvalOf(ctx, dyn, ref).state
+}
+
 func isNativeGroup(group string) bool {
 	switch group {
 	case "", "apps", "batch", "autoscaling", "policy", "extensions":
@@ -108,6 +165,9 @@ type healthVerdict struct {
 	converging []string
 	// unevaluated counts children whose health could not be assessed. Reported, never acted on.
 	unevaluated int
+	// unevaluatedBy splits unevaluated by cause (status.unevaluatedChildren). Set once, by the
+	// deferred assignment in rollupManagedChildren, so no return path has to remember it.
+	unevaluatedBy map[unevaluatedCause]int
 	// unreadable names children the ServiceAccount was REFUSED a read of (#318). NAMED, not just
 	// counted, for the #289 reason the converging list already records: a count could never have
 	// been produced without knowing which child it was, and not saying so was the whole defect.
@@ -152,7 +212,17 @@ type healthVerdict struct {
 // converting an RBAC gap into a fleet-wide outage. A missing grant must not regress a working
 // composition — that is the whole point of the fail-safe, and naming is the one change that can undo
 // it while looking like a fix.
-func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interface, mg *unstructured.Unstructured) healthVerdict {
+func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interface, mg *unstructured.Unstructured) (verdict healthVerdict) {
+	// Set on EVERY return, once, here. unevaluated used to be set only on the two Ready paths, so on
+	// a failing or converging parent healthEvaluatedChildren (total - unevaluated - unreadable)
+	// counted the unevaluated children as evaluated. The by-cause counts must sum to it on every
+	// path, so both are assigned together.
+	byCause := map[unevaluatedCause]int{}
+	unevaluated := 0
+	defer func() {
+		verdict.unevaluated = unevaluated
+		verdict.unevaluatedBy = byCause
+	}()
 	managed, found, _ := unstructured.NestedSlice(mg.Object, "status", "managed")
 	if found && len(managed) == 0 {
 		// PRESENT AND EMPTY is a real answer: a reconcile decoded the release, rendered nothing,
@@ -198,14 +268,14 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	}
 
 	var failing, converging []string
-	unevaluated := 0
 	var absent, unreadable []string
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
 			continue
 		}
-		switch h.childHealth(ctx, dyn, ref) {
+		ev := h.childEvalOf(ctx, dyn, ref)
+		switch ev.state {
 		case childFailed:
 			failing = append(failing, childID(ref))
 		case childConverging:
@@ -229,6 +299,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			absent = append(absent, childID(ref))
 		case childUnevaluated:
 			unevaluated++ // counted only; never changes the verdict
+			byCause[ev.cause]++
 		case childUnreadable:
 			// Counted AND named, and like childUnevaluated it does not enter `failing` or
 			// `converging`, so it cannot by itself fail or hold back a parent. The only verdict it
@@ -674,20 +745,20 @@ func availableReason(unevaluated, total int) string {
 	return "Available"
 }
 
-// childHealth GETs one managed child (as the controller SA) and classifies it. Any read it cannot
+// childEvalOf GETs one managed child (as the controller SA) and classifies it. Any read it cannot
 // complete degrades to healthy — never to a failure — so a missing RBAC grant or a create race
 // cannot regress the parent.
-func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref map[string]any) childState {
+func (h *handler) childEvalOf(ctx context.Context, dyn dynamic.Interface, ref map[string]any) childEval {
 	apiVersion := stringField(ref, "apiVersion")
 	resource := stringField(ref, "resource")
 	name := stringField(ref, "name")
 	namespace := stringField(ref, "namespace")
 	if apiVersion == "" || resource == "" || name == "" {
-		return childHealthy
+		return is(childHealthy)
 	}
 	gv, err := schema.ParseGroupVersion(apiVersion)
 	if err != nil {
-		return childHealthy
+		return is(childHealthy)
 	}
 	gvr := gv.WithResource(resource)
 
@@ -701,7 +772,7 @@ func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref ma
 		if apierrors.IsNotFound(err) {
 			// Rolls up as converging (never terminal) but is distinguishable, because this is also
 			// what a stale status.managed looks like — see childAbsent (#261).
-			return childAbsent
+			return is(childAbsent)
 		}
 		if apierrors.IsForbidden(err) {
 			// #318. Still rolls up without failing the parent — a missing grant must never regress
@@ -710,7 +781,7 @@ func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref ma
 			// we generate, and therefore the one case an operator can act on.
 			xcontext.Logger(ctx).Debug("child health: READ REFUSED by RBAC; counted unreadable, not healthy",
 				"child", childID(ref), "error", err.Error())
-			return childUnreadable
+			return is(childUnreadable)
 		}
 		// No REST mapping, or a transient failure: degrade to healthy, unchanged, so a missing CRD
 		// or an apiserver blip can never regress a working composition. Deliberately NOT folded
@@ -718,17 +789,17 @@ func (h *handler) childHealth(ctx context.Context, dyn dynamic.Interface, ref ma
 		// count mean "something went wrong reading this" rather than "RBAC refused us", which is
 		// the only reading that tells an operator what to fix.
 		xcontext.Logger(ctx).Debug("child health: unreadable, counting healthy", "child", childID(ref), "error", err.Error())
-		return childHealthy
+		return is(childHealthy)
 	}
-	return classifyChild(gv.Group, obj)
+	return classifyChildEval(gv.Group, obj)
 }
 
-// classifyChild maps a live child to a health state with conservative, per-class predicates.
+// classifyChildEval maps a live child to a health state with conservative, per-class predicates.
 // Anything not explicitly modeled is existence-only (present == healthy).
-func classifyChild(group string, obj *unstructured.Unstructured) childState {
+func classifyChildEval(group string, obj *unstructured.Unstructured) childEval {
 	switch {
 	case strings.HasSuffix(group, "krateo.io"):
-		return krateoReady(obj) // Krateo CRs (incl. child Compositions/CompositionDefinitions)
+		return krateoEval(obj) // Krateo CRs (incl. child Compositions/CompositionDefinitions)
 	// Dispatch on group AND KIND, never on group alone (#256). Dispatching on group alone is how the
 	// CronJob wedge happened: batch/v1 sent a CronJob to jobReady, where both branches are
 	// unreachable against its schema, so every CronJob returned childConverging forever and its
@@ -745,37 +816,37 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 	// than be guessed at. That makes the NEXT such kind existence-is-health — fail-safe — instead of
 	// wedging its composition until somebody writes a case for it.
 	case group == "apps" && isWorkloadKind(obj.GetKind()):
-		return workloadReady(obj)
+		return is(workloadReady(obj))
 	case group == "batch" && obj.GetKind() == "CronJob":
-		return cronJobReady(obj)
+		return is(cronJobReady(obj))
 	case group == "batch" && obj.GetKind() == "Job":
-		return jobReady(obj)
+		return is(jobReady(obj))
 	// core/v1 (group "") — only the two kinds that actually carry readiness. Everything else in the
 	// core group (ConfigMap, Secret, Service, ServiceAccount, ...) is config: it has no notion of
 	// being unready, so it falls through to existence-is-health below (krateo-core-provider#121).
 	case group == "" && obj.GetKind() == "Pod":
-		return podReady(obj)
+		return is(podReady(obj))
 	case group == "" && obj.GetKind() == "PersistentVolumeClaim":
-		return pvcReady(obj)
+		return is(pvcReady(obj))
 	// A CustomResourceDefinition the composition deploys DOES carry readiness (#473): its API is not
 	// served until the apiserver reports Established, and NamesAccepted=False is a name conflict that
 	// keeps it from ever being served. Before this case it fell through to existence-is-health below,
 	// so a composition reported Ready=True while its CRD was not yet usable.
 	case group == "apiextensions.k8s.io" && obj.GetKind() == "CustomResourceDefinition":
-		return crdReady(obj)
+		return is(crdReady(obj))
 	case isNativeGroup(group):
 		// A built-in kind we do not model (ConfigMap, Service, RBAC, ...). These carry no readiness,
 		// so existence genuinely IS health — not a gap, and not counted as one.
-		return childHealthy
+		return is(childHealthy)
 	default:
 		// A third-party CUSTOM resource. Read only what it publishes in a documented shape
 		// (thirdPartyReady); anything else stays unevaluated, never healthy-by-existence.
 		// mongodbcommunity reporting `.status.phase: Failed` with no conditions lands there (#121).
-		return thirdPartyReady(group, obj)
+		return thirdPartyEval(group, obj)
 	}
 }
 
-// thirdPartyReady classifies a custom resource outside *.krateo.io and the native groups (#399).
+// thirdPartyEval classifies a custom resource outside *.krateo.io and the native groups (#399).
 // Until #399 every such child was childUnevaluated, so a kagent Agent at Ready=True/DeploymentReady,
 // a CloudNativePG Cluster, a Keycloak and an ExternalSecret were never read, and on krateo-057 the
 // model-configs composition (three kagent ModelConfigs, each Accepted=True) reported ZeroEvidence.
@@ -797,27 +868,27 @@ func classifyChild(group string, obj *unstructured.Unstructured) childState {
 // read as converging. The condition's own observedGeneration is checked first (CloudNativePG writes
 // it only there), then status.observedGeneration (Keycloak, kagent v1alpha2); when neither exists no
 // gate applies, rather than refusing a resource that never publishes one.
-func thirdPartyReady(group string, obj *unstructured.Unstructured) childState {
+func thirdPartyEval(group string, obj *unstructured.Unstructured) childEval {
 	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !found {
-		return childUnevaluated
+		return unevaluatedBecause(causeNoReadyCondition)
 	}
 	if ready, ok := conditionByType(conds, "Ready"); ok {
 		switch {
 		case staleCondition(obj, ready):
-			return childConverging
+			return is(childConverging)
 		case stringField(ready, "status") == "True":
-			return childHealthy
+			return is(childHealthy)
 		default:
-			return childConverging
+			return is(childConverging)
 		}
 	}
-	return thirdPartyKindReady(group, obj, conds)
+	return thirdPartyKindEval(group, obj, conds)
 }
 
-// thirdPartyKindReady holds the kind-specific arms of thirdPartyReady. Each one cites the code that
+// thirdPartyKindEval holds the kind-specific arms of thirdPartyReady. Each one cites the code that
 // writes the condition it reads.
-func thirdPartyKindReady(group string, obj *unstructured.Unstructured, conds []any) childState {
+func thirdPartyKindEval(group string, obj *unstructured.Unstructured, conds []any) childEval {
 	switch {
 	case group == "kagent.dev" && obj.GetKind() == "ModelConfig":
 		// kagent ModelConfig has no Ready condition. Its controller writes `Accepted`:
@@ -830,18 +901,18 @@ func thirdPartyKindReady(group string, obj *unstructured.Unstructured, conds []a
 		// Healthy only when Accepted is True and current, and ResolvedRefs, where present, is True.
 		accepted, ok := conditionByType(conds, "Accepted")
 		if !ok {
-			return childUnevaluated
+			return unevaluatedBecause(causeNoReadyCondition)
 		}
 		if staleCondition(obj, accepted) || stringField(accepted, "status") != "True" {
-			return childConverging
+			return is(childConverging)
 		}
 		if refs, ok := conditionByType(conds, "ResolvedRefs"); ok &&
 			(staleCondition(obj, refs) || stringField(refs, "status") != "True") {
-			return childConverging
+			return is(childConverging)
 		}
-		return childHealthy
+		return is(childHealthy)
 	}
-	return childUnevaluated
+	return unevaluatedBecause(causeNoReadyCondition)
 }
 
 // conditionByType returns the first condition of the given type.
@@ -948,7 +1019,7 @@ func pvcReady(obj *unstructured.Unstructured) childState {
 	}
 }
 
-// krateoReady reads a Krateo child's own Ready condition. Only a Ready condition that is PRESENT
+// krateoEval reads a Krateo child's own Ready condition. Only a Ready condition that is PRESENT
 // and not-True is evidence the child is unhealthy. The absence of a Ready condition is NOT such
 // evidence: many *.krateo.io CRs are leaf declarative resources that never carry conditions (e.g.
 // authn's serviceaccount.authn.krateo.io ServiceAccount, a seed identity), and they are healthy by
@@ -957,12 +1028,12 @@ func pvcReady(obj *unstructured.Unstructured) childState {
 // snowplow-seed ServiceAccount CR has no conditions. Composition/CompositionDefinition children
 // always stamp a Ready condition (reason Creating/Available/Unavailable) the moment they first
 // reconcile, so genuinely-not-ready nested compositions are still caught by the not-True branch.
-func krateoReady(obj *unstructured.Unstructured) childState {
+func krateoEval(obj *unstructured.Unstructured) childEval {
 	conds, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !found {
 		// No conditions at all (authn's seed ServiceAccount, and friends). Still must NOT affect
 		// Ready — that is the #72 wedge — but it is honestly unevaluated rather than assessed-healthy.
-		return childUnevaluated
+		return unevaluatedBecause(causeNoReadyCondition)
 	}
 	for _, c := range conds {
 		cm, ok := c.(map[string]any)
@@ -981,9 +1052,9 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			//
 			// MAPPED AHEAD OF ARRIVAL, as TerminalByDesign was: until an oasgen release writes the
 			// reason, this arm is unreachable and those children still read healthy.
-			return childUnevaluated
+			return unevaluatedBecause(causeAssertedReady)
 		case stringField(cm, "status") == "True":
-			return childHealthy
+			return is(childHealthy)
 		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "TerminalByDesign":
 			// #498 (Diego, 2026-11-14): the child DECLARES that resting at Ready=False is its
 			// healthy end state, so it is healthy here, and the stall deadline (when it ships) never
@@ -1006,9 +1077,9 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// conditions.ReasonTerminalByDesign; reasoncontract_test.go pins this literal to it.
 			// READ ONLY: the cdc never writes it on a composition (installer's dependency gate would
 			// withhold a composition carrying it); a test pins that too.
-			return childHealthy
+			return is(childHealthy)
 		case stringField(cm, "reason") == "Unavailable":
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == "CreateFailed",
 			stringField(cm, "reason") == "UpdateFailed":
 			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to
@@ -1052,7 +1123,7 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// delete must HOLD the finalizer (#261): giving it a terminal-looking Ready reason
 			// invites exactly the finalizer removal that orphans a paid resource. If a
 			// `DeleteFailed` ever appears, it does not belong in this arm.
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == "AuthorizationDenied":
 			// rest-dynamic-controller's reason for a refusal that WILL NOT BE RETRIED — a 403 with
 			// no rate-limit signal is a decision, and nothing the controller does next can change
@@ -1072,7 +1143,7 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			//
 			// Keyed on the reason, not on Status=False, deliberately: a converging child also
 			// reports False and must keep holding the parent back rather than failing it.
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == "DriftNotConverging":
 			// THE ONLY ONE OF THESE THAT WAS WRONG ABOUT A LIVE CLUSTER. Unlike CreateFailed and
 			// UpdateFailed above, which are mapped ahead of their arrival, DriftNotConverging has
@@ -1096,7 +1167,7 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// Same shape as AuthorizationDenied, and found the same way: the more precisely RDC
 			// named the state, the less this rollup understood it. A generic Unavailable would have
 			// bucketed correctly all along.
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == "CreateUnreachable",
 			stringField(cm, "reason") == "NoCreateVerbDeclared",
 			stringField(cm, "reason") == "NoIdentifierRecorded":
@@ -1132,14 +1203,14 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// identifier written into the CR's status, or a findby declared on the RestDefinition.
 			// Falsifier (oasgen-provider): a child leaving this reason without either means it is not
 			// permanent and this mapping must be revisited.
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == condition.ReasonCreateOutcomeUnknown:
 			// unstructured-runtime#93 (v1.21.0): a create the runtime refuses to repeat because its
 			// outcome cannot be determined. It stays until an existence check succeeds or a human,
 			// having verified the external state, clears krateo.io/external-create-pending: a parent
 			// counting it converging would wait forever on a child that needs a human (Diego,
 			// 2026-11-15: failed). Before v1.21.0 the same state was a bare Creating, read as converging.
-			return childFailed
+			return is(childFailed)
 		case stringField(cm, "reason") == condition.ReasonZeroEvidence,
 			stringField(cm, "reason") == "NotObserved",
 			stringField(cm, "reason") == "ObserveFailed":
@@ -1217,7 +1288,12 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			// Keyed on the REASON, never on bare Unknown: a genuinely converging child also
 			// reports a non-True Ready and must keep holding the parent back. That transient is
 			// what the converging branch exists for.
-			return childUnevaluated
+			// The CAUSE splits this bucket for status.unevaluatedChildren: a child at ZeroEvidence has
+			// no evidence BELOW it; NotObserved and ObserveFailed were never observed at all.
+			if stringField(cm, "reason") == condition.ReasonZeroEvidence {
+				return unevaluatedBecause(causeNoEvidenceBelow)
+			}
+			return unevaluatedBecause(causeNotObserved)
 		default:
 			// Not-True for any other reason: converging. TWO routes reach here and both must,
 			// so do not narrow this to a Creating-only case.
@@ -1229,13 +1305,13 @@ func krateoReady(obj *unstructured.Unstructured) childState {
 			//     the childFailed arm above and lands here. That is the whole of "krateoReady stops
 			//     mapping the converging case to childFailed" — the mapping is keyed on the reason,
 			//     and #234 changed the reason rather than adding a branch.
-			return childConverging
+			return is(childConverging)
 		}
 	}
 	// Has conditions but no Ready type. This is publish-pet's case: github.krateo.io/repositories
 	// carries only Synced=False/ReconcileError, so there is nothing here to read. Unevaluated, not
 	// healthy — the composition was reporting green over a child whose failure we never looked at.
-	return childUnevaluated
+	return unevaluatedBecause(causeNoReadyCondition)
 }
 
 // workloadReady handles Deployment/StatefulSet/ReplicaSet (spec.replicas) and DaemonSet
@@ -1418,4 +1494,15 @@ func crdReady(obj *unstructured.Unstructured) childState {
 		return childHealthy
 	}
 	return childConverging
+}
+
+// unevaluatedChildren is status.unevaluatedChildren: the unevaluated children counted by cause, every
+// cause present. Its values sum to managedChildrenCount minus healthEvaluatedChildren minus
+// unreadableChildrenCount, which TestUnevaluatedChildrenSumToTheUnevaluatedCount pins.
+func unevaluatedChildren(v healthVerdict) map[string]any {
+	out := make(map[string]any, len(unevaluatedCauses))
+	for _, c := range unevaluatedCauses {
+		out[string(c)] = int64(v.unevaluatedBy[c])
+	}
+	return out
 }

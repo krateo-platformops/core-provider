@@ -119,6 +119,22 @@ spec:
               unreadableChildrenCount:
                 type: integer
                 description: How many managed children this controller's ServiceAccount was REFUSED a read of (HTTP 403). Non-zero is a gap in the generated RBAC, not a problem with the children; the child names are in the Ready condition message.
+              unevaluatedChildren:
+                type: object
+                description: "Why the managed children that could not be health-evaluated were not, counted by cause. Every cause is written on every rollup, zero included. The counts sum to managedChildrenCount minus healthEvaluatedChildren minus unreadableChildrenCount. None of them changes Ready; they say what to do about a composition at Ready=Unknown/ZeroEvidence."
+                properties:
+                  noReadyCondition:
+                    type: integer
+                    description: "Children that publish no Ready condition (no conditions, or conditions without Ready) and have no kind-specific mapping. Actionable with a readiness projection on the CompositionDefinition (apiRef plus statusDataTemplate)."
+                  assertedReady:
+                    type: integer
+                    description: "Children whose Ready=True was asserted, not observed (reason AssumedUpToDate: a rest-dynamic-controller kind declaring neither get nor findby). A question for the kind's RestDefinition."
+                  notObserved:
+                    type: integer
+                    description: "Children whose own controller could not observe the external resource (Ready reason NotObserved or ObserveFailed). Usually an outage or a credential problem on that child."
+                  noEvidenceBelow:
+                    type: integer
+                    description: "Children that are themselves at Ready=Unknown/ZeroEvidence: the missing evidence is in their own children."
               conditions:
                 description: Conditions of the resource.
                 items:

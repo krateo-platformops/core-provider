@@ -437,6 +437,11 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 				return fmt.Errorf("setting status.%s: %w", field, err)
 			}
 		}
+		// Diego, 2026-11-16: WHY the unevaluated children are unevaluated, as numbers rather than
+		// prose (the same rule as the counts above). Every cause is written, zero included.
+		if err := maps.SetNestedField(mg.Object, unevaluatedChildren(v), "status", "unevaluatedChildren"); err != nil {
+			return fmt.Errorf("setting status.unevaluatedChildren: %w", err)
+		}
 	}
 
 	if opts.absentChildren != nil {
