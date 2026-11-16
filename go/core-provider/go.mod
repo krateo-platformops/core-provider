@@ -12,8 +12,8 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.17
 	github.com/krateo-platformops/audit v0.15.0
-	github.com/krateo-platformops/plumbing v1.82.0
-	github.com/krateo-platformops/provider-runtime v1.18.0
+	github.com/krateo-platformops/plumbing v1.86.0
+	github.com/krateo-platformops/provider-runtime v1.20.0
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
