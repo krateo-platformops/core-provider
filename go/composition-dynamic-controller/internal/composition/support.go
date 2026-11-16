@@ -2,6 +2,7 @@ package composition
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -316,7 +317,8 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 		// "declared" test. ApiResolved is therefore present whenever an apiRef exists, True or
 		// False — never absent-on-success, so a consumer can tell "resolved" from "nobody looked".
 		if h.apiResolver != nil {
-			api, aerr := h.apiResolver.Resolve(ctx, mg)
+			res, aerr := h.apiResolver.Resolve(ctx, mg)
+			api := res.API
 			switch {
 			case aerr != nil:
 				failed := apiResolvedFailure(aerr)
@@ -337,16 +339,35 @@ func (h *handler) setStatus(ctx context.Context, mg *unstructured.Unstructured, 
 					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
 				}
 			default:
+				// What resolved is projected whatever the stages said; the condition says how much
+				// of it there is.
 				resolved["api"] = api
-				if cerr := setApiResolvedCondition(mg, conditionreason.ApiResolved.WithMessage(
-					"apiRef resolved; .api projection source is available")); cerr != nil {
+				cond := apiResolvedFromOutcomes(res.Outcomes)
+				if cerr := setApiResolvedCondition(mg, cond); cerr != nil {
 					xcontext.Logger(ctx).Info("setting ApiResolved condition", "error", cerr.Error())
+				}
+				if cond.Reason == conditionreason.ReasonApiPartiallyResolved {
+					h.eventRecorder.Event(mg, event.Warning(reasonApiRefPartiallyResolved, "Observe", errors.New(cond.Message)))
+					xcontext.Logger(ctx).Info("status projection: apiRef resolved partially", "stages", res.Outcomes.Summary())
 				}
 			}
 		}
-		if perr := statusprojection.Project(ctx, mg, resolved, h.statusDataTemplate); perr != nil {
+		report, perr := statusprojection.ProjectReport(ctx, mg, resolved, h.statusDataTemplate)
+		if perr != nil {
 			xcontext.Logger(ctx).Info("status projection: some fields could not be set", "error", perr.Error())
 		}
+		// Diego, 2026-11-16: the status fields holding a value this pass did NOT write, so a reader
+		// can tell a stale value from a fresh one. A mapping that yields no output (`// empty`) or
+		// fails keeps whatever an earlier pass wrote, which no status read can tell apart from a
+		// fresh value; the portal's Access card keys on it. Written on every projection, `[]`
+		// included, so absent means not measured.
+		if err := unstructured.SetNestedStringSlice(mg.Object, report.Unrefreshed(mg), "status", "unrefreshedFields"); err != nil {
+			return fmt.Errorf("setting status.unrefreshedFields: %w", err)
+		}
+	} else {
+		// No projection ran (paused, or no statusDataTemplate): a list from an earlier pass would
+		// describe a pass that is not this one.
+		unstructured.RemoveNestedField(mg.Object, "status", "unrefreshedFields")
 	}
 	if gerr := statusprojection.SetObservedGeneration(mg); gerr != nil {
 		return fmt.Errorf("setting observedGeneration: %w", gerr)

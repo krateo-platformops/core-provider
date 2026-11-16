@@ -17,16 +17,17 @@ import (
 
 // fakeResolver is a test double for APIResolver.
 type fakeResolver struct {
-	api    map[string]any
-	err    error
-	gotMg  *unstructured.Unstructured
-	called int
+	api      map[string]any
+	outcomes snowplow.StageOutcomes
+	err      error
+	gotMg    *unstructured.Unstructured
+	called   int
 }
 
-func (f *fakeResolver) Resolve(_ context.Context, mg *unstructured.Unstructured) (map[string]any, error) {
+func (f *fakeResolver) Resolve(_ context.Context, mg *unstructured.Unstructured) (snowplow.Resolution, error) {
 	f.called++
 	f.gotMg = mg
-	return f.api, f.err
+	return snowplow.Resolution{API: f.api, Outcomes: f.outcomes}, f.err
 }
 
 func fireworksMg(gen int64) *unstructured.Unstructured {

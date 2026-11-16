@@ -33,6 +33,8 @@ func baselineStatusWrites() map[string]any {
 		"releaseName": "lab-ha-54xd86b6",
 		// Why the unevaluated children were not evaluated, by cause (Diego, 2026-11-16).
 		"unevaluatedChildren": map[string]any{"noReadyCondition": int64(1), "assertedReady": int64(0), "notObserved": int64(0), "noEvidenceBelow": int64(0)},
+		// The projected fields this pass left stale (Diego, 2026-11-16).
+		"unrefreshedFields": []any{"url"},
 	}
 }
 

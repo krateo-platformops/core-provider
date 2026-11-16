@@ -26,7 +26,7 @@ func NewSnowplowAPIResolver(client *snowplow.Client, ref snowplow.ApiRef, extras
 	return &SnowplowAPIResolver{client: client, ref: ref, extras: extras}
 }
 
-func (r *SnowplowAPIResolver) Resolve(ctx context.Context, mg *unstructured.Unstructured) (map[string]any, error) {
+func (r *SnowplowAPIResolver) Resolve(ctx context.Context, mg *unstructured.Unstructured) (snowplow.Resolution, error) {
 	return r.client.Resolve(ctx, r.ref, r.mergedExtras(mg))
 }
 

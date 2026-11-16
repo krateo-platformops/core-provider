@@ -47,17 +47,25 @@ func (c *Client) WithHTTPClient(h *http.Client) *Client { c.httpClient = h; retu
 
 const restActionAPIVersion = "templates.krateo.io/v1"
 
+// Resolution is a resolved RESTAction: the keyed `.api` response map, and snowplow's verdict on
+// its stages. A 200 is not a complete resolve: a stage with continueOnError can fail and its data
+// is then simply missing from API, which only Outcomes says.
+type Resolution struct {
+	API      map[string]any
+	Outcomes StageOutcomes
+}
+
 // Resolve resolves the referenced RESTAction with the given extras (the per-instance
 // request-extras merged over the RESTAction's inline apiRef.extras by snowplow) and returns
-// the keyed `.api` response map from the resolved CR's status.
-func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any) (map[string]any, error) {
+// the keyed `.api` response map from the resolved CR's status, with the reply's stage outcomes.
+func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any) (Resolution, error) {
 	if ref.Name == "" || ref.Namespace == "" {
-		return nil, fmt.Errorf("apiRef name and namespace are required")
+		return Resolution{}, fmt.Errorf("apiRef name and namespace are required")
 	}
 
 	u, err := url.JoinPath(c.server, "/call")
 	if err != nil {
-		return nil, fmt.Errorf("joining snowplow url: %w", err)
+		return Resolution{}, fmt.Errorf("joining snowplow url: %w", err)
 	}
 	q := url.Values{}
 	q.Set("apiVersion", restActionAPIVersion)
@@ -67,19 +75,19 @@ func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any)
 	if len(extras) > 0 {
 		b, err := json.Marshal(extras)
 		if err != nil {
-			return nil, fmt.Errorf("encoding extras: %w", err)
+			return Resolution{}, fmt.Errorf("encoding extras: %w", err)
 		}
 		q.Set("extras", string(b))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?"+q.Encode(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return Resolution{}, fmt.Errorf("creating request: %w", err)
 	}
 	if c.token != nil {
 		tok, err := c.token(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("acquiring snowplow token: %w", err)
+			return Resolution{}, fmt.Errorf("acquiring snowplow token: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -87,23 +95,24 @@ func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling snowplow: %w", err)
+		return Resolution{}, fmt.Errorf("calling snowplow: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("snowplow returned %d: %s", resp.StatusCode, string(body))
+		return Resolution{}, fmt.Errorf("snowplow returned %d: %s", resp.StatusCode, string(body))
 	}
+	outcomes := ParseStageOutcomes(resp.Header)
 
 	// snowplow returns the resolved RESTAction CR; .status is the keyed .api response map.
 	var cr struct {
 		Status map[string]any `json:"status"`
 	}
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return nil, fmt.Errorf("decoding snowplow response: %w", err)
+		return Resolution{}, fmt.Errorf("decoding snowplow response: %w", err)
 	}
 	if cr.Status == nil {
-		return map[string]any{}, nil
+		return Resolution{API: map[string]any{}, Outcomes: outcomes}, nil
 	}
-	return cr.Status, nil
+	return Resolution{API: cr.Status, Outcomes: outcomes}, nil
 }

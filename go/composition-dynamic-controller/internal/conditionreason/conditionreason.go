@@ -203,6 +203,8 @@ const (
 	ReasonAuthnError               = "AuthnError"
 	ReasonAuthnRejected            = "AuthnRejected"
 	ReasonResolveFailed            = "ResolveFailed"
+	ReasonApiPartiallyResolved     = "ApiPartiallyResolved"
+	ReasonStageOutcomesUnknown     = "StageOutcomesUnknown"
 )
 
 // Synced, written by the cdc (the graceful pause) and by unstructured-runtime.
@@ -258,7 +260,13 @@ var (
 // ApiResolved, written by the cdc when the CompositionDefinition has an apiRef (apiresolved.go).
 var (
 	ApiResolved = on(TypeApiResolved, ReasonApiResolved, metav1.ConditionTrue, WriterCDC,
-		"the apiRef resolved; the .api projection source is available", Clearance{Steady, "the healthy end state"})
+		"the apiRef resolved and snowplow confirmed every RESTAction stage succeeded (X-Snowplow-Stage-Outcomes: [])", Clearance{Steady, "the healthy end state"})
+	ApiPartiallyResolved = on(TypeApiResolved, ReasonApiPartiallyResolved, metav1.ConditionFalse, WriterCDC,
+		"some RESTAction stages did not succeed (message: each stage and snowplow's code); the resolved data IS projected, the only False with data, and status.unrefreshedFields names the fields left stale",
+		Clearance{Indefinite, "until the stages succeed; Forbidden, NotFound, Aborted and NotRun do not heal on a retry, a transient code clears on the next reconcile"})
+	ApiStageOutcomesUnknown = on(TypeApiResolved, ReasonStageOutcomesUnknown, metav1.ConditionUnknown, WriterCDC,
+		"snowplow answered but did not say whether every stage succeeded (no readable X-Snowplow-Stage-Outcomes; snowplow older than 1.12.57); the data IS projected",
+		Clearance{Indefinite, "until snowplow sends the header"})
 	ApiEmpty = on(TypeApiResolved, ReasonApiEmpty, metav1.ConditionFalse, WriterCDC,
 		"the apiRef resolved without error but returned no data", Clearance{Indefinite, "until the RESTAction returns data"})
 	ApiAuthnUnreachable = on(TypeApiResolved, ReasonAuthnUnreachable, metav1.ConditionFalse, WriterCDC,
@@ -304,7 +312,7 @@ func Table() []Reason {
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,
 		ChartRenderable, ChartUnservedKind, ChartValuesSchemaViolation, ChartInspectorRejected, ChartInspectorUnavailable,
 		RBACApplied, RBACApplyFailed, RBACNamespaceTerminating, RBACNotEvaluated,
-		ApiResolved, ApiEmpty, ApiAuthnUnreachable, ApiAuthnError, ApiAuthnRejected, ApiResolveFailed, apiAuthnPassthrough,
+		ApiResolved, ApiPartiallyResolved, ApiStageOutcomesUnknown, ApiEmpty, ApiAuthnUnreachable, ApiAuthnError, ApiAuthnRejected, ApiResolveFailed, apiAuthnPassthrough,
 	}
 }
 
