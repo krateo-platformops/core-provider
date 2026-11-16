@@ -95,19 +95,33 @@ order is the order work runs in, and a spec change goes ahead of a resync. Nothi
 object, because the controller's own saturation is not a state of the object. With the default
 `cdc.resources` (no CPU limit), `cpu.pressure` reflects contention on the node, not a quota.
 
-**Measured cost, and why it is off by default** (unstructured-runtime#66, core-provider 2.13.73, GKE,
-one cdc at a 250m CPU limit, 64 compositions). This measured the rule BEFORE unstructured-runtime
-v1.16.0: a cut on every 1s sample of "some avg10" and recovery +1 per clean 30s, which #82 replaced
-because avg10 kept one stall over the threshold for several samples and cut several times. The
-current rule has NOT been re-measured yet; these numbers are the old rule's. With that rule on at
-threshold 50, draining took
-**1.42x** as long as with it off in steady state and **1.52x** on a restart into a backlog. In return
-the controller held CPU pressure near the threshold (peak avg10 PSI 50-58) and left 7-10% of its quota
-unused, where with the rule off it ran throttled. That is n=3 per arm, on one node, one load shape and
-one limit. Whether the slowdown is worth it is a choice, not a measurement, so the rule stays **opt-in
-per controller** (Diego, 2026-11-12), with 50 as the documented starting threshold. The default is to
-be revisited once provider-runtime's CPU-limit cost model (#57) finishes calibration, since it targets
-the same problem.
+**Measured cost** (unstructured-runtime#66 harness, GKE single node, one cdc at a 250m CPU limit, 64
+compositions, threshold 50 against off, n=3 per arm, alternated). Raw records are on the branch
+`test/66-saturation-measurement-harness`, under `hack/saturation-measure/results/`.
+
+| | rule off | threshold 50 | cost |
+|---|---|---|---|
+| **core-provider 2.13.106** (the current rule, unstructured-runtime v1.16.0+, #82): steady | 400.2 s | 490.8 s | **1.23x** |
+| 2.13.106: restart into a backlog | 380.8 s | 474.6 s | **1.25x** |
+| 2.13.73 (the rule before #82): steady | 384 s | 544 s | 1.42x |
+| 2.13.73: restart into a backlog | 344 s | 524 s | 1.52x |
+
+#82 replaced a cut on every 1s sample of "some avg10" (a single stall kept avg10 high for several
+samples, so it cut several times) with one cut per 10s window. On 2.13.106 the rule engaged: local
+capacity averaged 2.8, and the container was throttled for 92% of the run, against 98.6% with the
+rule off. It holds pressure less tightly than the old rule did: peak avg10 PSI was 67.5 (old rule:
+50-58) and ~2% of the quota went unused (old rule: 7-10%). That is n=3 per arm, on one node, one load
+shape and one limit.
+
+**The chart default stays off.** Diego decided on 2026-11-16, with these numbers in front of him, to
+enable the rule for every composition controller on the Krateo platform. That is set in the
+installer chart's **core-provider subchart values** (the top-level `core-provider:` block, installer
+#997), at threshold 50. It is not a change to this chart's default, and not an Installer CR
+`componentValues` entry: core-provider is a subchart there, not a pinned component, and a key set
+under `componentValues.core-provider` would be pruned silently. On
+krateo-057 no controller ran more than one reconcile at a time over 24h (`in_flight_max <= 1`,
+docs/design/cdc-pooling.md §5b), and the rule's floor is 1, so the enablement is expected to change
+nothing measurable there today. It is measured before and after the roll all the same.
 
 With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity` and `.saturation.input`
 show what the rule is doing. See the
