@@ -64,7 +64,8 @@ func TestTerminalByDesign_LiteralIsPlumbingsContract(t *testing.T) {
 // READ ONLY. The cdc must never write TerminalByDesign on a composition: installer's dependency gate
 // withholds a composition with an unrecognised Ready reason, which would drop its dependants from the
 // umbrella render (installer, 2026-11-14). Writing it needs the string, so the guard is that the
-// string, or plumbing's constant, appears in this module's non-test code ONLY inside krateoReady,
+// string, or plumbing's constant, appears in this module's non-test code ONLY inside krateoEval (krateoReady's
+// evaluator since the unevaluated-cause split),
 // exactly once (that one is the read arm; the count also fails if the arm is removed).
 func TestTerminalByDesign_IsNeverWrittenOnAComposition(t *testing.T) {
 	root := filepath.Join("..", "..") // the cdc module root
@@ -87,7 +88,7 @@ func TestTerminalByDesign_IsNeverWrittenOnAComposition(t *testing.T) {
 		files++
 		for _, decl := range f.Decls {
 			reader := false
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "krateoReady" {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "krateoEval" {
 				reader = true
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
