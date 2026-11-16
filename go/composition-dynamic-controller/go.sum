@@ -206,8 +206,8 @@ github.com/krateo-platformops/audit v0.15.0 h1:QVFDFnFyL+VzWxH0uSkfQIicM5CyxohWc
 github.com/krateo-platformops/audit v0.15.0/go.mod h1:+E0mwdz5JW8qlWxH2U4YxOAWegM3UobhwgBkOqKwrQM=
 github.com/krateo-platformops/gojq v0.13.0 h1:OjASARn2rx67oaRJm6Tb8JuH8S1LAjGQhnffcRQvATw=
 github.com/krateo-platformops/gojq v0.13.0/go.mod h1:R2U7pnOvAMBv2PS/l40tYf5CnNRS72rv+yh69RxNNFY=
-github.com/krateo-platformops/plumbing v1.80.0 h1:xu/ebq5AAk4FPAukAxWv2Y62gI5fAixlW/78TPfku10=
-github.com/krateo-platformops/plumbing v1.80.0/go.mod h1:luhuedDzSupgOOKaQeBXTegwKvjh3F3xH946bmR0WSA=
+github.com/krateo-platformops/plumbing v1.83.0 h1:oGIUQ04utnoodCWVUbLtgpP4OwUGErp8xjmK11gBahk=
+github.com/krateo-platformops/plumbing v1.83.0/go.mod h1:luhuedDzSupgOOKaQeBXTegwKvjh3F3xH946bmR0WSA=
 github.com/krateo-platformops/unstructured-runtime v1.21.1 h1:l/2E4i2l+hXEcCI9w0smkIr/feIESyNwYtRWayphins=
 github.com/krateo-platformops/unstructured-runtime v1.21.1/go.mod h1:0Qr/ecYVpna05jK9n+vvScvPjIyvF3aZV966toEyOmA=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
