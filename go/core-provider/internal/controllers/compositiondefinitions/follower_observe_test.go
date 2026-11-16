@@ -38,6 +38,7 @@ func followerInstance(name, versionLabel, cdName, cdNamespace string) *unstructu
 // every served-version prune of the Kind back for good. Observe must therefore keep a follower
 // not-up-to-date while one of its instances waits for migration, so Update migrates it.
 func TestObserveFollower_WaitsForItsOwnInstancesToMigrate(t *testing.T) {
+	useTestSchemaTemplate(t)
 	follower := ownerCD("krateo-bp-fw", "fw", 1)
 	follower.Status.ApiVersion = followerGVR.GroupVersion().String()
 	follower.Status.Kind = "FireworksApp"
@@ -55,13 +56,20 @@ func TestObserveFollower_WaitsForItsOwnInstancesToMigrate(t *testing.T) {
 
 	observe := func(objs ...runtime.Object) bool {
 		t.Helper()
+		// The follower's own schema ConfigMap is in place, so only the migration decides here
+		// (definitionschema_test.go covers the ConfigMap).
+		hub := hubDyn()
+		ctx := contexttools.CtxWithLogger(context.Background(), logging.NewNopLogger())
+		if err := deploy.ApplyDefinitionSchemaConfigMap(ctx, hub, followerGVR, follower.Namespace, JSONSchemaTemplateConfigmapPath, []byte(followerSchema)); err != nil {
+			t.Fatal(err)
+		}
 		e := &external{
 			kube: clientfake.NewClientBuilder().Build(),
 			dynamic: dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 				map[schema.GroupVersionResource]string{followerGVR: "FireworksAppList"}, objs...),
+			mgmtDynamic: hub,
 		}
-		ctx := contexttools.CtxWithLogger(context.Background(), logging.NewNopLogger())
-		obs, err := e.observeFollower(ctx, follower.DeepCopy(), crd, followerGVR, gvk, "", &owner)
+		obs, err := e.observeFollower(ctx, follower.DeepCopy(), crd, followerGVR, gvk, "", &owner, []byte(followerSchema))
 		if err != nil {
 			t.Fatalf("observeFollower: %v", err)
 		}
@@ -79,7 +87,7 @@ func TestObserveFollower_WaitsForItsOwnInstancesToMigrate(t *testing.T) {
 	behind.Status.ApiVersion = "composition.krateo.io/v1-0-0"
 	e := &external{kube: clientfake.NewClientBuilder().Build()}
 	ctx := contexttools.CtxWithLogger(context.Background(), logging.NewNopLogger())
-	obs, err := e.observeFollower(ctx, behind, crd, followerGVR, gvk, "", &owner)
+	obs, err := e.observeFollower(ctx, behind, crd, followerGVR, gvk, "", &owner, []byte(followerSchema))
 	if err != nil || obs.ResourceUpToDate {
 		t.Fatalf("follower whose status is still on the old version must go through Update, got upToDate=%v err=%v", obs.ResourceUpToDate, err)
 	}
