@@ -175,11 +175,14 @@ jobs:
         with:
           go-version: 'stable'
 
-      # Pinned to the controller-runtime 0.22 line, matching sigs.k8s.io/controller-runtime v0.22.3
-      # in the cdc's go.mod. Do NOT use @latest: newer setup-envtest requires a toolchain this
-      # module does not use, and the failure is an unhelpful version error at install time.
+      # Pinned to an exact pseudo-version of the controller-runtime 0.22 line (commit a19ec76a, the
+      # release-0.22 head as of 2026-01-25), matching sigs.k8s.io/controller-runtime v0.22.3 in the
+      # cdc's go.mod. Do NOT use @latest: newer setup-envtest requires a toolchain this module does
+      # not use. Do NOT use the branch name either: on 2026-11-16 the proxy resolved @release-0.22 to
+      # the ROOT controller-runtime module ("does not contain package .../tools/setup-envtest"), which
+      # failed every envtest job (plumbing#197 hit the same). An exact version needs no branch lookup.
       - name: Install setup-envtest
-        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260125163108-a19ec76a3c5d
 
       # The #310 suite BUILDS go/testprovider from inside the test (a separate module, so that
       # provider-runtime stays out of the cdc's dependency graph). Warm its module cache here:
@@ -414,7 +417,7 @@ jobs:
       # The same pinned tool as the cdc job: it only downloads apiserver/etcd assets, so the pin is
       # about this runner's toolchain, not about core-provider's controller-runtime version.
       - name: Install setup-envtest
-        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260125163108-a19ec76a3c5d
       - name: Run the core-provider envtest suite
         working-directory: go/core-provider
         run: |
