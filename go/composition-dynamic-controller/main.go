@@ -2,22 +2,21 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"k8s.io/client-go/kubernetes"
 	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller/builder"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/telemetry"
-	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 
 	"github.com/go-logr/logr"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
@@ -39,7 +38,6 @@ import (
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/saturation"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -156,6 +154,7 @@ func main() {
 	otelExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	deploymentName := flag.String("deployment-name", env.String("DEPLOYMENT_NAME", ""), "The deployment name for stable resource identification in metrics.")
 	leaseName := flag.String("lease-name", env.String("COMPOSITION_CONTROLLER_LEASE_NAME", ""), "The coordination.k8s.io Lease, in the pod's namespace, this controller must hold to reconcile (core-provider renders it). Empty: no Lease.")
+	poolIndex := flag.String("pool-index", env.String("COMPOSITION_CONTROLLER_POOL_INDEX", ""), "Pool mode (core-provider docs/design/cdc-pooling.md §5c): the membership index ConfigMap, in the pod's namespace, naming the members this process runs. Empty: a dedicated controller for the GVR in the flags.")
 	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects
 	// (chart-set cdc.image.tag): the stamp describes the image actually running, the env var describes
 	// what the chart believes it deployed, and they diverge whenever a tag is moved or an image is
@@ -218,33 +217,18 @@ func main() {
 	// Parse the declarative status projections shipped from the CompositionDefinition.
 	// An invalid value is non-fatal: status projection is simply disabled (baseline status
 	// is unaffected).
-	var statusMappings []statusprojection.Mapping
-	if s := strings.TrimSpace(*statusDataTemplate); s != "" {
-		if err := json.Unmarshal([]byte(s), &statusMappings); err != nil {
-			log.Info("ignoring invalid COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE", "error", err.Error())
-		}
-	}
 
 	// Build the apiRef resolver when an apiRef is declared: the CDC exchanges its projected
 	// ServiceAccount token for an authn JWT (authn.Client.Token) and uses it as the Bearer for
 	// snowplow's /call endpoint, resolving the RESTAction's status into the ".api" projection
 	// source. Absent apiRef → nil resolver (the ".api" source is simply unavailable).
-	var apiResolver composition.APIResolver
-	if name := strings.TrimSpace(*apiRefName); name != "" {
-		var extras map[string]any
-		if s := strings.TrimSpace(*apiRefExtras); s != "" {
-			if err := json.Unmarshal([]byte(s), &extras); err != nil {
-				log.Info("ignoring invalid COMPOSITION_CONTROLLER_API_REF_EXTRAS", "error", err.Error())
-			}
-		}
+	// One resolver factory for both modes: a dedicated controller's apiRef comes from its flags, a pool
+	// member's from its ConfigMap, and both are resolved through the process's authn and snowplow.
+	resolverFactory := func(name, ns string, extras map[string]any) composition.APIResolver {
 		authnClient := authn.New(*authnURL, *saTokenPath)
 		snowplowClient := snowplow.New(*snowplowURL, authnClient.Token)
-		apiResolver = composition.NewSnowplowAPIResolver(
-			snowplowClient,
-			snowplow.ApiRef{Name: name, Namespace: *apiRefNamespace},
-			extras,
-		)
-		log.Info("apiRef status source enabled", "name", name, "namespace", *apiRefNamespace, "snowplow", *snowplowURL)
+		log.Info("apiRef status source enabled", "name", name, "namespace", ns, "snowplow", *snowplowURL)
+		return composition.NewSnowplowAPIResolver(snowplowClient, snowplow.ApiRef{Name: name, Namespace: ns}, extras)
 	}
 
 	// Kubernetes configuration
@@ -432,12 +416,30 @@ func main() {
 		PodName:                 os.Getenv("POD_NAME"),
 		MetricsBindAddress:      metricsBindAddress,
 	}
-	members := []manager.Member{{
-		GVR:                schema.GroupVersionResource{Group: *resourceGroup, Version: *resourceVersion, Resource: *resourceName},
-		LeaseName:          *leaseName,
-		StatusDataTemplate: statusMappings,
-		APIResolver:        apiResolver,
-	}}
+	if *poolIndex != "" {
+		// Returned, not os.Exit on success, so main's deferred telemetry shutdown still flushes.
+		if code := runPool(ctx, log, process, cfg, *poolIndex, resolverFactory, *healthProbePort); code != 0 {
+			os.Exit(code)
+		}
+		return
+	}
+	// The dedicated member is read through the same parser a pool uses for each of its members, so
+	// one configuration cannot be parsed two ways. Workers and resync stay the process's (its flags).
+	member, err := manager.MemberFromConfig(map[string]string{
+		manager.KeyGroup:              *resourceGroup,
+		manager.KeyVersion:            *resourceVersion,
+		manager.KeyResource:           *resourceName,
+		manager.KeyLeaseName:          *leaseName,
+		manager.KeyStatusDataTemplate: *statusDataTemplate,
+		manager.KeyAPIRefName:         *apiRefName,
+		manager.KeyAPIRefNamespace:    *apiRefNamespace,
+		manager.KeyAPIRefExtras:       *apiRefExtras,
+	}, resolverFactory, func(msg string, err error) { log.Info(msg, "error", err.Error()) })
+	if err != nil {
+		log.Error(err, "Reading the controller's configuration.")
+		os.Exit(1)
+	}
+	members := []manager.Member{member}
 	if *leaseName != "" {
 		log.Info("Ownership lease enabled", "lease", process.PodNamespace+"/"+*leaseName, "identity", process.PodName)
 	} else {
@@ -479,4 +481,40 @@ func main() {
 		log.Error(err, "Running controller.")
 		os.Exit(1)
 	}
+}
+
+// Kept in main.go, not a second file: the image builds `go build ./main.go` (Dockerfile), which
+// compiles main.go alone (#370).
+// runPool runs this process in pool mode (core-provider docs/design/cdc-pooling.md §5c): the members
+// come from the membership index in the pod's namespace, not from this process's flags. It returns
+// the process exit code.
+func runPool(ctx context.Context, log logging.Logger, process manager.Process, cfg *rest.Config, index string,
+	resolver manager.ResolverFactory, healthProbePort int) int {
+	if process.PodNamespace == "" {
+		log.Error(errors.New("POD_NAMESPACE is unset"), "Pool mode needs the pod's namespace: the index and the member configurations live there.")
+		return 1
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Error(err, "Building the Kubernetes client for the pool.")
+		return 1
+	}
+	pool := &manager.Pool{Process: process, Client: cs, Namespace: process.PodNamespace, Index: index, Resolver: resolver}
+	if healthProbePort != 0 {
+		healthCtx, stop := context.WithCancel(context.Background())
+		defer stop()
+		addr, err := health.Serve(healthCtx, fmt.Sprintf(":%d", healthProbePort), pool,
+			func(err error) { log.Error(err, "Health probe server failed.") })
+		if err != nil {
+			log.Error(err, "Starting health probe server.")
+			return 1
+		}
+		log.Info("Health probe server enabled", "bindAddress", addr.String(), "liveness", health.LivenessPath, "readiness", health.ReadinessPath)
+	}
+	log.Info("Pool mode: running the members of the index", "index", process.PodNamespace+"/"+index)
+	if err := pool.Run(ctx); err != nil {
+		log.Error(err, "Running the pool.")
+		return 1
+	}
+	return 0
 }
