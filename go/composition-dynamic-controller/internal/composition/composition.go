@@ -501,11 +501,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// (even rolling back a pending-rollback), which — with the reconcile re-enqueue cadence —
 		// produced an Upgrade<->Rollback thrash on the 319-resource portal composition.
 		pendingFor := time.Since(operationClock(rel))
-		// #461: an operation whose starter pod no longer exists will never settle; clear it now
+		// #461, #541: an operation whose starter (pod, or process of this pod) is gone will never settle; clear it now
 		// instead of after the grace. Only on positive evidence (see orphanedOperation).
 		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn))
 		if orphan {
-			log.Info("Incomplete helm operation was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+			log.Info("Orphaned helm operation: the controller that started it is gone (a deleted pod, or an earlier process of this pod; see reason); clearing it now instead of waiting out the grace.",
 				"status", string(rel.Status), "pendingFor", pendingFor.String(), "reason", why)
 		}
 		if retiring {
@@ -1549,7 +1549,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		stuckFor := time.Since(operationClock(rel))                        // #497: the uninstall's start, not the deploy
 		orphan, why := orphanedOperation(ctx, mg, rel, podLookupFrom(dyn)) // #461, as in Observe
 		if orphan {
-			log.Info("Stuck uninstall was started by a controller pod that no longer exists; clearing it now instead of waiting out the grace.",
+			log.Info("Orphaned helm uninstall: the controller that started it is gone (a deleted pod, or an earlier process of this pod; see reason); clearing it now instead of waiting out the grace.",
 				"stuckFor", stuckFor.String(), "reason", why)
 		}
 		// #497: a lock left by an uninstall whose call RETURNED (with an error) is not in flight.
