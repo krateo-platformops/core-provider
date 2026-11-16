@@ -31,6 +31,23 @@ data:
   # controller for it (the next pod of a rolling update, a pool) waits for the same Lease. Granted by
   # assets/cdc/rbac/lease-role.yaml from the same value.
   COMPOSITION_CONTROLLER_LEASE_NAME: {{ "{{" }} .controllerLease {{ "}}" }}
+  {{ "{{" }}- if .pool {{ "}}" }}
+  # docs/design/cdc-pooling.md §5c: a POOL member is configured only from this ConfigMap (the pool's
+  # process has no per-Kind arguments), so it carries what a dedicated controller takes as arguments:
+  # its Kind x version, and its own workers/resync only when the definition sets them. Rendered only
+  # for a pool member, so a dedicated controller's ConfigMap (and its checksum, in the pod template)
+  # is unchanged. The member keys are not COMPOSITION_CONTROLLER_WORKERS/_RESYNC_INTERVAL: cdc.env
+  # below may set those as a fleet default, which must not read as this member's own.
+  COMPOSITION_CONTROLLER_GROUP: {{ "{{" }} .apiGroup | quote {{ "}}" }}
+  COMPOSITION_CONTROLLER_VERSION: {{ "{{" }} .apiVersion | quote {{ "}}" }}
+  COMPOSITION_CONTROLLER_RESOURCE: {{ "{{" }} .resource | quote {{ "}}" }}
+  {{ "{{" }}- if .workers {{ "}}" }}
+  KRATEO_POOL_MEMBER_WORKERS: {{ "{{" }} .workers | quote {{ "}}" }}
+  {{ "{{" }}- end {{ "}}" }}
+  {{ "{{" }}- if .resyncInterval {{ "}}" }}
+  KRATEO_POOL_MEMBER_RESYNC_INTERVAL: {{ "{{" }} .resyncInterval | quote {{ "}}" }}
+  {{ "{{" }}- end {{ "}}" }}
+  {{ "{{" }}- end {{ "}}" }}
   # Must match the container port named "health" in assets/cdc/deployment.yaml, which the probes use.
   COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT: "{{ .Values.cdc.healthProbe.port }}"
   # #410: bound on every helm operation, hooks included (values.yaml cdc.helmTimeout).
