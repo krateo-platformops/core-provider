@@ -543,7 +543,15 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 			return false, err
 		}
 	}
-	return definitionGone(false, successor != nil, sharesNS, kindHeld, own), nil
+	if !definitionGone(false, successor != nil, sharesNS, kindHeld, own) {
+		return false, nil
+	}
+	// Its published schema is its own too (definitionschema.go): not gone while that copy remains.
+	remains, err := e.ownSchemaRemains(ctx, cr, gvk, gvr)
+	if err != nil {
+		return false, err
+	}
+	return !remains, nil
 }
 
 // followerMarker is the part of a follower's Ready message that names its role. followerCondition
@@ -584,7 +592,7 @@ func readyOnBecomingOwner(current rtv1.Condition, gvr schema.GroupVersionResourc
 // still wait for a version migration: a follower still migrates its own instances, because no other
 // definition does that for it, and an unmigrated instance would hold every served-version prune of
 // the Kind back for good. The CRD's status shape is the owner's, so it is not compared here.
-func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind, packageURL string, owner *compositiondefinitionsv1alpha1.CompositionDefinition) (reconciler.ExternalObservation, error) {
+func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind, packageURL string, owner *compositiondefinitionsv1alpha1.CompositionDefinition, specSchemaBytes []byte) (reconciler.ExternalObservation, error) {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 	notUpToDate := reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: false}
 
@@ -623,6 +631,16 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 				return notUpToDate, nil
 			}
 		}
+	}
+
+	// The follower's own published schema (definitionschema.go): missing or stale routes to Update,
+	// which writes it. A read that fails is an error, never "current".
+	if current, why, err := e.ownSchemaCurrent(ctx, cr, gvr, specSchemaBytes); err != nil {
+		return reconciler.ExternalObservation{}, err
+	} else if !current {
+		log.Debug("Follower's JSON schema ConfigMap is not current", "gvr", gvr.String(), "why", why)
+		markUpdatePending(cr, why)
+		return notUpToDate, nil
 	}
 
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, packageURL); err != nil {

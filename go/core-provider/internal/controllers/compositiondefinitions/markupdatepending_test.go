@@ -200,8 +200,10 @@ func TestEveryFollowerDriftReturnMarksUpdatePending(t *testing.T) {
 			return true
 		})
 	}
-	if len(drift) != 3 {
-		t.Errorf("found %d follower drift returns (lines %v), want 3; update this count deliberately", len(drift), drift)
+	// 4: status on another version, still running its own controller, its own instances pending
+	// migration, and (2026-11-16) its own JSON schema ConfigMap missing or stale.
+	if len(drift) != 4 {
+		t.Errorf("found %d follower drift returns (lines %v), want 4; update this count deliberately", len(drift), drift)
 	}
 	if len(unmarked) > 0 {
 		t.Errorf("follower drift returns without a Ready write in their block: lines %v", unmarked)
