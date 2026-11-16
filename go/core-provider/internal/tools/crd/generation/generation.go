@@ -412,9 +412,10 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 	// oneOf/anyOf of {type:number|integer} and {type:string} (e.g. the ACK ec2-chart's
 	// resources.requests/limits.cpu/memory). controller-gen (which crdgen shells out to)
 	// cannot emit a structural CRD for that union and fails the whole run with "not all
-	// generators ran successfully", so the CompositionDefinition never installs. Rewrite
-	// each such union to the x-kubernetes-int-or-string extension, which IS emittable.
-	// Any other schema is passed through untouched; the emptyJsonSchema no-ops here.
+	// generators ran successfully", so the CompositionDefinition never installs. Each such
+	// union is COLLAPSED TO `type: string` (see normalizeSchemaNode: the union keys are deleted,
+	// no extension is added), and a bare `type: number` becomes a string. Any other schema is
+	// passed through untouched; the emptyJsonSchema no-ops here.
 	specSchema = normalizeIntOrStringUnions(specSchema)
 
 	// Cache/serialize the go-toolchain invocation (see the crdGenCache comment above). Key on the
@@ -449,11 +450,10 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 	return out, true, nil
 }
 
-// normalizeIntOrStringUnions rewrites JSON-Schema int-or-string unions
-// (a oneOf/anyOf whose members are exactly {type:number|integer} and {type:string})
-// to the Kubernetes `x-kubernetes-int-or-string: true` extension, which controller-gen
-// (via crdgen) can emit — a bare oneOf/anyOf union cannot be expressed in a structural
-// CRD and fails generation. Every other schema construct is preserved. On any JSON
+// normalizeIntOrStringUnions collapses JSON-Schema int-or-string unions (a oneOf/anyOf whose
+// members are exactly {type:number|integer} and {type:string}) to `type: string`, deleting the
+// union; it does NOT add `x-kubernetes-int-or-string` (an earlier version of this comment said it
+// did). A bare oneOf/anyOf union cannot be expressed in a structural CRD and fails generation. Every other schema construct is preserved. On any JSON
 // parse/marshal error the original bytes are returned unchanged (fail-open: never make
 // a schema that previously generated worse).
 func normalizeIntOrStringUnions(specSchema []byte) []byte {
