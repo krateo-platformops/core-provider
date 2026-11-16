@@ -48,8 +48,8 @@ func ptrCond(c rtv1.Condition) *rtv1.Condition { return &c }
 
 // Every Observe return that hands the reconcile to Update (ResourceExists: true, ResourceUpToDate:
 // false) is preceded, in the same block, by a statement that sets Ready: markUpdatePending, or an
-// explicit cr.SetConditions(rtv1.<Ready constructor>...) (the CRD-version-not-found path states
-// Unavailable itself). A SetConditions of any OTHER condition does not count. So a new drift return
+// explicit cr.SetConditions(cdreason.<Ready reason>...), or servedVersionAddReady (the served-version
+// add: Unavailable when refused, markUpdatePending otherwise). A SetConditions of any OTHER condition does not count. So a new drift return
 // cannot skip the v1.8.0 Ready contract. The count (7) is asserted so the guard cannot pass by
 // reading nothing; it found the seventh, which my manual audit had filed as already covered.
 func TestEveryDriftReturnInObserveMarksUpdatePending(t *testing.T) {
@@ -132,7 +132,7 @@ func isDriftObservation(e ast.Expr) bool {
 // built from a provider-runtime Ready constructor (rtv1.Available/Creating/Unavailable/Deleting),
 // possibly through a method chain such as .WithMessage(...).
 func setsReady(call *ast.CallExpr) bool {
-	if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "markUpdatePending" {
+	if id, ok := call.Fun.(*ast.Ident); ok && (id.Name == "markUpdatePending" || id.Name == "servedVersionAddReady") {
 		return true
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -145,9 +145,10 @@ func setsReady(call *ast.CallExpr) bool {
 		if !ok {
 			return true
 		}
-		if x, ok := s.X.(*ast.Ident); ok && x.Name == "rtv1" {
+		// Every Ready condition is built from internal/cdreason (TestNoReadyConditionBuiltOutsideCdreason).
+		if x, ok := s.X.(*ast.Ident); ok && x.Name == "cdreason" {
 			switch s.Sel.Name {
-			case "Available", "Creating", "Unavailable", "Deleting":
+			case "Available", "ScaledToZero", "Creating", "Unavailable", "RemoteChartUnreachable", "SchemaDefaultContradiction", "Deleting":
 				found = true
 			}
 		}

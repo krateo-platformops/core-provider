@@ -3,6 +3,7 @@ package compositiondefinitions
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"strings"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -559,7 +560,7 @@ func (e *external) handedOver(ctx context.Context, cr *compositiondefinitionsv1a
 const followerMarker = " is run by CompositionDefinition "
 
 func followerCondition(owner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) rtv1.Condition {
-	return rtv1.Available().WithMessage("composition controller for " + gvr.String() + followerMarker + owner.Namespace + "/" + owner.Name)
+	return cdreason.Available.WithMessage("composition controller for " + gvr.String() + followerMarker + owner.Namespace + "/" + owner.Name)
 }
 
 // isFollowerCondition reports whether c is the Ready condition observeFollower wrote.
@@ -583,7 +584,7 @@ func readyOnBecomingOwner(current rtv1.Condition, gvr schema.GroupVersionResourc
 	if !isFollowerCondition(current) {
 		return rtv1.Condition{}, false
 	}
-	return rtv1.Creating().WithMessage("this definition now runs the composition controller for " + gvr.String() + "; deploying it"), true
+	return cdreason.Creating.WithMessage("this definition now runs the composition controller for " + gvr.String() + "; deploying it"), true
 }
 
 // observeFollower is Observe for a definition that does not own its Kind+version's controller.

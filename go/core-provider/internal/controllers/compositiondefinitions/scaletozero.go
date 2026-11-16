@@ -2,6 +2,7 @@ package compositiondefinitions
 
 import (
 	"context"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 		if depErr != nil {
 			why = "the controller Deployment could not be read: " + depErr.Error()
 		}
-		return rtv1.Available(), cond(activeType, metav1.ConditionUnknown, rtv1.ReasonNotObserved, why)
+		return cdreason.Available.Condition(), cond(activeType, metav1.ConditionUnknown, rtv1.ReasonNotObserved, why)
 	}
 	replicas := int32(1) // the apiserver defaults a nil to 1
 	if dep.Spec.Replicas != nil {
@@ -74,11 +75,11 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 				msg = "idle: no instances of " + kind + " since " + st.LastSeen.UTC().Format(time.RFC3339) + "; wakes on the first"
 			}
 			reason := rtv1.ConditionReason(conditions.ReasonScaledToZero)
-			return cond(rtv1.TypeReady, metav1.ConditionTrue, reason, msg),
+			return cdreason.ScaledToZero.WithMessage(msg),
 				cond(activeType, metav1.ConditionFalse, reason, msg)
 		}
 		msg := "the controller has 0 replicas, but this definition has not opted into scale-to-zero: nothing reconciles " + kind
-		return rtv1.Unavailable().WithMessage(msg), cond(activeType, metav1.ConditionFalse, rtv1.ReasonUnavailable, msg)
+		return cdreason.Unavailable.WithMessage(msg), cond(activeType, metav1.ConditionFalse, rtv1.ReasonUnavailable, msg)
 	}
 
 	msg := "controller running"
@@ -96,7 +97,7 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 			msg = "controller running; scales to zero after " + hd.String() + " without instances"
 		}
 	}
-	return rtv1.Available(), cond(activeType, metav1.ConditionTrue, rtv1.ConditionReason(conditions.ReasonRunning), msg)
+	return cdreason.Available.Condition(), cond(activeType, metav1.ConditionTrue, rtv1.ConditionReason(conditions.ReasonRunning), msg)
 }
 
 // controllerConditions reads the definition's controller Deployment and returns controllerReadiness.
