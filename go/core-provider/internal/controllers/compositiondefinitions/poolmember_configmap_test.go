@@ -83,3 +83,69 @@ func TestPoolMemberConfigMapKeys(t *testing.T) {
 		t.Errorf("member overrides = %q, %q; want 3, 5m", tuned["KRATEO_POOL_MEMBER_WORKERS"], tuned["KRATEO_POOL_MEMBER_RESYNC_INTERVAL"])
 	}
 }
+
+// renderPoolConfigMap renders the shipped chart's pool process ConfigMap asset as core-provider would.
+func renderPoolConfigMap(t *testing.T, values map[string]any) map[string]string {
+	t.Helper()
+	root := t.TempDir()
+	if _, err := renderChartAssets(root, "krateo-system", "composition-dynamic-controller:unit"); err != nil {
+		t.Fatal(err)
+	}
+	asset, err := os.ReadFile(filepath.Join(root, filepath.Base(filepath.Dir(CDCtemplateConfigmapPath)), "pool-configmap.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := templates.Template(asset).Render(values)
+	if err != nil {
+		t.Fatalf("rendering the pool ConfigMap: %v", err)
+	}
+	var cm corev1.ConfigMap
+	if err := yaml.Unmarshal(out, &cm); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	return cm.Data
+}
+
+// A pool's process ConfigMap carries the pool's process keys and none of a member's (a member's are in
+// its own env ConfigMap, read through the index). Its chart-level keys are the dedicated controller's,
+// value for value: both come from the same helm templates (core-provider.cdcProcessEnvHead/Tail), and
+// this is the test that they stay the same.
+func TestPoolProcessConfigMap(t *testing.T) {
+	pool := renderPoolConfigMap(t, map[string]any{
+		"poolConfigMap": "cdc-pool-small-configmap", "namespace": "krateo-system", "pool": "small",
+		"poolDeployment": "cdc-pool-small", "poolIndex": "cdc-pool-small-members", "poolWorkers": 10,
+		"composition_controller_sa_name": "cdc-pool-small", "composition_controller_sa_namespace": "krateo-system",
+		"authn_url": "http://authn.krateo-system.svc:8082",
+	})
+	for k, want := range map[string]string{
+		"COMPOSITION_CONTROLLER_POOL_INDEX": "cdc-pool-small-members", "COMPOSITION_CONTROLLER_POOL_WORKERS": "10",
+		"COMPOSITION_CONTROLLER_SA_NAME": "cdc-pool-small", "COMPOSITION_CONTROLLER_SA_NAMESPACE": "krateo-system",
+		"URL_AUTHN": "http://authn.krateo-system.svc:8082", "DEPLOYMENT_NAME": "cdc-pool-small",
+	} {
+		if pool[k] != want {
+			t.Errorf("pool %s = %q, want %q", k, pool[k], want)
+		}
+	}
+	for _, k := range append(poolMemberKeys, "COMPOSITION_CONTROLLER_LEASE_NAME", "COMPOSITION_CONTROLLER_API_REF_NAME", "COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE") {
+		if _, ok := pool[k]; ok {
+			t.Errorf("the pool's process ConfigMap carries the member key %s", k)
+		}
+	}
+
+	dedicated := renderMemberConfigMap(t, nil)
+	shared := 0
+	// COMPOSITION_CONTROLLER_WORKERS comes from cdc.env (the fleet default, values.yaml): in a pool it is
+	// the default a member without its own spec.controller.workers takes, never the pool's total.
+	for _, k := range []string{"URL_CHART_INSPECTOR", "KRATEO_NAMESPACE", "COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT",
+		"COMPOSITION_CONTROLLER_HELM_TIMEOUT", "COMPOSITION_CONTROLLER_METRICS_SERVER_PORT", "COMPOSITION_CONTROLLER_WORKERS", "HOME"} {
+		dv, ok := dedicated[k]
+		if !ok {
+			t.Fatalf("control: the dedicated ConfigMap has no %s, so this comparison checks nothing", k)
+		}
+		if pool[k] != dv {
+			t.Errorf("%s: pool %q, dedicated %q; they come from one template and must agree", k, pool[k], dv)
+		}
+		shared++
+	}
+	t.Logf("%d chart-level keys compared; pool ConfigMap has %d keys", shared, len(pool))
+}
