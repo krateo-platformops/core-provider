@@ -3,7 +3,11 @@ package composition
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
+
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/auditrec"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
@@ -112,4 +116,51 @@ func (h *handler) clearHooksUnverifiedAfter(ctx context.Context, mg *unstructure
 	h.eventRecorder.Event(cleared, event.Normal(reasonHooksUnverifiedCleared, phase, fmt.Sprintf(
 		"a helm upgrade ran the release's hooks, so %s (set %s) was removed", compositionMeta.AnnotationKeyHooksUnverified, since)))
 	return cleared
+}
+
+// recoverStuckOperation rolls back a release stuck in an incomplete helm operation past its grace
+// (Observe), and returns the object and the release to carry on with (#563). The target comes from
+// recoveryTarget over the stored history: the last deployed revision, else the pending revision
+// itself with krateo.io/hooks-unverified written FIRST. Every read or write it cannot complete
+// returns an error before the rollback, never a guessed target.
+func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Unstructured, hc helmconfig.Client, rel *helmconfig.Release,
+	releaseName string, updateOpts tools.UpdateOptions, log logging.Logger) (*unstructured.Unstructured, *helmconfig.Release, error) {
+	history, err := hc.History(ctx, releaseName, &helmconfig.HistoryConfig{})
+	if err != nil {
+		return mg, nil, fmt.Errorf("not rolling back release %s: reading its history to choose the target: %w", releaseName, err)
+	}
+	plan, err := recoveryTarget(rel, history)
+	if err != nil {
+		return mg, nil, fmt.Errorf("not rolling back release %s: %w", releaseName, err)
+	}
+	log.Info("Recovering a stuck helm operation", "status", string(rel.Status), "revision", rel.Revision,
+		"target", plan.revision, "hooksUnverified", plan.hooksUnverified, "why", plan.why)
+	if plan.hooksUnverified {
+		// The mark is written BEFORE the rollback it describes: a rollback that succeeded with
+		// the mark lost would leave a deployed release that no later pass can tell was ever
+		// interrupted. A failed write stops here, with the release still pending, and the next
+		// pass retries both. A rollback that then fails leaves a mark that is still true.
+		if _, marked := hooksUnverifiedSince(mg); !marked {
+			now := time.Now().UTC().Format(time.RFC3339)
+			if mg, err = patchHooksUnverified(ctx, mg, &now, updateOpts); err != nil {
+				return mg, nil, fmt.Errorf("not rolling back release %s: marking its hooks unverified first: %w", releaseName, err)
+			}
+		}
+		h.eventRecorder.Event(mg, event.Warning(reasonHooksUnverified, "Observe", errors.New(plan.why)))
+	}
+	priorRecord := priorHelmOperationRecord(mg)
+	if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+		return mg, nil, err
+	}
+	rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
+		op, err := hc.Rollback(ctx, releaseName, rollbackConfig(plan.revision))
+		h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
+		return releaseOf(op), err
+	})
+	markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
+	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log)
+	if err != nil {
+		return mg, nil, fmt.Errorf("rolling back release: %w", err)
+	}
+	return mg, rel, nil
 }

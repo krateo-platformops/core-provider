@@ -554,21 +554,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// Stuck longer than any real operation => genuinely wedged (e.g. controller died mid-op). Roll
 		// back once to clear the stale pending/uninstalling lock so a fresh upgrade (or a clean re-drive
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
+		//
+		// #563 (Diego, 2026-11-17): to the LAST DEPLOYED revision, the state before the interrupted
+		// operation, so the Reconcile below upgrades to the desired values as a real upgrade and its
+		// hooks run. Rolling back to the pending revision itself re-applied the new manifests as a new
+		// revision with only rollback hooks, and post-upgrade hooks that never ran never ran. The
+		// target comes from the stored history (helm keeps the last deployed revision at any distance,
+		// so no window would do); a history that cannot be read or trusted stops the recovery.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
-		priorRecord := priorHelmOperationRecord(mg)
-		if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
+		if mg, rel, err = h.recoverStuckOperation(ctx, mg, hc, rel, releaseName, updateOpts, log); err != nil {
 			return controller.ExternalObservation{}, err
-		}
-		rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
-			op, err := hc.Rollback(ctx, releaseName, rollbackConfig(rel.Revision))
-			h.audit.Record(ctx, auditrec.FromOperation(auditrec.ActionRollback, op, childrenLeft(releaseOf(op), err)), mg)
-			return releaseOf(op), err
-		})
-		markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
-		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log)
-		if err != nil {
-			return controller.ExternalObservation{}, fmt.Errorf("rolling back release: %w", err)
 		}
 	}
 
