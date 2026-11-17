@@ -2,6 +2,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{ include "core-provider.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - core.krateo.io

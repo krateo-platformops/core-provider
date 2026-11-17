@@ -21,6 +21,7 @@ package policy
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,6 +29,9 @@ import (
 	"strings"
 	"testing"
 
+	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/engine"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
@@ -48,30 +52,68 @@ var chartPolicies = []struct {
 	{"core-provider-target", "helm/target-chart/templates/compositions-version-policy.yaml"},
 }
 
-// helmCommentBlock matches a {{/* ... */}} template comment.
-var helmCommentBlock = regexp.MustCompile(`(?s)\{\{/\*.*?\*/\}\}`)
-
-// loadChartDocuments returns the YAML documents of a policy template, parsed as plain YAML.
+// loadChartDocuments returns the YAML documents a policy template RENDERS to, through helm's own
+// engine with the chart's default values, as `helm install` would.
 //
-// These templates carry no Go-template actions outside their header comment — the policy is a fixed
-// cluster singleton with nothing to interpolate — so they can be read without rendering, which keeps
-// this test free of a helm binary. That is an assumption about the file, so it is asserted rather
-// than relied on: if someone templates part of the policy, this fails with an explanation instead of
-// quietly comparing a `{{ ... }}` string against a rendered value.
+// It used to parse the template as plain YAML, asserting it held no Go-template actions, because the
+// policy was a fixed singleton with nothing to interpolate. #570 gave the policy the chart's standard
+// labels, which are template actions, and that assertion fired as it should: comparing an
+// unrendered `{{ ... }}` string against a value would have passed for the wrong reason. Rendering is
+// the comparison the test always meant: what a cluster installs.
 func loadChartDocuments(t *testing.T, path string) []map[string]any {
 	t.Helper()
 
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
+	// path is <chart>/templates/<file>; render the chart and take that template's output.
+	templatesDir := filepath.Dir(path)
+	chartDir := filepath.Dir(templatesDir)
+	if filepath.Base(templatesDir) != "templates" {
+		t.Fatalf("%s is not under a chart's templates/ directory", path)
 	}
-
-	body := helmCommentBlock.ReplaceAllString(string(raw), "")
-	if strings.Contains(body, "{{") {
-		t.Fatalf("%s now contains Go-template actions outside its {{/* */}} header. This test parses "+
-			"the template as plain YAML, which is only valid while the policy is a fixed singleton. "+
-			"Teach it to render the chart (helm template) before comparing, or it will compare an "+
-			"unrendered string against a value and pass for the wrong reason.", path)
+	// The charts carry the release workflow's placeholders (CHART_VERSION / APP_VERSION), not valid
+	// semver: substitute them in a copy, as the lint workflow does.
+	dir := t.TempDir()
+	if err := filepath.WalkDir(chartDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(chartDir, p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if rel == "Chart.yaml" {
+			b = []byte(strings.NewReplacer("CHART_VERSION", "0.0.0", "APP_VERSION", "0.0.0").Replace(string(b)))
+		}
+		return os.WriteFile(dst, b, 0o644)
+	}); err != nil {
+		t.Fatalf("copying %s: %v", chartDir, err)
+	}
+	chrt, err := loader.Load(dir)
+	if err != nil {
+		t.Fatalf("loading %s: %v", chartDir, err)
+	}
+	caps := chartutil.DefaultCapabilities.Copy()
+	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.36.0", Major: "1", Minor: "36"}
+	vals, err := chartutil.ToRenderValues(chrt, nil,
+		chartutil.ReleaseOptions{Name: "release", Namespace: "krateo-system", IsInstall: true}, caps)
+	if err != nil {
+		t.Fatalf("values for %s: %v", chartDir, err)
+	}
+	rendered, err := engine.Render(chrt, vals)
+	if err != nil {
+		t.Fatalf("rendering %s: %v", chartDir, err)
+	}
+	key := chrt.Name() + "/templates/" + filepath.Base(path)
+	body, ok := rendered[key]
+	if !ok {
+		t.Fatalf("rendering %s produced no %s", chartDir, key)
 	}
 
 	var out []map[string]any
@@ -81,9 +123,12 @@ func loadChartDocuments(t *testing.T, path string) []map[string]any {
 		}
 		m := map[string]any{}
 		if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
-			t.Fatalf("parsing a document of %s: %v", path, err)
+			t.Fatalf("parsing a rendered document of %s: %v", path, err)
 		}
 		out = append(out, m)
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s rendered no documents", key)
 	}
 	return out
 }

@@ -77,9 +77,29 @@ render.
 
 
 {{/*
-Common labels
+chart-inspector's OBJECT labels (#570, Diego 2026-11-17): app.kubernetes.io/instance is the release,
+like every other object of the chart, so `-l app.kubernetes.io/instance=<release>` selects all of
+them; app.kubernetes.io/component tells chart-inspector's apart. NOT used on the pod template.
 */}}
 {{- define "chart-inspector.labels" -}}
+helm.sh/chart: {{ include "core-provider.chart" . }}
+app.kubernetes.io/name: {{ include "chart-inspector.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: chart-inspector
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: krateo
+{{- end }}
+
+{{/*
+chart-inspector's POD labels: exactly the labels the pods carried before #570, selector labels
+included (instance <release>-chart-inspector). The Deployment's spec.selector is immutable, so the
+labels it selects on cannot move; keeping the pod template byte-identical also means the change
+restarts no pod.
+*/}}
+{{- define "chart-inspector.podLabels" -}}
 helm.sh/chart: {{ include "core-provider.chart" . }}
 {{ include "chart-inspector.selectorLabels" . }}
 {{- if .Chart.AppVersion }}

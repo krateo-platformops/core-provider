@@ -3,6 +3,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: {{ include "core-provider.fullname" . }}-compositions-max-name-length-binding
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
 spec:
   policyName: {{ include "core-provider.fullname" . }}-compositions-max-name-length-policy 
   validationActions: ["Deny"]
