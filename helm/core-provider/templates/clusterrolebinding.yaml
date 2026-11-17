@@ -8,5 +8,5 @@ roleRef:
   name:  {{ include "core-provider.fullname" . }}-{{ .Release.Namespace }}
 subjects:
 - kind: ServiceAccount
-  name: {{ include "core-provider.fullname" . }}
+  name: {{ include "core-provider.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}

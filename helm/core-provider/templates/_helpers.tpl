@@ -58,7 +58,20 @@ Create the name of the service account to use
 {{- if .Values.serviceAccount.create }}
 {{- default (include "core-provider.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- include "core-provider.requireServiceAccountName" . }}
+{{- .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+With serviceAccount.create=false the chart uses a ServiceAccount created outside it, named by
+serviceAccount.name, so the name is required. An empty name used to fall back to the namespace's
+`default` ServiceAccount, which is shared by every pod in the namespace that names none. Refused at
+render.
+*/}}
+{{- define "core-provider.requireServiceAccountName" -}}
+{{- if not .Values.serviceAccount.name }}
+{{- fail "serviceAccount.name is required when serviceAccount.create is false: name the ServiceAccount created outside the chart" }}
 {{- end }}
 {{- end }}
 
@@ -96,7 +109,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}-chart-inspector
 {{- if .Values.serviceAccount.create }}
 {{- default (include "chart-inspector.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- include "core-provider.requireServiceAccountName" . }}
+{{- .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
 
