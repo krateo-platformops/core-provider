@@ -1,10 +1,15 @@
 package compositiondefinitions
 
 import (
+	"context"
+	"fmt"
 	"sort"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -52,4 +57,82 @@ func poolMembers(pool string, all []compositiondefinitionsv1alpha1.CompositionDe
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].String() < out[b].String() })
 	return out
+}
+
+var configMapsGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+
+// reconcilePools brings every pool this definition's controller touches to its membership (docs/
+// design/cdc-pooling.md §5c, "Lifecycle, ref-counted by recomputation"): the pool it names now, and
+// any pool whose index still lists its controller (so leaving one, or moving between two, removes it).
+// Each is recomputed from the live definitions: ensured with its members, or, when none is left,
+// deleted by this last leaver.
+//
+// "Could not determine" is never "empty": a failed list, or a member whose env ConfigMap cannot be
+// read, returns an error and changes nothing, so a transient read failure cannot delete a pool that
+// still has members (the rule every teardown path here follows).
+func (e *external) reconcilePools(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) error {
+	ns := controllerNamespace(cr)
+	pools := map[string]bool{}
+	if p := poolOf(cr); p != "" {
+		pools[p] = true
+	}
+	indexes, err := e.mgmtDynamic.Resource(configMapsGVR).Namespace(ns).List(ctx, metav1.ListOptions{LabelSelector: deploy.PoolLabel})
+	if err != nil {
+		return fmt.Errorf("listing pool indexes in %s: %w", ns, err)
+	}
+	key := deploy.MemberKey(gvr)
+	for _, idx := range indexes.Items {
+		p := idx.GetLabels()[deploy.PoolLabel]
+		if p == "" || idx.GetName() != deploy.PoolNames(p).Index {
+			continue // the pool's other labelled objects, not its index
+		}
+		if data, _, _ := unstructured.NestedStringMap(idx.Object, "data"); data[key] != "" {
+			pools[p] = true
+		}
+	}
+	if len(pools) == 0 {
+		return nil
+	}
+
+	all := &compositiondefinitionsv1alpha1.CompositionDefinitionList{}
+	if err := e.kube.List(ctx, all); err != nil {
+		return fmt.Errorf("listing CompositionDefinitions to recompute pool membership: %w", err)
+	}
+	names := make([]string, 0, len(pools))
+	for p := range pools {
+		names = append(names, p)
+	}
+	sort.Strings(names)
+	for _, p := range names {
+		members := poolMembers(p, all.Items)
+		if len(members) == 0 {
+			if err := deploy.DeletePool(ctx, e.mgmtDynamic, p, ns); err != nil {
+				return err
+			}
+			continue
+		}
+		rendered := make([]deploy.PoolMember, 0, len(members))
+		for _, m := range members {
+			cm, err := e.mgmtDynamic.Resource(configMapsGVR).Namespace(ns).Get(ctx, deploy.MemberEnvConfigMapName(m), metav1.GetOptions{})
+			if err != nil {
+				// Including NotFound: a member whose env ConfigMap is not there yet has not finished its
+				// own deploy, and indexing it without one would start nothing. Retried on the next pass.
+				return fmt.Errorf("pool %s: reading member %s's env ConfigMap: %w", p, m, err)
+			}
+			data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+			rendered = append(rendered, deploy.PoolMember{GVR: m, EnvConfig: data})
+		}
+		sizing, err := deploy.LoadPoolSizing(PoolSizingPath, p)
+		if err != nil {
+			return err
+		}
+		if err := deploy.EnsurePool(ctx, deploy.PoolOptions{
+			Pool: p, Namespace: ns, Members: rendered, Sizing: sizing,
+			ConfigmapTemplatePath: PoolConfigmapTemplatePath, DeploymentTemplatePath: PoolDeploymentTemplatePath,
+			AuthnURL: AuthnURL, DynClient: e.mgmtDynamic,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -758,6 +758,58 @@
             }
           }
         },
+        "pool": {
+          "type": "object",
+          "title": "Controller pools (docs/design/cdc-pooling.md \u00a75c)",
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "workers": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "title": "Total concurrent reconciles across the pool's members"
+                },
+                "resources": {
+                  "type": "object",
+                  "title": "Resources of the pool's controller container"
+                }
+              },
+              "required": [
+                "workers",
+                "resources"
+              ]
+            },
+            "overrides": {
+              "type": "object",
+              "title": "Per-pool sizing, deep-merged over default",
+              "propertyNames": {
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                "maxLength": 54
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "workers": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "title": "Total concurrent reconciles across the pool's members"
+                  },
+                  "resources": {
+                    "type": "object",
+                    "title": "Resources of the pool's controller container"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "default"
+          ]
+        },
         "resyncInterval": {
           "type": "string",
           "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$",

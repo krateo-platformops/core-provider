@@ -180,6 +180,13 @@ type DeployOptions struct {
 	// nil fields within, are omitted from the Deployment template render so the template's
 	// chart-global defaults apply — existing definitions render byte-identically.
 	Controller *definitionsv1alpha1.ControllerConfig
+
+	// Pool is the controller pool this Kind x version's controller is a member of
+	// (spec.controller.pool, docs/design/cdc-pooling.md §5c), or "" for a dedicated controller. A
+	// member keeps its per-Kind x version objects (env ConfigMap, derived RBAC, Lease grant, RESTAction
+	// RBAC) with the POOL's ServiceAccount as subject, and has no Deployment, ServiceAccount or Service
+	// of its own; the pool's objects are applied by EnsurePool.
+	Pool string
 	// KeepLiveReplicas makes this apply leave the controller Deployment's spec.replicas as it is live,
 	// for a definition that opted into scale-to-zero (#393). provider-runtime's scaletozero helper is
 	// then the ONLY writer of replicas, which it requires: the apply is a full Get -> Update, and
@@ -231,7 +238,7 @@ func createRBACResources(gvr schema.GroupVersionResource, rbacNSName, grantNSNam
 	return sa, clusterrole, clusterrolebinding, role, rolebinding, nil
 }
 
-func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, ownSA bool, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
 	if hsh == nil {
 		return fmt.Errorf("hasher is required")
 	}
@@ -282,10 +289,14 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 
 	log.Debug("RoleBinding successfully installed", "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 
-	_, err = applyRecorded(ctx, dyn, serviceAccountGVR, "ServiceAccount", auditrec.ActionRBACApply, &sa, applyOpts)
-	if err != nil {
-		log.Error(err, "installing serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
-		return err
+	// A pool member's subject is the pool's ServiceAccount, applied by EnsurePool: only hashed here,
+	// as lookupRBACResources hashes it, so the two digests agree (docs/design/cdc-pooling.md §5c).
+	if ownSA {
+		_, err = applyRecorded(ctx, dyn, serviceAccountGVR, "ServiceAccount", auditrec.ActionRBACApply, &sa, applyOpts)
+		if err != nil {
+			log.Error(err, "installing serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
+			return err
+		}
 	}
 	err = hsh.SumHash(sa.ObjectMeta.Name, sa.ObjectMeta.Namespace)
 	if err != nil {
@@ -296,7 +307,7 @@ func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrol
 	return nil
 }
 
-func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash) error {
+func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, ownSA bool, hsh *hasher.ObjectHash) error {
 	if hsh == nil {
 		return fmt.Errorf("hasher is required")
 	}
@@ -362,13 +373,15 @@ func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole
 	}
 	log.Debug("RoleBinding successfully fetched", "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Get(ctx, dyn, serviceAccountGVR, &sa)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Debug("ServiceAccount not found", "name", sa.Name, "namespace", sa.Namespace)
-			sa = corev1.ServiceAccount{}
-		} else {
-			return fmt.Errorf("error getting serviceaccount: %w", err)
+	if ownSA {
+		err = kubecli.Get(ctx, dyn, serviceAccountGVR, &sa)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Debug("ServiceAccount not found", "name", sa.Name, "namespace", sa.Namespace)
+				sa = corev1.ServiceAccount{}
+			} else {
+				return fmt.Errorf("error getting serviceaccount: %w", err)
+			}
 		}
 	}
 	err = hsh.SumHash(sa.ObjectMeta.Name, sa.ObjectMeta.Namespace)
@@ -447,6 +460,12 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
+	// A pool member binds the pool's ServiceAccount, not its own (docs/design/cdc-pooling.md §5c).
+	dedicatedSA := sa
+	sa, ownSA := controllerSubject(opts, sa)
+	if !ownSA {
+		repointBindings(sa, &clusterrolebinding.Subjects, &rolebinding.Subjects)
+	}
 
 	hsh := hasher.NewFNVObjectHash()
 	if opts.Spec != nil && opts.Spec.Credentials != nil {
@@ -497,7 +516,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		log.Debug("RoleBinding successfully installed", "gvr", opts.GVR.String(), "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 	}
 
-	err = installRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh, applyOpts)
+	err = installRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, ownSA, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -536,14 +555,16 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("JSON Schema ConfigMap successfully installed", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace, "digest", hsh.GetHash())
 
 	cm := corev1.ConfigMap{}
-	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
+	cmValues := append([]any{
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
 		"status_data_template", opts.StatusDataTemplate,
 		"api_ref_name", opts.ApiRefName,
 		"api_ref_namespace", opts.ApiRefNamespace,
 		"api_ref_extras", opts.ApiRefExtras,
-		"authn_url", opts.ControllerAuthnURL)
+		"authn_url", opts.ControllerAuthnURL,
+	}, memberEnvValues(opts)...) // a pool member's keys (§5c); none for a dedicated controller
+	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath, cmValues...)
 	if err != nil {
 		return "", err
 	}
@@ -557,6 +578,19 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", fmt.Errorf("error hashing configmap: %v", err)
 	}
 	log.Debug("Configmap successfully installed", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace, "digest", hsh.GetHash())
+
+	// A pool member has no Deployment, ServiceAccount or Service of its own (docs/design/cdc-pooling.md
+	// §5c): the pool's process runs it, from the env ConfigMap above. Joining the pool retires the
+	// dedicated controller, stop-before-start by the ownership Lease. Lookup stops at the same point, so
+	// the digests agree.
+	if opts.poolMember() {
+		if !opts.DryRunServer {
+			if err := cutoverToPool(ctx, opts, namespacedName, dedicatedSA); err != nil {
+				return "", err
+			}
+		}
+		return hsh.GetHash(), nil
+	}
 
 	dep := appsv1.Deployment{}
 	depValues, err := cdcDeploymentValues(sa.Name, opts, cm.Data)
@@ -883,6 +917,11 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
+	// A pool member binds the pool's ServiceAccount, not its own (docs/design/cdc-pooling.md §5c).
+	sa, ownSA := controllerSubject(opts, sa)
+	if !ownSA {
+		repointBindings(sa, &clusterrolebinding.Subjects, &rolebinding.Subjects)
+	}
 
 	hsh := hasher.NewFNVObjectHash()
 	if opts.Spec != nil && opts.Spec.Credentials != nil {
@@ -923,7 +962,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		log.Debug("RoleBinding successfully fetched", "gvr", opts.GVR.String(), "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 	}
 
-	err = lookupRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh)
+	err = lookupRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, ownSA, &hsh)
 	if err != nil {
 		return "", err
 	}
@@ -974,14 +1013,16 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("JSON Schema ConfigMap successfully fetched", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace, "digest", hsh.GetHash())
 
 	cm := corev1.ConfigMap{}
-	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
+	cmValues := append([]any{
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
 		"status_data_template", opts.StatusDataTemplate,
 		"api_ref_name", opts.ApiRefName,
 		"api_ref_namespace", opts.ApiRefNamespace,
 		"api_ref_extras", opts.ApiRefExtras,
-		"authn_url", opts.ControllerAuthnURL)
+		"authn_url", opts.ControllerAuthnURL,
+	}, memberEnvValues(opts)...) // a pool member's keys (§5c); none for a dedicated controller
+	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath, cmValues...)
 	if err != nil {
 		return "", err
 	}
@@ -1001,6 +1042,10 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 	log.Debug("Configmap successfully fetched", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace, "digest", hsh.GetHash())
 
+	// A pool member has no Deployment or Service of its own; Deploy stops at the same point (§5c).
+	if opts.poolMember() {
+		return hsh.GetHash(), nil
+	}
 	dep := appsv1.Deployment{}
 	err = objects.CreateK8sObject(
 		&dep,

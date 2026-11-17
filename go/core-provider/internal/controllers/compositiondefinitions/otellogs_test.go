@@ -7,6 +7,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/engine"
+	"sigs.k8s.io/yaml"
 )
 
 // otelLogsLines renders helm/core-provider with extra values and returns, for core-provider's own
@@ -41,7 +42,27 @@ func otelKeyLines(t *testing.T, extra map[string]any, envKey string) (core, cdc 
 			core = trimAll(key.FindAllString(body, -1))
 			found++
 		case strings.HasSuffix(name, "templates/cdc-configmap.yaml"):
-			cdc = trimAll(key.FindAllString(body, -1))
+			// This ConfigMap packages one env per PROCESS: configmap.yaml (a dedicated controller's)
+			// and, since pool step 5, pool-configmap.yaml (a pool's). Each is checked on its own: one
+			// key per process env is the rule (#469), and the two processes each have their own.
+			var cm struct {
+				Data map[string]string `json:"data"`
+			}
+			if err := yaml.Unmarshal([]byte(body), &cm); err != nil {
+				t.Fatalf("decoding %s: %v", name, err)
+			}
+			dedicated, ok := cm.Data["configmap.yaml"]
+			if !ok {
+				t.Fatalf("%s carries no configmap.yaml (keys: %v)", name, keysOf(cm.Data))
+			}
+			cdc = trimAll(key.FindAllString(dedicated, -1))
+			if pool, ok := cm.Data["pool-configmap.yaml"]; ok {
+				// The pool's process env comes from the same helm templates
+				// (core-provider.cdcProcessEnvHead/Tail), so it must carry the same single line.
+				if got := trimAll(key.FindAllString(pool, -1)); strings.Join(got, "|") != strings.Join(cdc, "|") {
+					t.Errorf("%s: the pool process env has %v, the dedicated one %v; they come from one template and must agree", envKey, got, cdc)
+				}
+			}
 			found++
 		}
 	}
@@ -49,6 +70,14 @@ func otelKeyLines(t *testing.T, extra map[string]any, envKey string) (core, cdc 
 		t.Fatalf("found %d of the 2 ConfigMap templates in the render", found)
 	}
 	return core, cdc
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func trimAll(in []string) []string {

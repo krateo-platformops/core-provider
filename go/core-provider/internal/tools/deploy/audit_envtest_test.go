@@ -77,7 +77,7 @@ func TestAuditRecordsDeployRBACEnvtest(t *testing.T) {
 		t.Helper()
 		cr, crb, role, rb, sa := objs(roleVerbs...)
 		hsh := hasher.NewFNVObjectHash()
-		if err := installRBACResources(ctx, dyn, cr, crb, role, rb, sa, &hsh, kubecli.ApplyOptions{}); err != nil {
+		if err := installRBACResources(ctx, dyn, cr, crb, role, rb, sa, true, &hsh, kubecli.ApplyOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

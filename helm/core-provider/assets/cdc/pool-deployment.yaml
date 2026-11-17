@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # docs/design/cdc-pooling.md §5c: ONE cdc process hosting every member of pool .pool. Rendered by
+  # core-provider only for a pool, beside the dedicated controllers' assets/cdc/deployment.yaml, and
+  # kept as close to it as pool mode allows; the differences are named where they occur.
+  name: {{ "{{" }} .poolDeployment {{ "}}" }}
+  namespace: {{ "{{" }} .namespace {{ "}}" }}
+  labels:
+    krateo.io/cdc-pool: {{ "{{" }} .pool {{ "}}" }}
+    app.kubernetes.io/name: {{ "{{" }} trunc 63 .poolDeployment {{ "}}" }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: krateo
+    app.kubernetes.io/managed-by: krateo
+spec:
+  replicas: {{ .Values.cdc.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ "{{" }} trunc 63 .poolDeployment {{ "}}" }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ "{{" }} trunc 63 .poolDeployment {{ "}}" }}
+        krateo.io/cdc-pool: {{ "{{" }} .pool {{ "}}" }}
+        app.kubernetes.io/part-of: krateo
+      {{ "{{" }}- if .config_checksum {{ "}}" }}
+      # The pool's process ConfigMap checksum (#391), so a change to it rolls the pod in the same
+      # apply. Members' env ConfigMaps are NOT in it: the process reads them at runtime through the
+      # index, and a member's change restarts that member only (§5c), never the pod.
+      annotations:
+        krateo.io/config-checksum: {{ "{{" }} .config_checksum {{ "}}" }}
+      {{ "{{" }}- end {{ "}}" }}
+    spec:
+      # The pool's ServiceAccount: the subject of every member's derived RBAC (§5c Objects).
+      serviceAccountName: {{ "{{" }} .poolServiceAccount {{ "}}" }}
+      {{- with .Values.cdc.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cdc.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "krateo.image" (dict "img" .Values.cdc.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.cdc.image.pullPolicy }}
+          envFrom:
+            # The pool's process environment (pool-configmap.yaml), which carries
+            # COMPOSITION_CONTROLLER_POOL_INDEX: that is what puts the cdc in pool mode, so unlike a
+            # dedicated controller there are no -group/-version/-resource args.
+            - configMapRef:
+                name: {{ "{{" }} .poolConfigMap {{ "}}" }}
+          env:
+            # #461: this pod's identity, recorded as the starter of every helm operation.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- if include "core-provider.otlpNodeLocal" . }}
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):{{ include "core-provider.otlpPort" . }}"
+            {{- end }}
+            {{- if .Values.cdc.goMemLimit }}
+            - name: GOMEMLIMIT
+              {{- if or (eq .Values.cdc.goMemLimit "request") (eq .Values.cdc.goMemLimit "limit") }}
+              valueFrom:
+                resourceFieldRef:
+                  containerName: controller
+                  resource: {{ if eq .Values.cdc.goMemLimit "request" }}requests.memory{{ else }}limits.memory{{ end }}
+                  divisor: "1"
+              {{- else }}
+              value: {{ .Values.cdc.goMemLimit | quote }}
+              {{- end }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.cdc.securityContext | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.cdc.healthProbe.port }}
+              protocol: TCP
+            {{- if .Values.cdc.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.cdc.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.cdc.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.cdc.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # cdc.pool.default deep-merged with cdc.pool.overrides.<pool>, resolved by core-provider.
+          resources: {{ "{{" }} .poolResources {{ "}}" }}
+          volumeMounts:
+            # ALWAYS mounted (Diego, 2026-11-16): a pool hosts members that may resolve an apiRef,
+            # and a member joining must not need the pod to roll for its token.
+            - name: authn-serviceaccount-token
+              mountPath: /var/run/secrets/krateo.io/serviceaccount
+              readOnly: true
+          {{- with .Values.cdc.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: authn-serviceaccount-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: authn
+                  expirationSeconds: 3600
+      {{- with .Values.cdc.volumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

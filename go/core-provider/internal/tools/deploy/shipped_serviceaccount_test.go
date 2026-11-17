@@ -47,10 +47,11 @@ func renderShippedChartE(t *testing.T, overrides map[string]any) (map[string]str
 	}
 	caps := chartutil.DefaultCapabilities.Copy()
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.36.0", Major: "1", Minor: "36"}
+	// The values schema is checked here, so a schema refusal is returned too: it is the chart refusing.
 	vals, err := chartutil.ToRenderValues(chrt, overrides,
 		chartutil.ReleaseOptions{Name: "core-provider", Namespace: "krateo-system", IsInstall: true}, caps)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	return engine.Render(chrt, vals)
 }

@@ -68,8 +68,12 @@ const (
 )
 
 var (
-	CDCtemplateDeploymentPath       = filepath.Join(os.TempDir(), "assets/cdc-deployment/deployment.yaml")
-	CDCtemplateConfigmapPath        = filepath.Join(os.TempDir(), "assets/cdc-configmap/configmap.yaml")
+	CDCtemplateDeploymentPath = filepath.Join(os.TempDir(), "assets/cdc-deployment/deployment.yaml")
+	CDCtemplateConfigmapPath  = filepath.Join(os.TempDir(), "assets/cdc-configmap/configmap.yaml")
+	// Pool assets (docs/design/cdc-pooling.md §5c), mounted beside the dedicated controller's.
+	PoolConfigmapTemplatePath       = filepath.Join(os.TempDir(), "assets/cdc-configmap/pool-configmap.yaml")
+	PoolDeploymentTemplatePath      = filepath.Join(os.TempDir(), "assets/cdc-deployment/pool-deployment.yaml")
+	PoolSizingPath                  = filepath.Join(os.TempDir(), "assets/cdc-deployment/pool-sizing.json")
 	CDCrbacConfigFolder             = filepath.Join(os.TempDir(), "assets/cdc-rbac/")
 	JSONSchemaTemplateConfigmapPath = filepath.Join(os.TempDir(), "assets/json-schema-configmap/configmap.yaml")
 	ServiceTemplatePath             = filepath.Join(os.TempDir(), "assets/cdc-service/service.yaml")
@@ -1201,6 +1205,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
+		Pool:                   poolOf(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -1619,6 +1624,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
+		Pool:                   poolOf(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -1647,6 +1653,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	recordAuthnDelegation(cr, authnSupport)
 	recordAuthnMappingApplied(cr, authnSupport)
 	if err != nil {
+		return err
+	}
+	// The pools this controller touches, recomputed from the live definitions (§5c Lifecycle).
+	if err := e.reconcilePools(ctx, cr, gvr); err != nil {
 		return err
 	}
 
@@ -2028,6 +2038,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		GVR:                    gvr,
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
+		Pool:                   poolOf(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -2057,6 +2068,10 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	recordAuthnMappingApplied(cr, authnSupport)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
+	}
+	// The pools this controller touches, recomputed from the live definitions (§5c Lifecycle).
+	if err := e.reconcilePools(ctx, cr, gvr); err != nil {
+		return gvr, err
 	}
 
 	cr.Status.Digest = dig
@@ -2429,6 +2444,11 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// version is retired by that act; otherwise the live CRD says which are. A handed-over
 		// controller returned above, before this, because its ServiceAccount lives on.
 		if err := e.sweepOnDelete(ctx, gvr, controllerPlacements(cr), skipCRD, log); err != nil {
+			return err
+		}
+		// A member leaving with its definition: its pool is recomputed without it, and deleted when it
+		// was the last (§5c Lifecycle). cr carries its deletion timestamp, so poolMembers excludes it.
+		if err := e.reconcilePools(ctx, cr, gvr); err != nil {
 			return err
 		}
 	} else {

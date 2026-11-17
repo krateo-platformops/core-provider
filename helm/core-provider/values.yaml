@@ -430,6 +430,29 @@ cdc:
     limits:
       memory: 512Mi
 
+  # Controller pools (docs/design/cdc-pooling.md §5c, core-provider pool step 5). A definition that
+  # sets spec.controller.pool: <name> runs as a member of the pool Deployment cdc-pool-<name> instead
+  # of a dedicated controller. Opt-in: with no definition naming a pool, nothing below is rendered.
+  #
+  # `default` sizes every pool; `overrides.<name>` is deep-merged over it for that pool, so a pool
+  # that needs more memory states only memory. Measured (§5b, krateo-057): ten idle members fit in
+  # the default; a busier pool raises its own entry. No CPU limit, for the reason under resources
+  # above.
+  #
+  # workers is the pool's TOTAL concurrent reconciles across its members (core-provider#561): a
+  # member that sets spec.controller.workers takes that as its own share of this ceiling, and one
+  # that does not takes cdc.workers (the fleet default) instead.
+  pool:
+    default:
+      workers: 10
+      resources:
+        requests:
+          cpu: 100m
+          memory: 660Mi
+        limits:
+          memory: 1Gi
+    overrides: {}
+
   # GOMEMLIMIT for every spawned CDC. Accepts:
   #   "request"  (default) — the container's own requests.memory, in bytes
   #   "limit"              — the container's own limits.memory, in bytes
