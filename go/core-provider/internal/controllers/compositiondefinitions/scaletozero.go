@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // scaleToZeroOptedIn reports whether cr opted its controller into scale-to-zero (#393). It is the
@@ -64,7 +66,9 @@ func scaleToZeroOptedIn(cr *compositiondefinitionsv1alpha1.CompositionDefinition
 // Every message is stable while the state is: SetConditions rewrites a condition whose message
 // changes, so no counts and no "now" go into them (Diego, 2026-11-11). The times quoted are
 // lastSeen, which changes only on a transition.
-func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinition, kind string, dep *appsv1.Deployment, depErr error) (ready, active rtv1.Condition) {
+// pods lists the controller Deployment's pods. It is called only when availability was lost after a
+// completed rollout (#559), so the common path reads no pods; nil means no pod information.
+func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinition, kind string, dep *appsv1.Deployment, depErr error, pods func() []corev1.Pod) (ready, active rtv1.Condition) {
 	activeType := rtv1.ConditionType(conditions.TypeControllerActive)
 	cond := func(t rtv1.ConditionType, s metav1.ConditionStatus, reason rtv1.ConditionReason, msg string) rtv1.Condition {
 		return rtv1.Condition{Type: t, Status: s, Reason: reason, Message: msg, LastTransitionTime: metav1.Now()}
@@ -122,7 +126,13 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 	case rolloutGaveUp:
 		return cdreason.Unavailable.WithMessage("the controller Deployment " + name + " gave up its rollout: " + why), running
 	case rolloutLost:
-		return cdreason.Unavailable.WithMessage("the controller Deployment " + name + " lost availability after a completed rollout: " + why), running
+		msg := "the controller Deployment " + name + " lost availability after a completed rollout: " + why
+		if pods != nil {
+			if cause := podCause(pods()); cause != "" {
+				msg += "; " + cause
+			}
+		}
+		return cdreason.Unavailable.WithMessage(msg), running
 	}
 	return cdreason.Available.Condition(), running
 }
@@ -211,12 +221,12 @@ func (e *external) controllerConditions(ctx context.Context, cr *compositiondefi
 	err := e.kube.Get(ctx, deploy.ControllerDeploymentKey(controllerNamespace(cr), gvr), &dep)
 	switch {
 	case apierrors.IsNotFound(err):
-		ready, active = controllerReadiness(cr, cr.Status.Kind, nil, nil)
+		ready, active = controllerReadiness(cr, cr.Status.Kind, nil, nil, nil)
 	case err != nil:
-		ready, active = controllerReadiness(cr, cr.Status.Kind, nil, err)
+		ready, active = controllerReadiness(cr, cr.Status.Kind, nil, err, nil)
 		return ready, active, true, fmt.Errorf("reading the controller Deployment: %w", err)
 	default:
-		ready, active = controllerReadiness(cr, cr.Status.Kind, &dep, nil)
+		ready, active = controllerReadiness(cr, cr.Status.Kind, &dep, nil, e.controllerPods(ctx, &dep))
 	}
 	return ready, active, true, nil
 }
@@ -237,4 +247,103 @@ func applyControllerConditions(cr *compositiondefinitionsv1alpha1.CompositionDef
 		cr.SetConditions(asReady(ready), active)
 	}
 	return nil
+}
+
+// controllerPods lists dep's pods by its own selector, for podCause. A failed list is no information,
+// not an error: the verdict (Unavailable) is the Deployment's and stands without it.
+func (e *external) controllerPods(ctx context.Context, dep *appsv1.Deployment) func() []corev1.Pod {
+	return func() []corev1.Pod {
+		if dep.Spec.Selector == nil {
+			return nil
+		}
+		sel, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+		if err != nil {
+			return nil
+		}
+		var list corev1.PodList
+		if err := e.kube.List(ctx, &list, client.InNamespace(dep.Namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+			return nil
+		}
+		return list.Items
+	}
+}
+
+// podCause says why a controller that rolled out is no longer available, from its pods, so a reader of
+// the definition alone can tell an eviction (a replacement starting, or unschedulable) from a
+// controller that came up and then failed (restarting, image pull) (#559; Diego, 2026-11-17). An
+// eviction and a crash loop are identical at the Deployment level.
+//
+// The text must be STABLE while the state is: SetConditions rewrites a condition whose message changes,
+// moving its lastTransitionTime, which installer bounds windows with. So it names the first pod that is
+// not ready (by name, sorted) and a cause that does not flicker across a crash loop's cycle: a
+// container that has restarted reads "restarting (last exit: <reason>)" whether it is momentarily
+// running, terminated or waiting in CrashLoopBackOff, and ErrImagePull and ImagePullBackOff both read
+// "image pull failing". No counts.
+func podCause(pods []corev1.Pod) string {
+	if pods == nil {
+		return ""
+	}
+	if len(pods) == 0 {
+		return "no pods"
+	}
+	sorted := append([]corev1.Pod(nil), pods...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	for i := range sorted {
+		p := &sorted[i]
+		if podReady(p) {
+			continue
+		}
+		return "pod " + p.Name + ": " + notReadyCause(p)
+	}
+	return ""
+}
+
+func podReady(p *corev1.Pod) bool {
+	if p.DeletionTimestamp != nil {
+		return false
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func notReadyCause(p *corev1.Pod) string {
+	if p.DeletionTimestamp != nil {
+		return "terminating"
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
+			return "unschedulable"
+		}
+	}
+	statuses := append(append([]corev1.ContainerStatus(nil), p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...)
+	for _, cs := range statuses {
+		if w := cs.State.Waiting; w != nil && (w.Reason == "ErrImagePull" || w.Reason == "ImagePullBackOff") {
+			return "image pull failing"
+		}
+	}
+	for _, cs := range statuses {
+		if cs.RestartCount > 0 && !cs.Ready {
+			last := "unknown"
+			if t := cs.LastTerminationState.Terminated; t != nil && t.Reason != "" {
+				last = t.Reason
+			}
+			return "restarting (last exit: " + last + ")"
+		}
+	}
+	for _, cs := range statuses {
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "CreateContainerConfigError", "CreateContainerError", "InvalidImageName", "RunContainerError":
+				return w.Reason
+			}
+		}
+	}
+	if p.Status.Phase == corev1.PodPending {
+		return "starting"
+	}
+	return "running, not ready"
 }

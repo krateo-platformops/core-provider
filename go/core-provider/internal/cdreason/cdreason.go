@@ -125,7 +125,7 @@ var (
 	Creating = ready(rtv1.ReasonCreating, metav1.ConditionFalse, WriterCoreProvider, Converging,
 		"Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, the controller Deployment is absent or rolling out, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387). Update: the pass that switches status to a new version, until Observe looks at its controller")
 	Unavailable = ready(rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider, Failed,
-		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, or adding the served version is refused (a held version, no room); the message says which")
+		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, or adding the served version is refused (a held version, no room); the message says which, and for lost availability ends with the first not-ready pod's cause, e.g. \"; pod <name>: restarting (last exit: Error)\" (#559)")
 	RemoteChartUnreachable = ready(ReasonRemoteChartUnreachable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it")
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
