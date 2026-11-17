@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -100,12 +101,36 @@ func TestEveryHelmOperationIsBounded(t *testing.T) {
 	// Both rollbacks (Observe's stuck-release recovery, Delete's) must build their config through
 	// rollbackConfig, the bounded literal counted above; a Rollback handed anything else would be
 	// outside the guard.
-	src, err := os.ReadFile("composition.go")
-	if err != nil {
-		t.Fatal(err)
+	//
+	// EVERY non-test file of the package, not composition.go alone (#563): Observe's recovery moved
+	// into recoverStuckOperation (hooksunverified.go), and a guard that reads one file by name lost
+	// it the moment it moved.
+	srcs, err := filepath.Glob("*.go")
+	if err != nil || len(srcs) == 0 {
+		t.Fatalf("listing the package's files: %v (%d)", err, len(srcs))
 	}
-	if got, bypass := rollbacksThroughConstructor(t, src); got != 2 || len(bypass) > 0 {
-		t.Errorf("hc.Rollback calls whose config is rollbackConfig(...): %d, want 2; bypassing it: %v", got, bypass)
+	got, where := 0, map[string]int{}
+	var bypass []string
+	for _, f := range srcs {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, b := rollbacksThroughConstructor(t, src)
+		if n > 0 {
+			where[f] = n
+		}
+		got += n
+		for _, x := range b {
+			bypass = append(bypass, f+":"+x)
+		}
+	}
+	t.Logf("rollbacks through rollbackConfig: %v", where)
+	if got != 2 || len(bypass) > 0 {
+		t.Errorf("hc.Rollback calls whose config is rollbackConfig(...): %d %v, want 2; bypassing it: %v", got, where, bypass)
 	}
 }
 
