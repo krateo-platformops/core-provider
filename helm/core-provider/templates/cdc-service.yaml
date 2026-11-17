@@ -2,6 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "core-provider.fullname" . }}-service-configmap
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
 data:
   service.yaml: |
 {{ tpl (.Files.Get "assets/cdc/service.yaml") . | indent 4 }}

@@ -2,6 +2,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: {{ include "core-provider.fullname" . }}-compositions-max-name-length-policy
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
 spec:
   matchConstraints:
     resourceRules:
