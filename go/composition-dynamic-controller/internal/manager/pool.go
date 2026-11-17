@@ -13,6 +13,7 @@ import (
 
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	metricsserver "github.com/krateo-platformops/unstructured-runtime/pkg/metrics/server"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/ratelimit"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -93,6 +94,12 @@ func (m *poolMember) set(c *controller.Controller, err error) {
 func (p *Pool) Run(ctx context.Context) error {
 	if p.Index == "" || p.Namespace == "" || p.Client == nil {
 		return errors.New("manager: a pool needs its index name, namespace and client")
+	}
+	// core-provider#561: the members share the process's governor, so it must be one built to be
+	// shared (saturation.NewPoolGovernor). An unshared one, or none, lets an idle member's worker hold
+	// a slot a busy member needs, runs a CPU sampler per member, and enforces no pool total.
+	if sg, ok := p.Process.Governor.(ratelimit.SharedLocalGate); !ok || !sg.SharedLocal() {
+		return fmt.Errorf("manager: a pool's members need a SHARED governor (saturation.NewPoolGovernor), got %T", p.Process.Governor)
 	}
 	p.mu.Lock()
 	p.running = map[string]*poolMember{}

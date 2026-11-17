@@ -37,3 +37,30 @@ func NewGovernor(enabled bool, threshold float64, workers int, log logging.Logge
 	}
 	return g, nil
 }
+
+// NewPoolGovernor returns the ONE governor a pool's members share (core-provider docs/design/
+// cdc-pooling.md §5c, core-provider#561). Unlike NewGovernor it always returns one, because a pool
+// needs it with saturation off too: poolWorkers is the process TOTAL of concurrent reconciles across
+// every member, and the governor is what enforces it. With saturation on, the CPU pressure lowers
+// that total, as it lowers a dedicated controller's.
+//
+// It is Shared (unstructured-runtime v1.25.0): a member's worker takes a slot only once it has an
+// item, so an idle member never holds capacity another member needs, and the sampler runs once for
+// the process however many members start it. Each member's own worker count stays its own
+// (spec.controller.workers, else the controller default), and it should stay small: a worker
+// holding an item while it waits for a slot is how long a later, higher-priority item of that member
+// can wait.
+//
+// poolWorkers below 1 is an error: a pool that could run nothing would wedge every member, and
+// guessing a total would hide a missing value that core-provider always renders.
+func NewPoolGovernor(saturationEnabled bool, threshold float64, poolWorkers int, log logging.Logger) (ratelimit.Governor, error) {
+	if poolWorkers < 1 {
+		return nil, fmt.Errorf("a pool needs its total workers (COMPOSITION_CONTROLLER_POOL_WORKERS, from the chart's cdc.pool.*.workers), got %d", poolWorkers)
+	}
+	g, err := ratelimit.NewWithSaturation(ratelimit.Options{Ceiling: poolWorkers, Shared: true},
+		ratelimit.SaturationOptions{Enabled: saturationEnabled, CPUPressureThreshold: threshold}, log)
+	if err != nil {
+		return nil, fmt.Errorf("configuring the pool's governor: %w", err)
+	}
+	return g, nil
+}

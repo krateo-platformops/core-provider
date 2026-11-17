@@ -154,6 +154,7 @@ func main() {
 	otelExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	deploymentName := flag.String("deployment-name", env.String("DEPLOYMENT_NAME", ""), "The deployment name for stable resource identification in metrics.")
 	leaseName := flag.String("lease-name", env.String("COMPOSITION_CONTROLLER_LEASE_NAME", ""), "The coordination.k8s.io Lease, in the pod's namespace, this controller must hold to reconcile (core-provider renders it). Empty: no Lease.")
+	poolWorkers := flag.Int("pool-workers", env.Int("COMPOSITION_CONTROLLER_POOL_WORKERS", 0), "Pool mode only: the process TOTAL of concurrent reconciles across every member (core-provider#561), distinct from -workers, which stays each member's own default. Required in pool mode.")
 	poolIndex := flag.String("pool-index", env.String("COMPOSITION_CONTROLLER_POOL_INDEX", ""), "Pool mode (core-provider docs/design/cdc-pooling.md §5c): the membership index ConfigMap, in the pod's namespace, naming the members this process runs. Empty: a dedicated controller for the GVR in the flags.")
 	// service.version prefers the binary's own build stamp over the SERVICE_VERSION the chart injects
 	// (chart-set cdc.image.tag): the stamp describes the image actually running, the env var describes
@@ -417,6 +418,16 @@ func main() {
 		MetricsBindAddress:      metricsBindAddress,
 	}
 	if *poolIndex != "" {
+		// The members share ONE governor, Shared, whose ceiling is the pool's total (#561). The
+		// dedicated controller's governor above (nil with saturation off) is not used: unshared, an
+		// idle member's worker would hold a slot another member needs, and every member's Run would
+		// start a sampler of its own on it.
+		poolGov, err := saturation.NewPoolGovernor(*saturationEnabled, *cpuPressureThreshold, *poolWorkers, log)
+		if err != nil {
+			log.Error(err, "Invalid pool configuration")
+			os.Exit(1)
+		}
+		process.Governor = poolGov
 		// Returned, not os.Exit on success, so main's deferred telemetry shutdown still flushes.
 		if code := runPool(ctx, log, process, cfg, *poolIndex, resolverFactory, *healthProbePort); code != 0 {
 			os.Exit(code)
