@@ -8,6 +8,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/ratelimit"
 	"os"
 	"reflect"
 	"strings"
@@ -113,6 +114,8 @@ func TestEnvtest_PoolMembership(t *testing.T) {
 	}
 
 	proc := testProcess()
+	// A pool's members share one Shared governor (core-provider#561); Pool.Run refuses anything else.
+	proc.Governor = ratelimit.New(ratelimit.Options{Ceiling: 4, Shared: true})
 	proc.Config = cfg
 	pool := &Pool{Process: proc, Client: cs, Namespace: ns, Index: index.Name, Backoff: func(int) time.Duration { return 200 * time.Millisecond }}
 	runCtx, stop := context.WithCancel(ctx)
