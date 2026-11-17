@@ -175,6 +175,12 @@ type healthVerdict struct {
 	// interface; the names reach an operator through the message, because names do not belong in
 	// a scalar.
 	unreadable []string
+	// unobservable names the unevaluated children whose own controller reports Ready
+	// ObserveFailed/NotObserved: its Observe failed (#574). They stay UNEVALUATED, by Diego's
+	// earlier decision (an apiserver blip on one child must not hold its parent back, #165), and
+	// they are counted in status.unevaluatedChildren.notObserved; this names them in the Ready
+	// message, so a parent that reads green says which child could not be observed.
+	unobservable []string
 	// absent names children recorded in status.managed that do not exist. A SUBSET of converging —
 	// readiness treats them identically — surfaced separately so Observe can report drift and let
 	// Update rewrite the recorded set (#261). Not part of the condition message.
@@ -268,7 +274,7 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	}
 
 	var failing, converging []string
-	var absent, unreadable []string
+	var absent, unreadable, unobservable []string
 	for _, m := range managed {
 		ref, ok := m.(map[string]any)
 		if !ok {
@@ -298,8 +304,11 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			converging = append(converging, childID(ref))
 			absent = append(absent, childID(ref))
 		case childUnevaluated:
-			unevaluated++ // counted only; never changes the verdict
+			unevaluated++ // counted; never changes the verdict
 			byCause[ev.cause]++
+			if ev.cause == causeNotObserved {
+				unobservable = append(unobservable, childID(ref)) // named in the message (#574)
+			}
 		case childUnreadable:
 			// Counted AND named, and like childUnevaluated it does not enter `failing` or
 			// `converging`, so it cannot by itself fail or hold back a parent. The only verdict it
@@ -311,13 +320,14 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 	switch {
 	case len(failing) > 0:
 		return healthVerdict{
-			absent:     absent,
-			ready:      false,
-			reason:     "Unavailable",
-			message:    fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
-			failing:    failing,
-			unreadable: unreadable,
-			total:      len(managed),
+			absent:       absent,
+			ready:        false,
+			reason:       "Unavailable",
+			message:      fmt.Sprintf("managed children not healthy: %s", joinCap(failing, 3)),
+			failing:      failing,
+			unreadable:   unreadable,
+			unobservable: unobservable,
+			total:        len(managed),
 		}
 	case len(converging) > 0:
 		return healthVerdict{
@@ -325,10 +335,11 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			reason: "Creating",
 			message: fmt.Sprintf("%d of %d managed children are not ready: %s",
 				len(converging), len(managed), joinCap(converging, 3)),
-			converging: converging,
-			absent:     absent,
-			unreadable: unreadable,
-			total:      len(managed),
+			converging:   converging,
+			absent:       absent,
+			unreadable:   unreadable,
+			unobservable: unobservable,
+			total:        len(managed),
 		}
 	case unevaluated+len(unreadable) == len(managed):
 		// ZERO EVIDENCE (#165). Nothing was evaluated, so "Available" is a claim about an empty
@@ -378,10 +389,11 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		}
 		return healthVerdict{
 			ready: false, reason: reason,
-			message:     message,
-			unevaluated: unevaluated,
-			unreadable:  unreadable,
-			total:       len(managed),
+			message:      message,
+			unevaluated:  unevaluated,
+			unreadable:   unreadable,
+			unobservable: unobservable,
+			total:        len(managed),
 		}
 	default:
 		// Green — but say so honestly. If some children could not be assessed, "up-to-date" is a
@@ -396,8 +408,9 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 			// Available — Diego's decision, and the narrowest one — but it now says so, in
 			// status.unreadableChildrenCount and by name in the message. One unreadable child and
 			// 121 no longer produce identical output.
-			unreadable: unreadable,
-			total:      len(managed),
+			unreadable:   unreadable,
+			unobservable: unobservable,
+			total:        len(managed),
 		}
 	}
 }
@@ -541,8 +554,21 @@ func (p projectedHealth) notReadyReason() string {
 // gets missed is the silent one — there is no symptom to notice. One exit cannot be forgotten.
 func resolveReady(p projectedHealth, defaultMsg string, v healthVerdict) readyOutcome {
 	out := resolveReadyVerdict(p, defaultMsg, v)
-	out.message = withUnreadable(out.message, v.unreadable, v.total)
+	out.message = withUnobservable(withUnreadable(out.message, v.unreadable, v.total), v.unobservable, v.total)
 	return out
+}
+
+// withUnobservable appends the children whose own controller could not observe them (#574): Ready
+// ObserveFailed/NotObserved, the error on the child's Synced. Like withUnreadable it is a caveat,
+// not a verdict: those children stay unevaluated (#165), and the count consumers gate on is
+// status.unevaluatedChildren.notObserved. Capped at 3 for the same reason.
+func withUnobservable(base string, unobservable []string, total int) string {
+	if len(unobservable) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s (%d of %d managed children could NOT BE OBSERVED by their own controller, "+
+		"whose Observe failed; the error is on each child's Synced condition: %s)",
+		base, len(unobservable), total, joinCap(unobservable, 3))
 }
 
 // withUnreadable appends the refused children to whatever message is being stamped, like
