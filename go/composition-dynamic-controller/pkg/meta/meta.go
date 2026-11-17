@@ -56,6 +56,13 @@ const (
 	// hooks. For a child the hooks still need, such as an ExternalSecret whose target Secret a
 	// pre-delete Job reads. Any other value is ignored.
 	AnnotationKeyTeardown = "krateo.io/teardown"
+	// AnnotationKeyHooksUnverified on a composition says the hooks of an interrupted helm operation
+	// may not have run (core-provider#563): a release stuck pending with no deployed revision before
+	// it (a first install, rev 1) was rolled back to itself, which clears the lock and keeps what the
+	// operation created, but runs only rollback hooks. The value is when it was set (RFC 3339).
+	// While present, Ready reads False/HooksMayNotHaveRun. Cleared by a human who has verified the
+	// hooks' effects, or by the next successful helm upgrade, which runs them.
+	AnnotationKeyHooksUnverified = "krateo.io/hooks-unverified"
 	// TeardownWithRelease is AnnotationKeyTeardown's one recognised value.
 	TeardownWithRelease = "with-release"
 

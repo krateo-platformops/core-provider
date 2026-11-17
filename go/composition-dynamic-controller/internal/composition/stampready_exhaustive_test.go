@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ var importedStringConsts = map[string]string{
 	"conditionreason.ReasonInventoryNotRecorded":     conditionreason.ReasonInventoryNotRecorded,
 	"conditionreason.ReasonHelmOperationInProgress":  conditionreason.ReasonHelmOperationInProgress,
 	"conditionreason.ReasonPendingHelmOperation":     conditionreason.ReasonPendingHelmOperation,
+	"conditionreason.ReasonHooksMayNotHaveRun":       conditionreason.ReasonHooksMayNotHaveRun,
 }
 
 // resolveSelector reads a qualified identifier (pkg.CONST) into its string value.
@@ -126,73 +128,89 @@ func TestEveryReasonResolveReadyProducesIsHandledByStampReady(t *testing.T) {
 		t.Fatalf("collecting package string constants: %v", err)
 	}
 
-	ch, err := parser.ParseFile(fset, "childhealth.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parsing childhealth.go: %v", err)
+	// EVERY non-test file of the package, not childhealth.go alone (#563): withHooksUnverified, in
+	// hooksunverified.go, builds a readyOutcome that stampReady receives after resolveReady, and a
+	// walk of one file was blind to it. producerFiles is printed so a walk that finds the literals in
+	// fewer files than exist says so.
+	srcs, err := filepath.Glob("*.go")
+	if err != nil || len(srcs) == 0 {
+		t.Fatalf("listing the package's files: %v (%d)", err, len(srcs))
 	}
-	ast.Inspect(ch, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
-		if !ok {
-			return true
+	producerFiles := map[string]bool{}
+	for _, src := range srcs {
+		if strings.HasSuffix(src, "_test.go") {
+			continue
 		}
-		if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "readyOutcome" {
-			return true
+		ch, err := parser.ParseFile(fset, src, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", src, err)
 		}
-		for _, el := range lit.Elts {
-			kv, ok := el.(*ast.KeyValueExpr)
+		ast.Inspect(ch, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
 			if !ok {
-				continue
+				return true
 			}
-			if k, ok := kv.Key.(*ast.Ident); !ok || k.Name != "reason" {
-				continue
+			if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "readyOutcome" {
+				return true
 			}
-			// Resolve the reason expression, and RECORD WHAT CANNOT BE RESOLVED rather than
-			// skipping it. Skipping silently is how this guard went blind: a reason written as
-			// `reason: availableReason(...)` is a CallExpr, not a BasicLit, so the walk found
-			// nothing and the test still passed on the remaining literals. The guard stayed
-			// non-vacuous overall while being blind to the one new entry — which is worse than
-			// vacuous, because the calibration below cannot see it either.
-			switch v := kv.Value.(type) {
-			case *ast.BasicLit:
-				if v.Kind == token.STRING {
-					if s, err := strconv.Unquote(v.Value); err == nil {
+			producerFiles[src] = true
+			for _, el := range lit.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if k, ok := kv.Key.(*ast.Ident); !ok || k.Name != "reason" {
+					continue
+				}
+				// Resolve the reason expression, and RECORD WHAT CANNOT BE RESOLVED rather than
+				// skipping it. Skipping silently is how this guard went blind: a reason written as
+				// `reason: availableReason(...)` is a CallExpr, not a BasicLit, so the walk found
+				// nothing and the test still passed on the remaining literals. The guard stayed
+				// non-vacuous overall while being blind to the one new entry — which is worse than
+				// vacuous, because the calibration below cannot see it either.
+				switch v := kv.Value.(type) {
+				case *ast.BasicLit:
+					if v.Kind == token.STRING {
+						if s, err := strconv.Unquote(v.Value); err == nil {
+							produced[s] = true
+						}
+					}
+				case *ast.Ident:
+					if s, ok := constStrings[v.Name]; ok {
+						produced[s] = true
+					} else {
+						unresolved = append(unresolved, "producer: identifier "+v.Name)
+					}
+				case *ast.SelectorExpr:
+					// A reason written as a constant from another package — which is now the normal
+					// spelling for ZeroEvidence, since it is a cross-repo contract and must have one
+					// definition. Resolved from the compiled value; see importedStringConsts.
+					if str, q, ok := resolveSelector(v); ok {
+						produced[str] = true
+					} else {
+						unresolved = append(unresolved, "producer: unmapped qualified identifier "+q)
+					}
+				case *ast.CallExpr:
+					// A reason computed by a package-local function or method: resolve it by reading THAT
+					// function's return statements, rather than demanding the author maintain a list
+					// of what it can return. A hand-kept list is the thing that goes stale, which is
+					// the failure this guard exists to prevent.
+					rs, ok := returnedStrings(fset, v, constStrings, "childhealth.go", "support.go")
+					if !ok {
+						unresolved = append(unresolved, "producer: "+exprKind(kv.Value))
+						break
+					}
+					for _, s := range rs {
 						produced[s] = true
 					}
-				}
-			case *ast.Ident:
-				if s, ok := constStrings[v.Name]; ok {
-					produced[s] = true
-				} else {
-					unresolved = append(unresolved, "producer: identifier "+v.Name)
-				}
-			case *ast.SelectorExpr:
-				// A reason written as a constant from another package — which is now the normal
-				// spelling for ZeroEvidence, since it is a cross-repo contract and must have one
-				// definition. Resolved from the compiled value; see importedStringConsts.
-				if str, q, ok := resolveSelector(v); ok {
-					produced[str] = true
-				} else {
-					unresolved = append(unresolved, "producer: unmapped qualified identifier "+q)
-				}
-			case *ast.CallExpr:
-				// A reason computed by a package-local function or method: resolve it by reading THAT
-				// function's return statements, rather than demanding the author maintain a list
-				// of what it can return. A hand-kept list is the thing that goes stale, which is
-				// the failure this guard exists to prevent.
-				rs, ok := returnedStrings(fset, v, constStrings, "childhealth.go", "support.go")
-				if !ok {
+				default:
 					unresolved = append(unresolved, "producer: "+exprKind(kv.Value))
-					break
 				}
-				for _, s := range rs {
-					produced[s] = true
-				}
-			default:
-				unresolved = append(unresolved, "producer: "+exprKind(kv.Value))
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
+	t.Logf("readyOutcome literals found in %d file(s): %v", len(producerFiles), producerFiles)
 
 	handled := map[string]bool{}
 	su, err := parser.ParseFile(fset, "support.go", nil, 0)

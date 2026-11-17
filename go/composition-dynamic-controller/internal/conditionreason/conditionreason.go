@@ -43,6 +43,9 @@ const (
 	ReasonHelmOperationInProgress = "HelmOperationInProgress"
 	// PendingHelmOperation: an earlier helm operation's lock is still within its grace period.
 	ReasonPendingHelmOperation = "PendingHelmOperation"
+	// HooksMayNotHaveRun: krateo.io/hooks-unverified is set; an interrupted helm operation's hooks
+	// may not have run (core-provider#563).
+	ReasonHooksMayNotHaveRun = "HooksMayNotHaveRun"
 )
 
 // Writer is who writes a reason on a composition.
@@ -137,6 +140,9 @@ var (
 		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound", Clearance{Timer, "until the install or uninstall returns; each hook and each wait must finish within {helmOperationTimeout}, and the message carries the start time"})
 	PendingHelmOperation = ready(ReasonPendingHelmOperation, metav1.ConditionFalse, WriterCDC,
 		"Observe: a release is pending within its grace period, so this reconcile stands down", Clearance{Timer, "until the pending operation settles; otherwise rolled back once pending longer than {pendingOperationGrace} (at once when the pod that started it is gone); the message says how long it has been pending"})
+	HooksMayNotHaveRun = ready(ReasonHooksMayNotHaveRun, metav1.ConditionFalse, WriterCDC,
+		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it (a first install) was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps",
+		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm upgrade runs the hooks and removes it"})
 	ZeroEvidence = ready(condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"})
 	ChildrenForbidden = ready(ReasonChildrenForbidden, metav1.ConditionUnknown, WriterCDC,
@@ -305,7 +311,7 @@ var apiAuthnPassthrough = on(TypeApiResolved, "(authn's reason)", metav1.Conditi
 func Table() []Reason {
 	return []Reason{
 		Available, AvailablePartialCoverage, ReconcileGracefullyPaused,
-		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation,
+		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation, HooksMayNotHaveRun,
 		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded,
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
