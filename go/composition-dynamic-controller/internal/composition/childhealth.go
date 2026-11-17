@@ -1092,6 +1092,11 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 			// strings: TestCompositionDefinitionReasonsRollUpAsDeclared reads docs/cd-ready-reasons.md
 			// and fails when a row's parent verdict and this rollup disagree.
 			return is(childFailed)
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "HooksMayNotHaveRun":
+			// A child composition of this controller whose interrupted first install was rolled back
+			// to itself (#563): its hooks may not have run, and only a human, or a later upgrade,
+			// clears it. Without this arm it fell to the converging default, "still working on it".
+			return is(childFailed)
 		case stringField(cm, "reason") == "CreateFailed",
 			stringField(cm, "reason") == "UpdateFailed":
 			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to

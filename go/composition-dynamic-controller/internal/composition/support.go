@@ -94,6 +94,11 @@ func setUnavailableStatus(mg *unstructured.Unstructured, message string, force b
 	return setReadyCondition(mg, conditionreason.Unavailable, message, force)
 }
 
+// setHooksMayNotHaveRunStatus stamps Ready=False/HooksMayNotHaveRun (#563).
+func setHooksMayNotHaveRunStatus(mg *unstructured.Unstructured, message string, force bool) error {
+	return setReadyCondition(mg, conditionreason.HooksMayNotHaveRun, message, force)
+}
+
 // setZeroEvidenceStatus stamps Ready=Unknown/ZeroEvidence: the composition's health could not be
 // assessed at all (#165). Routed through the same helper as the other three so it cannot reintroduce
 // #119's contradictory-status comparison.
@@ -483,7 +488,7 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 	// readyMessageAvailable, not opts.message — same reason as the verdict above. This is the
 	// defaultMsg resolveReady falls back to for the Available arm, so a per-phase string here would
 	// reach the condition even with the verdict fixed.
-	return stampReady(mg, resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), opts.force)
+	return stampReady(mg, withHooksUnverified(resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), mg), opts.force)
 }
 
 // stampReady writes the Ready condition a readyOutcome calls for.
@@ -515,6 +520,8 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		// must not share a word: installer's gate allowlists ZeroEvidence as ready, and seven
 		// compositions on krateo-057 were passing it on the strength of this defect.
 		return setInventoryNotRecordedStatus(mg, out.message, force)
+	case conditionreason.ReasonHooksMayNotHaveRun:
+		return setHooksMayNotHaveRunStatus(mg, out.message, force)
 	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
 	case ReasonAvailablePartialCoverage:

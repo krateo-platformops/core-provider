@@ -92,6 +92,13 @@ const (
 	reasonRetiringLeftInstall  event.Reason = "RetiringControllerLeftInstall"
 	reasonRetiringLeftRecovery event.Reason = "RetiringControllerLeftRecovery"
 
+	// #563: the stuck-operation recovery found no deployed revision to return to and rolled the
+	// release back to itself (Warning: the interrupted operation's hooks may not have run); a later
+	// upgrade ran the hooks and cleared the mark (Normal); or clearing it failed (Warning).
+	reasonHooksUnverified         event.Reason = "HooksUnverified"
+	reasonHooksUnverifiedCleared  event.Reason = "HooksUnverifiedCleared"
+	reasonHooksUnverifiedNotClear event.Reason = "HooksUnverifiedClearFailed"
+
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
 	reasonPendingHelmOperation = conditionreason.ReasonPendingHelmOperation
@@ -697,6 +704,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	if err != nil {
 		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, fmt.Errorf("reconciling helm chart: %w", err), updateOpts)
 	}
+	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Observe")
 
 	// The reconcile converged the cluster in-place. When it detected a real change it also wrote a
 	// fresh revision (reconcileRes.Release); otherwise Release is the stored release. Report the
@@ -1328,6 +1336,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release not found after upgrade.")
 		return fmt.Errorf("release not found after upgrade")
 	}
+	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Update")
 	// Changed==false is the normal, desired outcome: Observe's reconcile already converged the
 	// cluster, so this one had nothing to do and wrote no revision. Logged at Info when it DID
 	// write, because that is the case worth seeing — it means Observe's convergence did not hold,
