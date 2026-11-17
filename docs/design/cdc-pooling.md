@@ -304,6 +304,38 @@ more than its own `spec.controller.workers`. The default pool request comes from
 summed peak × 1.5, so ~660 MiB for 10 idle members, against 1,280 MiB requested by ten dedicated
 controllers today.
 
+**Where the numbers live (Diego, 2026-11-17).** `spec.controller.pool` is only a name, so a pool is
+sized by core-provider chart values, set per cluster in installer's top-level `core-provider:` block
+when a cluster differs from the default:
+
+| value | meaning | default |
+|---|---|---|
+| `cdc.pool.default.resources` | the pool Deployment's resources. It REPLACES `cdc.resources` as a whole block, like `spec.controller.resources` for a dedicated controller | requests 100m / 660Mi, limits.memory 1Gi, no limits.cpu |
+| `cdc.pool.default.workers` | the pool's TOTAL concurrent reconciles across its members | 10 |
+| `cdc.pool.overrides.<name>.{resources,workers}` | one pool's size. It deep-MERGES over the default, so a partial override keeps the default's other keys | none |
+
+installer#1012 (rule 4 of check-cdc-resources-contract) encodes this contract, including that the
+shipped default and a partial override pass.
+
+**Two worker counts, never one key.** The pool total reaches the cdc as
+`COMPOSITION_CONTROLLER_POOL_WORKERS`. A member's own count stays its `spec.controller.workers`,
+else the controller default. They have different denominators and never share a name.
+
+**How the total is enforced (core-provider#561).** The members share ONE governor built to be shared
+(unstructured-runtime v1.25.0, `ratelimit.Options.Shared`), whose ceiling is the pool total, enforced
+with saturation off too and lowered by it when on. A member's worker takes its slot only once it has
+popped an item. Taking it before the pop, which a single controller does, would let an idle member
+hold capacity a busy member needs. The governor's CPU sampler runs once for the process, not once per
+member. `manager.Pool.Run` refuses any other governor. The cost: a high-priority item that arrives
+while a member's worker holds an item waits for that worker. That wait is bounded by the member's own
+worker count, which is why that count stays small.
+
+**The projected authn token is always mounted (Diego, 2026-11-17).** A pool pod runs as the pool's
+ServiceAccount and mounts the authn-audience token whether or not any member has an apiRef.
+Mounting it only while one does would change the pod template, and so restart the whole pool, when
+the first such member joins or the last leaves. The token grants nothing by itself: authn acts only
+on a ServiceAccount it has a mapping for.
+
 ### How step 5 is proven
 - **Unit:** the index is a pure function of the definitions (join, leave, rename, delete, a failed
   list removes nothing); the Role's `resourceNames` track the index; the CEL rules refuse a remote
