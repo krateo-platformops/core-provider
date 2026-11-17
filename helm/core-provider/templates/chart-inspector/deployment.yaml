@@ -19,7 +19,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "chart-inspector.labels" . | nindent 8 }}
+        {{- include "chart-inspector.podLabels" . | nindent 8 }}
         {{- with .Values.chartInspector.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

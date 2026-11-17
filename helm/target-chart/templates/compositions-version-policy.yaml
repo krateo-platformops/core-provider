@@ -22,6 +22,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
   name: krateo-composition-version
+  labels:
+    {{- include "core-provider-target.labels" . | nindent 4 }}
 spec:
   matchConstraints:
     matchPolicy: Exact
@@ -45,5 +47,7 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
   name: krateo-composition-version
+  labels:
+    {{- include "core-provider-target.labels" . | nindent 4 }}
 spec:
   policyName: krateo-composition-version

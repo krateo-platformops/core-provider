@@ -38,6 +38,13 @@ const shippedChart = "../../../../../helm/core-provider"
 // returns the rendered manifests keyed by template path. overrides are user values.
 func renderShippedChart(t *testing.T, overrides map[string]any) map[string]string {
 	t.Helper()
+	return renderChartAt(t, shippedChart, overrides)
+}
+
+// renderChartAt is renderShippedChart for the chart at chartDir (#570 also renders target-chart).
+func renderChartAt(t *testing.T, chartDir string, overrides map[string]any) map[string]string {
+	t.Helper()
+	shippedChart := chartDir
 	// The chart carries the release workflow's placeholders (CHART_VERSION / APP_VERSION), which are
 	// not valid semver. Substitute them in a copy, exactly as the lint workflow does.
 	dir := t.TempDir()
