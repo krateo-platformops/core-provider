@@ -81,7 +81,7 @@ func TestControllerReadiness(t *testing.T) {
 		{"nil replicas, nothing rolled out: not Available", cd(&yes, nil), &appsv1.Deployment{}, nil, "False", "Creating", "True", "Running", "controller running"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ready, active := controllerReadiness(c.cd, "FireworksApp", c.dep, c.err)
+			ready, active := controllerReadiness(c.cd, "FireworksApp", c.dep, c.err, nil)
 			if string(ready.Status) != c.ready || string(ready.Reason) != c.readyReason {
 				t.Errorf("Ready = %s/%s, want %s/%s", ready.Status, ready.Reason, c.ready, c.readyReason)
 			}
@@ -92,7 +92,7 @@ func TestControllerReadiness(t *testing.T) {
 				t.Errorf("ControllerActive message %q lacks %q", active.Message, c.msgs)
 			}
 			// Stable while the state is: a second evaluation must be Equal, or SetConditions rewrites it.
-			r2, a2 := controllerReadiness(c.cd, "FireworksApp", c.dep, c.err)
+			r2, a2 := controllerReadiness(c.cd, "FireworksApp", c.dep, c.err, nil)
 			if !ready.Equal(r2) || !active.Equal(a2) {
 				t.Errorf("not stable across two passes: %+v vs %+v", active, a2)
 			}
@@ -184,14 +184,14 @@ func TestControllerRollout(t *testing.T) {
 		}, "Creating", metav1.ConditionFalse, "is rolling out"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ready, _ := controllerReadiness(cd, "FireworksApp", c.dep(), nil)
+			ready, _ := controllerReadiness(cd, "FireworksApp", c.dep(), nil, nil)
 			if string(ready.Reason) != c.wantReason || ready.Status != c.wantStatus {
 				t.Fatalf("Ready = %s/%s (%q), want %s/%s", ready.Status, ready.Reason, ready.Message, c.wantStatus, c.wantReason)
 			}
 			if !strings.Contains(ready.Message, c.wantInMsg) {
 				t.Errorf("Ready message %q lacks %q", ready.Message, c.wantInMsg)
 			}
-			again, _ := controllerReadiness(cd, "FireworksApp", c.dep(), nil)
+			again, _ := controllerReadiness(cd, "FireworksApp", c.dep(), nil, nil)
 			if !ready.Equal(again) {
 				t.Errorf("not stable across two passes: %q vs %q", ready.Message, again.Message)
 			}
