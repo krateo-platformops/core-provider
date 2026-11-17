@@ -208,8 +208,8 @@ github.com/krateo-platformops/gojq v0.13.0 h1:OjASARn2rx67oaRJm6Tb8JuH8S1LAjGQhn
 github.com/krateo-platformops/gojq v0.13.0/go.mod h1:R2U7pnOvAMBv2PS/l40tYf5CnNRS72rv+yh69RxNNFY=
 github.com/krateo-platformops/plumbing v1.93.0 h1:Iegag129sVcDpj9Jp5OnGPGVg99/OAtvs3MhtLoZzlI=
 github.com/krateo-platformops/plumbing v1.93.0/go.mod h1:o066uueBnoUqiVbUkT/IgZSdjhcrykGg1hY73wT9SQ8=
-github.com/krateo-platformops/unstructured-runtime v1.25.0 h1:odn5ikUiesTJfOPy4HSg5jdRmOCJ7fHKWFRUWBVghw0=
-github.com/krateo-platformops/unstructured-runtime v1.25.0/go.mod h1:0Qr/ecYVpna05jK9n+vvScvPjIyvF3aZV966toEyOmA=
+github.com/krateo-platformops/unstructured-runtime v1.27.0 h1:4JpU2AK5vsLqFpgNuP00tnRmOy9Pq90NmntrB7ZeA1M=
+github.com/krateo-platformops/unstructured-runtime v1.27.0/go.mod h1:0Qr/ecYVpna05jK9n+vvScvPjIyvF3aZV966toEyOmA=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/lann/builder v0.0.0-20180802200727-47ae307949d0 h1:SOEGU9fKiNWd/HOJuq6+3iTQz8KNCLtVX6idSoTLdUw=
