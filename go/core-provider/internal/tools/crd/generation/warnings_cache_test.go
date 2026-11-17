@@ -14,7 +14,10 @@ import (
 func TestGenerateCRDWithWarnings_ACacheHitReportsTheSameWarnings(t *testing.T) {
 	// A GVK unique to this test, so no other test's render is already cached under the key.
 	gvk := schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v9-9-9", Kind: "WarnCacheProbe"}
-	spec := []byte(`{"type":"object","properties":{"o":{"type":"object","not":{"required":["a"]}}}}`)
+	// A `not` crdgen still DROPS (a property const under an object's not). Until plumbing v1.93.0
+	// (#209) this fixture was `not: {required: [a]}`, which crdgen now carries natively, so it no
+	// longer produced the enforcement-loss warning the test needs.
+	spec := []byte(`{"type":"object","properties":{"o":{"type":"object","properties":{"x":{"type":"string"}},"not":{"properties":{"x":{"const":"bad"}}}}}}`)
 
 	first, err := GenerateCRDWithWarnings(spec, gvk)
 	if err != nil {
