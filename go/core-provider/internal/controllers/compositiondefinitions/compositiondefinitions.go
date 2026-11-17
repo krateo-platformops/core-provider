@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
+	"io/fs"
 	appsv1 "k8s.io/api/apps/v1"
 	"os"
 	"path/filepath"
@@ -948,6 +949,17 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	specSchemaBytes, err := chart.ChartJsonSchema(pkgInfo, dir)
 	if err != nil {
+		// #566: a chart with NO root values.schema.json can never become a typed CRD, and core-provider
+		// requires one (Diego, 2026-11-17: refuse it explicitly, no permissive fallback). Said on
+		// Ready as its own failed reason, a new definition included. Before, a new definition took
+		// observeWithoutChart, which answers "absent", so the runtime called Create; Create failed on
+		// the same missing file and the runtime reported Ready=False/Creating, converging for ever
+		// (keycloak-provider-kog measured it on kyverno). Only an ABSENT file: one that exists but
+		// cannot be read keeps the unreadable-chart path. Not on a definition being deleted: its
+		// teardown must not depend on its chart.
+		if !deleted && errors.Is(err, fs.ErrNotExist) {
+			return valuesSchemaMissing(cr, cr.Spec.Chart, err)
+		}
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting spec schema: %w", err), log)
 	}
 	// A schema no CRD can be generated from is a config error in the chart, and says so on Ready

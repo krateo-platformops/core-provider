@@ -1081,13 +1081,14 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 		case stringField(cm, "reason") == "Unavailable":
 			return is(childFailed)
 		case stringField(cm, "status") == "False" && (stringField(cm, "reason") == "SchemaDefaultContradiction" ||
-			stringField(cm, "reason") == "RemoteChartUnreachable"):
+			stringField(cm, "reason") == "RemoteChartUnreachable" || stringField(cm, "reason") == "ValuesSchemaMissing"):
 			// A CompositionDefinition child's own failures (core-provider internal/cdreason). installer's
 			// umbrella composition renders the definitions, so this rollup reads their Ready. Each is a
 			// config error only a changed chart fixes: a values.schema.json default that fails its own
-			// subschema (no CRD can be generated), or a remote definition's chart URL the target cannot
-			// reach. Before these arms both fell to the converging default and held the umbrella at
-			// Creating for as long as the chart stayed broken. Literals, matched against core-provider's
+			// subschema (no CRD can be generated), a remote definition's chart URL the target cannot
+			// reach, or a chart with no root values.schema.json at all (#566). Before these arms each
+			// fell to the converging default and held the umbrella at Creating for as long as the chart
+			// stayed broken. Literals, matched against core-provider's
 			// strings: TestCompositionDefinitionReasonsRollUpAsDeclared reads docs/cd-ready-reasons.md
 			// and fails when a row's parent verdict and this rollup disagree.
 			return is(childFailed)

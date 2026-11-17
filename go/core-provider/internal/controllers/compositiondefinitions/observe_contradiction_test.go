@@ -23,6 +23,13 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+// noRootSchema, passed as chartTGZ's schema, builds a chart with no values.schema.json at all.
+const noRootSchema = ""
+
+// schemaIsADirectory, passed as chartTGZ's schema, builds a chart whose values.schema.json is a
+// directory: the path exists, and reading it fails with an error that is not fs.ErrNotExist.
+const schemaIsADirectory = "\x00directory"
+
 // chartTGZ is a minimal chart named "contradicting", version 0.1.0, with values.schema.json schema.
 func chartTGZ(t *testing.T, valuesSchema string) []byte {
 	t.Helper()
@@ -35,6 +42,15 @@ func chartTGZ(t *testing.T, valuesSchema string) []byte {
 		"contradicting/values.schema.json": valuesSchema,
 		"contradicting/templates/cm.yaml":  "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n",
 	} {
+		if strings.HasSuffix(name, "values.schema.json") && body == noRootSchema {
+			continue // a chart that ships no root schema at all (#566)
+		}
+		if strings.HasSuffix(name, "values.schema.json") && body == schemaIsADirectory {
+			if err := tw.WriteHeader(&tar.Header{Name: name + "/", Mode: 0o755, Typeflag: tar.TypeDir}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {
 			t.Fatal(err)
 		}
@@ -140,6 +156,56 @@ func TestObserveReportsASchemaDefaultContradiction(t *testing.T) {
 		}
 		if !cdreason.Creating.Is(got) {
 			t.Errorf("Ready = %s/%s, want False/Creating: Create follows in the same pass", got.Status, got.Reason)
+		}
+	})
+}
+
+// #566 (Diego, 2026-11-17: refuse explicitly): a NEW definition whose chart has no root
+// values.schema.json reports Ready=False/ValuesSchemaMissing naming the chart, with a ReadyAssessed
+// error and no status. It used to reach Create and read Ready=False/Creating for ever. A definition
+// being deleted is not stopped (teardown must not depend on the chart). Control: the same chart WITH
+// a schema reaches the CRD-not-found return.
+func TestObserveReportsAMissingValuesSchema(t *testing.T) {
+	t.Run("no root schema: Ready=False/ValuesSchemaMissing", func(t *testing.T) {
+		cd, _, err := observeChart(t, noRootSchema)
+		got := cd.GetCondition(rtv1.TypeReady)
+		if !cdreason.ValuesSchemaMissing.Is(got) {
+			t.Fatalf("Ready = %s/%s (%q), want False/ValuesSchemaMissing (Observe err: %v)", got.Status, got.Reason, got.Message, err)
+		}
+		if !strings.Contains(got.Message, "contradicting-0.1.0.tgz") || !strings.Contains(got.Message, "no values.schema.json at its root") {
+			t.Errorf("Ready message %q does not name the chart and the cause", got.Message)
+		}
+		if err == nil || !reconciler.IsReadyAssessed(err) {
+			t.Errorf("Observe err = %v, want a ReadyAssessed error", err)
+		}
+		if cd.Status.Kind != "" || cd.Status.ApiVersion != "" {
+			t.Errorf("status names %q %q: nothing was generated", cd.Status.ApiVersion, cd.Status.Kind)
+		}
+	})
+	t.Run("a definition being deleted is not stopped", func(t *testing.T) {
+		cd, _, err := observeChartDeleting(t, noRootSchema, true)
+		if got := cd.GetCondition(rtv1.TypeReady); cdreason.ValuesSchemaMissing.Is(got) {
+			t.Fatalf("a deleting definition stopped on its chart's missing schema (err %v)", err)
+		}
+	})
+	// Only a schema that is ABSENT is ValuesSchemaMissing. A root schema that exists but cannot be
+	// read is some other failure, and keeps the unreadable-chart path rather than telling the chart's
+	// owner to add a file that is already there.
+	t.Run("a schema that exists but cannot be read is not reported missing", func(t *testing.T) {
+		cd, _, err := observeChart(t, schemaIsADirectory)
+		got := cd.GetCondition(rtv1.TypeReady)
+		if cdreason.ValuesSchemaMissing.Is(got) {
+			t.Fatalf("an unreadable schema read as missing: %q (err %v)", got.Message, err)
+		}
+		if !cdreason.Unavailable.Is(got) || !strings.Contains(got.Message, "getting spec schema") {
+			t.Fatalf("control: Ready = %s/%s %q, want the unreadable-chart Unavailable from the schema read, so this case reached the branch", got.Status, got.Reason, got.Message)
+		}
+	})
+	t.Run("control: the same chart with a schema reaches CRD-not-found", func(t *testing.T) {
+		cd, obs, err := observeChart(t, `{"type":"object","properties":{"x":{"type":"string"}}}`)
+		got := cd.GetCondition(rtv1.TypeReady)
+		if err != nil || obs.ResourceExists || !strings.Contains(got.Message, "does not exists yet") {
+			t.Fatalf("control did not reach CRD-not-found: exists %v, err %v, Ready %s/%s %q", obs.ResourceExists, err, got.Status, got.Reason, got.Message)
 		}
 	})
 }

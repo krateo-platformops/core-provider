@@ -42,6 +42,9 @@ const (
 	// carry into the CRD and that does not satisfy the subschema it is written in, so no CRD can be
 	// generated (plumbing#205, *crdgen.DefaultContradictionError). A config error in the chart.
 	ReasonSchemaDefaultContradiction = "SchemaDefaultContradiction"
+	// ValuesSchemaMissing: the chart has no root values.schema.json, so no typed CRD can be generated
+	// (#566). core-provider requires one; a wrapper chart can add it.
+	ReasonValuesSchemaMissing = "ValuesSchemaMissing"
 )
 
 // Writer is who writes a reason on a CompositionDefinition.
@@ -130,6 +133,8 @@ var (
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it")
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a `default` in the chart's values.schema.json that crdgen carries into the CRD fails its own subschema, so no CRD is generated; the message names each JSON pointer (plumbing#205). Nothing is applied, and a definition that worked before keeps serving its last CRD")
+	ValuesSchemaMissing = ready(ReasonValuesSchemaMissing, metav1.ConditionFalse, WriterCoreProvider, Failed,
+		"Observe: the chart has no values.schema.json at its root, so no typed CRD can be generated and nothing is applied; the message names the chart (#566)")
 	Deleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterCoreProvider, Converging,
 		"Delete: the definition is being deleted")
 )
@@ -164,7 +169,7 @@ func on(condType rtv1.ConditionType, reason rtv1.ConditionReason, status metav1.
 // a fixed order.
 func Table() []Reason {
 	return []Reason{
-		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, Deleting,
+		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, ValuesSchemaMissing, Deleting,
 		runtimeNotObserved, runtimeCreating, runtimeDeleting,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused,
 	}
