@@ -34,3 +34,19 @@ func schemaContradiction(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 	cr.SetConditions(cdreason.SchemaDefaultContradiction.WithMessage(msg))
 	return reconciler.ExternalObservation{}, reconciler.ReadyAssessed(errors.New(msg)), true
 }
+
+// valuesSchemaMissing reports a chart with no root values.schema.json (#566): Ready=False/
+// ValuesSchemaMissing naming the chart, and a ReadyAssessed error, so the runtime keeps that Ready and
+// Synced=False/ReconcileError carries the same text. Nothing is generated or applied.
+func valuesSchemaMissing(cr *compositiondefinitionsv1alpha1.CompositionDefinition, chart *compositiondefinitionsv1alpha1.ChartInfo, cause error) (reconciler.ExternalObservation, error) {
+	name := "the chart"
+	if chart != nil {
+		name = fmt.Sprintf("chart %s %s", chart.Url, chart.Version)
+		if chart.Repo != "" {
+			name = fmt.Sprintf("chart %s (%s) %s", chart.Url, chart.Repo, chart.Version)
+		}
+	}
+	msg := fmt.Sprintf("%s has no values.schema.json at its root; core-provider needs one to type the composition CRD (a wrapper chart can add one): %v", name, cause)
+	cr.SetConditions(cdreason.ValuesSchemaMissing.WithMessage(msg))
+	return reconciler.ExternalObservation{}, reconciler.ReadyAssessed(errors.New(msg))
+}
