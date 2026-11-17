@@ -328,7 +328,11 @@ popped an item. Taking it before the pop, which a single controller does, would 
 hold capacity a busy member needs. The governor's CPU sampler runs once for the process, not once per
 member. `manager.Pool.Run` refuses any other governor. The cost: a high-priority item that arrives
 while a member's worker holds an item waits for that worker. That wait is bounded by the member's own
-worker count, which is why that count stays small.
+worker count, in passes. **A member defaults to the fleet default, 10 on the chart (Diego,
+2026-11-17).** That's `cdc.env` `COMPOSITION_CONTROLLER_WORKERS`, the same value a dedicated
+controller gets, so a busy member can use the whole pool total while the others are idle, which is
+the common case for the idle cohort a pool is for. The bound is therefore about 10 passes, unless a
+definition sets its own `spec.controller.workers`.
 
 **The projected authn token is always mounted (Diego, 2026-11-17).** A pool pod runs as the pool's
 ServiceAccount and mounts the authn-audience token whether or not any member has an apiRef.
