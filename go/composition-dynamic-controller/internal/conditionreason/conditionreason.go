@@ -161,7 +161,7 @@ var (
 	runtimeObserveFailed = ready(condition.ReasonObserveFailed, metav1.ConditionUnknown, WriterRuntime,
 		"Observe failed and the handler did not wrap its error with ReadyAssessed", Clearance{NextPass, "the next observation, after the retry backoff"})
 	runtimeCreateOutcomeUnknown = ready(condition.ReasonCreateOutcomeUnknown, metav1.ConditionFalse, WriterRuntime,
-		"worker: a create whose outcome cannot be determined is not repeated (krateo.io/external-create-pending set, the existence check failed); message: the cause and the remediation (unstructured-runtime#93)",
+		"worker: a create whose outcome cannot be determined is not repeated (krateo.io/external-create-pending set, the existence check failed); reconciliation and deletion both wait on it; message: the cause, that it clears by itself once the check answers, and the remediation (unstructured-runtime#93, #107)",
 		Clearance{Indefinite, "until an existence check succeeds (retried every resync; a transient cause clears by itself) or a human, having verified the external state, removes krateo.io/external-create-pending"})
 	runtimeDeleting = ready(condition.ReasonDeleting, metav1.ConditionFalse, WriterRuntime,
 		"Delete is in progress or failed (message: the error, on failure)", Clearance{Timer, "until deletion completes: finalizer-bearing children get {childTeardownGrace}, then the release is uninstalled with each hook and wait within {helmOperationTimeout}"})
