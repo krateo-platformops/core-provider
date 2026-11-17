@@ -17,6 +17,9 @@ import (
 // Rendered twice: with the defaults, and with every optional template switched on, so a template
 // behind a toggle is checked too. Each object's identity is printed with the count of labelled
 // ones, which is the control: a render that produced nothing cannot pass.
+// targetChart is the core-provider-target chart, beside the shipped one.
+const targetChart = "../../../../../helm/target-chart"
+
 func TestShippedChart_EveryObjectCarriesTheReleaseLabel(t *testing.T) {
 	everythingOn := map[string]any{
 		"leaderElection":      map[string]any{"enabled": true},
@@ -35,18 +38,21 @@ func TestShippedChart_EveryObjectCarriesTheReleaseLabel(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name   string
+		chart  string
 		values map[string]any
 		// mustRender: kinds the toggles exist to produce, with their count; the control that the
 		// "on" render really switched them on rather than passing on the default set.
 		mustRender map[string]int
 	}{
-		{"defaults", nil, nil},
-		{"every optional template on", everythingOn, map[string]int{"HorizontalPodAutoscaler": 2, "PodDisruptionBudget": 2}},
+		{"defaults", shippedChart, nil, nil},
+		{"every optional template on", shippedChart, everythingOn, map[string]int{"HorizontalPodAutoscaler": 2, "PodDisruptionBudget": 2}},
+		// core-provider-target ships the same composition-version policy into remote targets.
+		{"target-chart", targetChart, nil, map[string]int{"MutatingAdmissionPolicy": 1, "MutatingAdmissionPolicyBinding": 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var labelled, missing []string
 			kinds := map[string]int{}
-			for path, manifest := range renderShippedChart(t, tc.values) {
+			for path, manifest := range renderChartAt(t, tc.chart, tc.values) {
 				for _, doc := range strings.Split(manifest, "\n---") {
 					var obj map[string]any
 					if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
