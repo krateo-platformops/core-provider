@@ -501,6 +501,32 @@ spec:
                   - type
                   type: object
                 type: array
+              controller:
+                description: 'Controller: the Deployment that runs this definition''s
+                  controller (core-provider#580).'
+                properties:
+                  deployment:
+                    description: 'Deployment: the name of the Deployment that runs
+                      the controller.'
+                    type: string
+                  mode:
+                    description: 'Mode: Dedicated or Pool.'
+                    enum:
+                    - Dedicated
+                    - Pool
+                    type: string
+                  namespace:
+                    description: 'Namespace: where the Deployment is, on the cluster
+                      status.target names.'
+                    type: string
+                  pool:
+                    description: 'Pool: the pool''s name, for mode Pool.'
+                    type: string
+                required:
+                - deployment
+                - mode
+                - namespace
+                type: object
               digest:
                 description: 'Digest: the digest of the managed resources'
                 type: string

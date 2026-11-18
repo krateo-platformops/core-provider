@@ -478,6 +478,39 @@ type Managed struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// ControllerMode says whether a definition's controller runs in its own Deployment or in a pool.
+// +kubebuilder:validation:Enum=Dedicated;Pool
+type ControllerMode string
+
+const (
+	// ControllerModeDedicated: the Kind x version's own Deployment, <resource>-<version>-controller.
+	ControllerModeDedicated ControllerMode = "Dedicated"
+	// ControllerModePool: a member of pool spec.controller.pool, run by cdc-pool-<pool>
+	// (docs/design/cdc-pooling.md section 5c).
+	ControllerModePool ControllerMode = "Pool"
+)
+
+// ControllerStatus names the Deployment that runs this definition's controller (core-provider#580):
+// the supported way to find it, instead of deriving <resource>-<version>-controller, which a pooled
+// Kind does not have. A follower (another definition owns its Kind x version) names its owner's
+// controller, which is the one that reconciles its instances. Recorded when the definition's
+// deployment is observed up to date, so it describes what is deployed, not what the spec asks for;
+// Ready and ControllerActive say whether that Deployment is running.
+type ControllerStatus struct {
+	// Mode: Dedicated or Pool.
+	Mode ControllerMode `json:"mode"`
+
+	// Namespace: where the Deployment is, on the cluster status.target names.
+	Namespace string `json:"namespace"`
+
+	// Deployment: the name of the Deployment that runs the controller.
+	Deployment string `json:"deployment"`
+
+	// Pool: the pool's name, for mode Pool.
+	// +optional
+	Pool string `json:"pool,omitempty"`
+}
+
 // TargetStatus reports the cluster the composition-dynamic-controller (and the
 // generated CRD and RBAC) are deployed to.
 type TargetStatus struct {
@@ -506,6 +539,10 @@ type CompositionDefinitionStatus struct {
 	// Target: information about the cluster the controller is deployed to.
 	// +optional
 	Target *TargetStatus `json:"target,omitempty"`
+
+	// Controller: the Deployment that runs this definition's controller (core-provider#580).
+	// +optional
+	Controller *ControllerStatus `json:"controller,omitempty"`
 
 	// Kind: the kind of the custom resource - Last applied kind
 	Kind string `json:"kind,omitempty"`

@@ -136,3 +136,22 @@ func (e *external) reconcilePools(ctx context.Context, cr *compositiondefinition
 	}
 	return nil
 }
+
+// controllerPlacement is where the controller for gvr runs, decided by runner: the definition that
+// owns the Kind x version (cr itself, or a follower's owner). A pool member runs in its pool's
+// Deployment; anything else, including every remote definition (a remote pool is refused at
+// admission), in <resource>-<version>-controller. Recorded as status.controller (#580) and read by
+// controllerConditions, so the two cannot disagree about which Deployment is the controller.
+func controllerPlacement(runner *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) compositiondefinitionsv1alpha1.ControllerStatus {
+	ns := controllerNamespace(runner)
+	if p := poolOf(runner); p != "" && !clusterkube.IsRemote(runner.Spec.Deploy) {
+		return compositiondefinitionsv1alpha1.ControllerStatus{
+			Mode: compositiondefinitionsv1alpha1.ControllerModePool, Namespace: ns,
+			Deployment: deploy.PoolNames(p).Workload, Pool: p,
+		}
+	}
+	return compositiondefinitionsv1alpha1.ControllerStatus{
+		Mode: compositiondefinitionsv1alpha1.ControllerModeDedicated, Namespace: ns,
+		Deployment: deploy.ControllerDeploymentKey(ns, gvr).Name,
+	}
+}
