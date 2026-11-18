@@ -209,7 +209,7 @@ spec:
                   version:
                     description: 'Version: desired chart version, needed for oci charts
                       and for helm repo urls'
-                    maxLength: 20
+                    maxLength: 64
                     type: string
                 required:
                 - url
@@ -620,7 +620,7 @@ spec:
                             version:
                               description: 'Version: desired chart version, needed
                                 for oci charts and for helm repo urls'
-                              maxLength: 20
+                              maxLength: 64
                               type: string
                           required:
                           - url
