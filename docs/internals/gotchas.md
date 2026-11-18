@@ -73,12 +73,29 @@ rather than force-removing them (`deploy.ErrCompositionStillExist`). A
 delete those first (the still-running CDC must finalize them; Undeploy runs only
 after they are gone).
 
-## The chart `version` field is `v<dots-as-dashes>`, and capped
+## The chart `version` becomes `v<dots-as-dashes>`, and the names derived from it are capped
 
-The generated CRD version is `v` + the chart version with dots replaced by dashes
-(`internal/tools/chart/chart.go`, `ChartGroupVersionKind`) — chart `1.2.3` → CRD
-version `v1-2-3`. `spec.chart.version` is validated `MaxLength=20` (`types.go`);
-long/odd version strings are rejected or produce surprising CRD version names.
+The generated CRD version is `v` + the **fetched chart's Chart.yaml** version with dots
+replaced by dashes (`internal/tools/chart/chart.go`, `ChartGroupVersionKind`): chart
+`1.2.3` → CRD version `v1-2-3`. It is not `spec.chart.version`, which may be a semver
+range the repo getter resolves, and which is only sanity-bounded (`MaxLength=64`,
+`types.go`). The old 20-byte cap measured the wrong field and only one of two inputs (#588).
+
+The real limits are on the derived names, and Observe checks them before anything is
+written (`internal/tools/deploy/derivednames.go`, Ready=False/`DerivedNameTooLong`):
+
+| Name | Rule | Budget |
+|---|---|---|
+| CRD version `v<ver>` | DNS-1035 label, ≤ 63 | crdgen normalizes the version (`NormalizeVersionName`: lowercase, other characters → `-`, so `1.0.0-RC1` → `v1-0-0-rc1`), so only its length can fail |
+| controller Deployment `<plural>-v<ver>-controller`, also its `app.kubernetes.io/name` selector | label value ≤ 63 (the template's `trunc 63` would otherwise cut it silently) | `len(plural) + len(version) ≤ 50` |
+| controller Service `…-controller-service`, only with `cdc.metrics.enabled` | DNS-1035 label ≤ 63 | `len(plural) + len(version) ≤ 42` |
+
+A pool member's controller is its pool's Deployment, so only the CRD-version rule applies to it.
+
+**The budget is shared, and the chart name spends it first.** The plural is the lowercased
+Pascalized chart name plus `s`: `aruba-no-create-rollup-probe` → `ArubaNoCreateRollupProbe` →
+`arubanocreaterollupprobes`, 25 characters, leaving 25 for the version (17 with metrics on)
+before a version is even chosen. Pick the chart name with the version budget in mind.
 Corollary: **renaming a chart renames the generated Kind** (Pascalized chart name)
 — a new API, not an upgrade.
 

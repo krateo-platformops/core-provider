@@ -67,7 +67,7 @@ type ChartInfo struct {
 	Url string `json:"url"`
 	// Version: desired chart version, needed for oci charts and for helm repo urls
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:MaxLength=64
 	Version string `json:"version,omitempty"`
 	// Repo: Helm repo name
 	// Should be set only for helm repo urls
@@ -91,7 +91,7 @@ type ChartInfoProps struct {
 	Url string `json:"url"`
 	// Version: desired chart version, needed for oci charts and for helm repo urls
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:MaxLength=64
 	Version string `json:"version,omitempty"`
 	// Repo: helm repo name (for helm repo urls only)
 	// +kubebuilder:validation:Optional

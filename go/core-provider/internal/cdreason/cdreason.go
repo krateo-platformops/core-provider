@@ -45,6 +45,10 @@ const (
 	// ValuesSchemaMissing: the chart has no root values.schema.json, so no typed CRD can be generated
 	// (#566). core-provider requires one; a wrapper chart can add it.
 	ReasonValuesSchemaMissing = "ValuesSchemaMissing"
+	// DerivedNameTooLong: a name core-provider derives from the chart's name and Chart.yaml version
+	// (the CRD version, the controller Deployment and its selector label, the controller Service)
+	// would be refused by the API server or silently truncated (#588). A config error in the chart.
+	ReasonDerivedNameTooLong = "DerivedNameTooLong"
 )
 
 // Writer is who writes a reason on a CompositionDefinition.
@@ -135,6 +139,8 @@ var (
 		"Observe: a `default` in the chart's values.schema.json that crdgen carries into the CRD fails its own subschema, so no CRD is generated; the message names each JSON pointer (plumbing#205). Nothing is applied, and a definition that worked before keeps serving its last CRD")
 	ValuesSchemaMissing = ready(ReasonValuesSchemaMissing, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: the chart has no values.schema.json at its root, so no typed CRD can be generated and nothing is applied; the message names the chart (#566)")
+	DerivedNameTooLong = ready(ReasonDerivedNameTooLong, metav1.ConditionFalse, WriterCoreProvider, Failed,
+		"Observe: a name derived from the chart's name and Chart.yaml version does not fit Kubernetes' limits: the CRD version is not a DNS-1035 label, the controller Deployment's name (also its selector label) is over 63 characters, or, with cdc.metrics.enabled, the controller Service's is; the message names each name, its length and the problem. Nothing is applied, and a definition that worked before keeps what it has (#588)")
 	Deleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterCoreProvider, Converging,
 		"Delete: the definition is being deleted")
 )
@@ -169,7 +175,7 @@ func on(condType rtv1.ConditionType, reason rtv1.ConditionReason, status metav1.
 // a fixed order.
 func Table() []Reason {
 	return []Reason{
-		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, ValuesSchemaMissing, Deleting,
+		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, ValuesSchemaMissing, DerivedNameTooLong, Deleting,
 		runtimeNotObserved, runtimeCreating, runtimeDeleting,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused,
 	}

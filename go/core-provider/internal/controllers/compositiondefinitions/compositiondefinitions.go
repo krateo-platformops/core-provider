@@ -996,6 +996,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		log.Debug("CompositionDefinition was deleted, CRD still resolves; continuing observation", "gvr", gvr.String())
 	}
 
+	// #588: names derived from the GVR that Kubernetes would refuse, or the controller templates
+	// would silently truncate, are Ready=False/DerivedNameTooLong before any write. Not on a
+	// definition being deleted: its teardown must not depend on its chart.
+	if !deleted {
+		if obs, err, stop := e.derivedNameRefusal(ctx, cr, chartGVK, gvr); stop {
+			return obs, err
+		}
+	}
+
 	// A definition being deleted while another live definition takes its Kind+version over owns
 	// nothing that outlives the hand-over: the CRD, the instances and the shared RBAC are the
 	// successor's. Once its own controller is gone from its namespace, its external resource is
