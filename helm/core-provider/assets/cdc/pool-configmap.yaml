@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ "{{" }} .poolConfigMap {{ "}}" }}
+  namespace: {{ "{{" }} .namespace {{ "}}" }}
+  labels:
+    krateo.io/cdc-pool: {{ "{{" }} .pool {{ "}}" }}
+    app.kubernetes.io/name: {{ "{{" }} trunc 63 .poolDeployment {{ "}}" }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: krateo
+    app.kubernetes.io/managed-by: krateo
+data:
+  # docs/design/cdc-pooling.md §5c: a POOL's process environment. Its members' configuration is NOT
+  # here: each member keeps its own env ConfigMap (assets/cdc/configmap.yaml with .pool set), named
+  # in the membership index below and read by the pool at runtime.
+  COMPOSITION_CONTROLLER_POOL_INDEX: {{ "{{" }} .poolIndex {{ "}}" }}
+  # The pool's TOTAL concurrent reconciles across its members (core-provider#561), from
+  # cdc.pool.default/overrides.<name>.workers. Not COMPOSITION_CONTROLLER_WORKERS: that stays each
+  # member's own default, a different denominator under a different name.
+  COMPOSITION_CONTROLLER_POOL_WORKERS: {{ "{{" }} .poolWorkers | quote {{ "}}" }}
+  # The pool's ServiceAccount: the subject of every member's derived RBAC.
+  COMPOSITION_CONTROLLER_SA_NAME: {{ "{{" }} .composition_controller_sa_name {{ "}}" }}
+  COMPOSITION_CONTROLLER_SA_NAMESPACE: {{ "{{" }} .composition_controller_sa_namespace {{ "}}" }}
+  # A pool is local-only (§5c Scope), so the authn every member exchanges its token with is the
+  # management cluster's, resolved by core-provider as for a local dedicated controller.
+  URL_AUTHN: {{ "{{" }} .authn_url | quote {{ "}}" }}
+  DEPLOYMENT_NAME: {{ "{{" }} .poolDeployment {{ "}}" }}
+  {{- include "core-provider.cdcProcessEnvHead" . | nindent 2 }}
+  {{- include "core-provider.cdcProcessEnvTail" . | nindent 2 }}

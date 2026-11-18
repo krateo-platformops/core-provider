@@ -7,3 +7,11 @@ metadata:
 data:
   deployment.yaml: |
 {{ tpl (.Files.Get "assets/cdc/deployment.yaml") . | indent 4 }}
+  # docs/design/cdc-pooling.md §5c: a pool's Deployment, rendered by core-provider only for a pool
+  # (read from the mounted cdc-deployment ConfigMap as pool-deployment.yaml).
+  pool-deployment.yaml: |
+{{ tpl (.Files.Get "assets/cdc/pool-deployment.yaml") . | indent 4 }}
+  # The chart's cdc.pool block (values.yaml), read by core-provider to size a pool: it reads no chart
+  # values at runtime, so the block travels beside the asset it sizes. overrides.<pool> is deep-merged
+  # over default in core-provider (deploy.LoadPoolSizing).
+  pool-sizing.json: {{ .Values.cdc.pool | toJson | quote }}

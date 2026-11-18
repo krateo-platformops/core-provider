@@ -20,7 +20,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -241,6 +243,34 @@ func TestLookup(t *testing.T) {
 		assert.NotEmpty(t, digest)
 
 		assert.Equal(t, ddig, digest)
+
+		// docs/design/cdc-pooling.md §5c: the same Kind x version joins pool "general". Deploy hashes
+		// the pool's ServiceAccount (it applies none) and re-points the controller's bindings to it, and
+		// Lookup must reach the same digest by the same path, or Observe would report a member
+		// permanently out of date. Joining also retires the dedicated controller (cutoverToPool).
+		member := opts
+		member.Pool = "general"
+		mdig, err := Deploy(context.Background(), cli, member)
+		assert.NoError(t, err)
+		assert.NotEqual(t, ddig, mdig, "joining a pool changes the controller's RBAC subject, so the digest must move")
+		mlook, err := Lookup(context.Background(), cli, member)
+		assert.NoError(t, err)
+		assert.Equal(t, mdig, mlook, "Lookup disagrees with Deploy for a pool member")
+
+		dedicated := resourceNamer(opts.GVR.Resource, opts.GVR.Version)
+		_, err = dyn.Resource(deploymentGVR).Namespace(namespace).Get(context.Background(), getCDCDeploymentNN(types.NamespacedName{Name: dedicated}).Name, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err), "the dedicated Deployment survived joining the pool: %v", err)
+		pool := PoolServiceAccount("general", namespace)
+		rb, err := dyn.Resource(roleBindingGVR).Namespace(namespace).Get(context.Background(), dedicated, metav1.GetOptions{})
+		if assert.NoError(t, err) {
+			subjects, _, _ := unstructured.NestedSlice(rb.Object, "subjects")
+			for _, s := range subjects {
+				m := s.(map[string]any)
+				if m["kind"] == "ServiceAccount" {
+					assert.Equal(t, pool.Name, m["name"], "the controller's RoleBinding still names %v", m)
+				}
+			}
+		}
 
 		return ctx
 	}).Feature()

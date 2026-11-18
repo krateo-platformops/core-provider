@@ -43,6 +43,10 @@ type ResubjectOptions struct {
 	NewNamespace  string
 	OldGVR        schema.GroupVersionResource
 	NewGVR        schema.GroupVersionResource
+	// NewServiceAccount names the identity taking over when it is not a per-version one: a pool's
+	// ServiceAccount (cdc-pool-<pool>, docs/design/cdc-pooling.md §5c) when a dedicated controller
+	// joins it. Empty means the one NewGVR derives, as before.
+	NewServiceAccount string
 }
 
 // ResubjectDerivedRBAC repoints every derived RoleBinding and ClusterRoleBinding that still names
@@ -71,6 +75,9 @@ func ResubjectDerivedRBAC(ctx context.Context, opts ResubjectOptions) (int, erro
 
 	oldSA := resourceNamer(opts.OldGVR.Resource, opts.OldGVR.Version)
 	newSA := resourceNamer(opts.NewGVR.Resource, opts.NewGVR.Version)
+	if opts.NewServiceAccount != "" {
+		newSA = opts.NewServiceAccount
+	}
 	newNamespace := opts.NewNamespace
 	if newNamespace == "" {
 		newNamespace = opts.Namespace

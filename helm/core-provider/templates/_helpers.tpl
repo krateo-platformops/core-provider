@@ -174,3 +174,46 @@ core-provider.otlpPort is the daemonset's OTLP hostPort for the configured proto
 {{- define "core-provider.otlpPort" -}}
 {{- if eq (.Values.otel.protocol | default "http/protobuf") "grpc" -}}4317{{- else -}}4318{{- end -}}
 {{- end -}}
+
+{{/*
+The composition controller's PROCESS-level environment: the keys every cdc process reads from its
+chart, whatever it runs. Shared by a dedicated controller's ConfigMap (assets/cdc/configmap.yaml)
+and a pool's process ConfigMap (assets/cdc/pool-configmap.yaml, docs/design/cdc-pooling.md §5c),
+so the two cannot drift. Head and tail are separate only because the dedicated ConfigMap interleaves
+per-member keys between them; a dedicated controller renders byte-for-byte what it rendered before
+(TestPoolMemberConfigMapKeys and the differential in its commit).
+*/}}
+{{- define "core-provider.cdcProcessEnvHead" -}}
+URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081/
+KRATEO_NAMESPACE: {{ .Release.Namespace }}
+{{- end }}
+
+{{- define "core-provider.cdcProcessEnvTail" -}}
+# Must match the container port named "health" in assets/cdc/deployment.yaml, which the probes use.
+COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT: "{{ .Values.cdc.healthProbe.port }}"
+# #410: bound on every helm operation, hooks included (values.yaml cdc.helmTimeout).
+COMPOSITION_CONTROLLER_HELM_TIMEOUT: {{ .Values.cdc.helmTimeout | quote }}
+{{- if .Values.cdc.metrics.enabled }}
+COMPOSITION_CONTROLLER_METRICS_SERVER_PORT: "{{ .Values.cdc.metrics.port | default 0 }}" # Set to 0 to disable metrics server
+{{- end }}
+{{- if .Values.otel.enabled }}
+OTEL_ENABLED: "true"
+OTEL_TRACING_ENABLED: "{{ .Values.otel.tracing }}"
+{{- /* #469: one value for both processes. An explicit cdc.env key wins, rendered once (below), never twice. */}}
+{{- if not (hasKey (.Values.cdc.env | default dict) "OTEL_LOGS_ENABLED") }}
+OTEL_LOGS_ENABLED: "{{ .Values.otel.logs | default false }}"
+{{- end }}
+{{- if not (hasKey (.Values.cdc.env | default dict) "OTEL_AUDIT_LOGS_ENABLED") }}
+OTEL_AUDIT_LOGS_ENABLED: "{{ .Values.otel.auditLogs | default false }}"
+{{- end }}
+{{- /* An explicit endpoint only. Unset, the Deployment derives a node-local one from the node IP (core-provider.otlpNodeLocal); the old default here, the daemonset's HEADLESS Service, spread spans across node agents and lost their pod metadata. */}}
+{{- with .Values.otel.endpoint }}
+OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+{{- end }}
+OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.otel.protocol | default "http/protobuf" | quote }}
+SERVICE_VERSION: {{ .Values.cdc.image.tag | quote }}
+{{- end }}
+{{- range $key, $value := .Values.cdc.env }}
+{{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}

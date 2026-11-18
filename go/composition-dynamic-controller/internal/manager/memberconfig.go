@@ -24,8 +24,14 @@ const (
 	KeyAPIRefName         = "COMPOSITION_CONTROLLER_API_REF_NAME"
 	KeyAPIRefNamespace    = "COMPOSITION_CONTROLLER_API_REF_NAMESPACE"
 	KeyAPIRefExtras       = "COMPOSITION_CONTROLLER_API_REF_EXTRAS"
-	KeyWorkers            = "COMPOSITION_CONTROLLER_WORKERS"
-	KeyResyncInterval     = "COMPOSITION_CONTROLLER_RESYNC_INTERVAL"
+	// KeyWorkers and KeyResyncInterval are a pool member's OWN overrides, under names of their own.
+	// They are deliberately not COMPOSITION_CONTROLLER_WORKERS / _RESYNC_INTERVAL: the env ConfigMap
+	// also carries the chart-wide cdc.env, which may set those as a fleet default (krateo-057 sets
+	// workers to 10), and reading that as a per-member override would give every member of a pool the
+	// fleet value, defeating the pool-wide cap. core-provider writes these only for a pool member whose
+	// CompositionDefinition sets spec.controller.workers / resyncInterval.
+	KeyWorkers        = "KRATEO_POOL_MEMBER_WORKERS"
+	KeyResyncInterval = "KRATEO_POOL_MEMBER_RESYNC_INTERVAL"
 )
 
 // ResolverFactory builds a member's apiRef resolver; the snowplow and authn endpoints it needs are the

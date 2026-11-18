@@ -85,3 +85,25 @@ func TestParseIndex(t *testing.T) {
 		t.Fatalf("parsed = %+v", got)
 	}
 }
+
+// The chart-wide cdc.env lands in every member's ConfigMap too, and krateo-057 sets
+// COMPOSITION_CONTROLLER_WORKERS=10 there as a fleet default. Read as a per-member override, it would
+// give every member of a pool 10 workers and defeat the pool-wide cap; only the member's own keys count.
+func TestMemberFromConfigIgnoresTheFleetDefaults(t *testing.T) {
+	m, err := MemberFromConfig(map[string]string{
+		KeyVersion: "v1", KeyResource: "x",
+		"COMPOSITION_CONTROLLER_WORKERS":         "10",
+		"COMPOSITION_CONTROLLER_RESYNC_INTERVAL": "60s",
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Workers != 0 || m.ResyncInterval != 0 {
+		t.Fatalf("fleet-wide env read as a member override: workers=%d resync=%s", m.Workers, m.ResyncInterval)
+	}
+	m, err = MemberFromConfig(map[string]string{KeyVersion: "v1", KeyResource: "x", KeyWorkers: "2", KeyResyncInterval: "5m",
+		"COMPOSITION_CONTROLLER_WORKERS": "10"}, nil, nil)
+	if err != nil || m.Workers != 2 || m.ResyncInterval != 5*time.Minute {
+		t.Fatalf("the member's own override lost: %+v %v", m, err)
+	}
+}

@@ -108,7 +108,7 @@ func TestAuditRecordsDeployRBACRefusalEnvtest(t *testing.T) {
 		t.Helper()
 		cr, crb, role, rb, sa := objs(roleVerbs...)
 		hsh := hasher.NewFNVObjectHash()
-		return installRBACResources(ctx, dyn, cr, crb, role, rb, sa, &hsh, kubecli.ApplyOptions{})
+		return installRBACResources(ctx, dyn, cr, crb, role, rb, sa, true, &hsh, kubecli.ApplyOptions{})
 	}
 
 	// 1. Create refused: escalation prevention, the writer does not hold configmaps get.
