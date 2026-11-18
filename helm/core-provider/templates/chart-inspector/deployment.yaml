@@ -29,6 +29,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "chart-inspector.serviceAccountName" . }}
+      {{- /* #582: the termination budget covers the preStop sleep THEN the drain; chart-inspector is
+           told the drain part, 5 s short of SIGKILL. A budget that leaves no drain is refused. */}}
+      {{- $grace := int .Values.chartInspector.terminationGracePeriodSeconds }}
+      {{- $drain := sub (sub $grace (int (.Values.chartInspector.preStopSleepSeconds | default 0))) 5 }}
+      {{- if lt $drain 1 }}
+      {{- fail (printf "chartInspector.terminationGracePeriodSeconds (%d) must exceed preStopSleepSeconds (%d) + 5, or chart-inspector has no time to drain its in-flight renders before SIGKILL (#582)" $grace (int (.Values.chartInspector.preStopSleepSeconds | default 0))) }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $grace }}
       securityContext:
         {{- toYaml .Values.chartInspector.podSecurityContext | nindent 8 }}
       containers:
@@ -38,6 +46,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "chart-inspector.fullname" . }}
+          env:
+            # #582: chart-inspector's shutdown deadline, derived from the pod's termination budget.
+            - name: SHUTDOWN_TIMEOUT
+              value: "{{ $drain }}s"
           securityContext:
             {{- toYaml .Values.chartInspector.securityContext | nindent 12 }}
           ports:
