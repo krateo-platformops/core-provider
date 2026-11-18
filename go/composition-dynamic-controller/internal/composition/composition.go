@@ -493,7 +493,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		markWrote(ctx, writeDerivedRBAC) // RBAC created or changed, possibly before an error
 	}
 	if err != nil {
-		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, err, updateOpts)
+		return controller.ExternalObservation{}, failObserveOnDerivedRBAC(ctx, mg, err, time.Now(), updateOpts)
 	}
 
 	if isIncompleteHelmOperation(rel.Status) {
@@ -1723,7 +1723,13 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		if cerr := setChartRenderableCondition(mg, reason, message); cerr != nil {
 			xcontext.Logger(ctx).Info("setting ChartRenderable condition", "error", cerr.Error())
 		}
-		setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
+		// #577: an unreachable chart-inspector leaves RBACComplete as last assessed here. Inside the
+		// grace that stands (the grants applied then are still in place); once it ends,
+		// failObserveOnDerivedRBAC records this same NotEvaluated, so after the grace nothing differs
+		// from before #577.
+		if !chartinspector.IsUnreachable(err) {
+			setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
+		}
 		return 0, fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
