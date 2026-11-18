@@ -1379,7 +1379,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// controller is Available only once its rollout is complete (controllerReadiness). An unreadable
 	// Deployment is returned as an error, so the runtime reports NotObserved rather than a Ready this
 	// pass could not establish. A remote definition keeps plain Available.
-	ready, active, ok, readErr := e.controllerConditions(ctx, cr, gvr)
+	placement := controllerPlacement(cr, gvr)
+	cr.Status.Controller = &placement // #580: recorded where the deployment is observed up to date
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement)
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, func(c rtv1.Condition) rtv1.Condition { return c }, cdreason.Available.Condition()); err != nil {
 		return reconciler.ExternalObservation{}, err
 	}

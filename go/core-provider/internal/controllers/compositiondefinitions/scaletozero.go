@@ -10,14 +10,13 @@ import (
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
-	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/plumbing/conditions"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -213,12 +212,16 @@ func lostAvailability(available *appsv1.DeploymentCondition) string {
 // other than NotFound: the owner's Observe returns it, because an unreadable controller cannot vouch
 // for Available (active still says why).
 func (e *external) controllerConditions(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition,
-	gvr schema.GroupVersionResource) (ready, active rtv1.Condition, ok bool, readErr error) {
+	placement compositiondefinitionsv1alpha1.ControllerStatus) (ready, active rtv1.Condition, ok bool, readErr error) {
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
 		return rtv1.Condition{}, rtv1.Condition{}, false, nil
 	}
+	// The Deployment that RUNS the controller (#580): for a pool member that is the pool's
+	// cdc-pool-<pool>, not <resource>-<version>-controller, which cutover retires. Reading the
+	// dedicated name for a member reported Ready=False/Creating "the controller Deployment was not
+	// found" for as long as it stayed in the pool.
 	var dep appsv1.Deployment
-	err := e.kube.Get(ctx, deploy.ControllerDeploymentKey(controllerNamespace(cr), gvr), &dep)
+	err := e.kube.Get(ctx, types.NamespacedName{Namespace: placement.Namespace, Name: placement.Deployment}, &dep)
 	switch {
 	case apierrors.IsNotFound(err):
 		ready, active = controllerReadiness(cr, cr.Status.Kind, nil, nil, nil)

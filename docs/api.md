@@ -45,11 +45,27 @@ blueprint must pin, see below** — `managed.versionInfo[]` (served CRD versions
 their CDC digests), `packageUrl`, `digest` (the FNV idempotency digest —
 [overview](./overview.md)), and `target`
 (`mode` Local/Remote, `connectionStatus` Healthy/Down, target k8s `version`,
-kubeconfig Secret `resourceVersion`). A definition with an `apiRef` also carries
+kubeconfig Secret `resourceVersion`), and `controller` (below). A definition with an `apiRef` also carries
 `ApiRefRBACComplete`: `True/ReadSetResolved`, or `False` with one of the reasons below.
 Partial RBAC is never written. While it is `False` the definition makes no progress, so a
 version bump is held too; the running controller and its compositions are untouched. It
 clears by itself once the read-set resolves.
+
+**`status.controller` names the Deployment that runs this definition's controller (#580). Read it;
+do not derive `<resource>-<version>-controller`.** A Kind in a pool (`spec.controller.pool`) has no
+such Deployment: its controller runs in `cdc-pool-<pool>`.
+
+```
+status.controller.mode         Dedicated | Pool
+status.controller.namespace    krateo-system        # on the cluster status.target names
+status.controller.deployment   pages-v1-0-0-controller | cdc-pool-pages
+status.controller.pool         pages                # mode Pool only
+```
+
+A follower (another definition owns its Kind×version) names its owner's controller, which is the one
+reconciling its instances. It is recorded when the definition's deployment is observed up to date, so
+it describes what is deployed, not what the spec is moving to. `Ready` and `ControllerActive` below
+are read from this same Deployment.
 
 **`ControllerActive`** (every local definition, #393) says whether anything is reconciling this
 Kind right now, so a gate branches on a condition rather than matching a reason string. Its

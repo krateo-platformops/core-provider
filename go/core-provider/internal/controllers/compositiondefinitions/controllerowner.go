@@ -669,7 +669,10 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 	// A follower reports the SHARED controller it runs on (#393): ControllerActive, and Ready through
 	// followerReady, which keeps the follower marker #387 reads. An unreadable Deployment is returned,
 	// as on the owner's path: it cannot vouch for Available.
-	ready, active, ok, readErr := e.controllerConditions(ctx, cr, gvr)
+	// The OWNER decides where the shared controller runs, in a pool or not (#580).
+	placement := controllerPlacement(owner, gvr)
+	cr.Status.Controller = &placement
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement)
 	asFollower := func(c rtv1.Condition) rtv1.Condition { return followerReady(c, owner, gvr) }
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, asFollower, followerCondition(owner, gvr)); err != nil {
 		return reconciler.ExternalObservation{}, err
