@@ -72,10 +72,15 @@ spec:
           # this dial timeout and self-healed 2m09s later. With 67 composition CRs depending on this
           # one endpoint for RBAC generation, every restart manufactures unhealthy-looking
           # compositions that have nothing wrong with them — which is the noise that hides a real one.
+          #
+          # The kubelet's own sleep action, not `exec: sleep`: the image is distroless (no /bin/sh, no
+          # sleep binary), so an exec hook failed instantly ("PreStopHook failed") and the container got
+          # SIGTERM at once — the hook never slept, and every core-provider roll refused connections to
+          # chart-inspector (#577). TestShippedChart_NoExecHandlersOnDistrolessImages guards it.
           lifecycle:
             preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep {{ .Values.chartInspector.preStopSleepSeconds }}"]
+              sleep:
+                seconds: {{ .Values.chartInspector.preStopSleepSeconds }}
           {{- end }}
 
           volumeMounts:
