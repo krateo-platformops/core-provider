@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
 	"net/http"
@@ -1502,6 +1503,17 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return fmt.Errorf("finding helm release: %w", err)
 	}
 	if rel == nil {
+		// #576: a previous Delete uninstalled the release and then failed to delete some of its
+		// hook Jobs. The release is gone, so the list recorded on the composition is the only
+		// record of them: finish that teardown rather than returning as if nothing remained.
+		pending, perr := pendingHookJobs(mg)
+		if perr != nil {
+			return perr
+		}
+		if len(pending) > 0 {
+			log.Info("Release already uninstalled; finishing its teardown", "hookJobsToDelete", len(pending))
+			return h.finishTeardown(ctx, mg, dyn, pkg, updateOpts, log)
+		}
 		log.Debug("Release not found, nothing to uninstall.", "package", pkg.URL)
 		h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("Release not found, nothing to uninstall: %s", mg.GetName())))
 		return nil
@@ -1611,6 +1623,25 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			len(pending), childTeardownGrace, pendingIDs(pending))))
 	}
 
+	// #576: record the release's hook Jobs BEFORE the uninstall, which erases the record they come
+	// from. Merged with any still pending from an earlier attempt.
+	hookJobs, err := recordedHookJobs(rel)
+	if err != nil {
+		return fmt.Errorf("reading the release's hook Jobs: %w", err)
+	}
+	if len(hookJobs) > 0 {
+		pending, perr := pendingHookJobs(mg)
+		if perr != nil {
+			return perr
+		}
+		setPendingHookJobs(mg, append(pending, hookJobs...))
+		updated, uerr := tools.Update(ctx, mg, updateOpts)
+		if uerr != nil {
+			return fmt.Errorf("recording the release's hook Jobs before uninstalling: %w", uerr)
+		}
+		mg = updated
+	}
+
 	// #410: the uninstall runs pre/post-delete hooks too; say so before it starts.
 	if mg, err = recordHelmOperation(ctx, mg, "uninstall", time.Now(), updateOpts, log); err != nil {
 		return err
@@ -1649,6 +1680,32 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	if rel != nil {
 		return fmt.Errorf("composition not deleted, release %s still exists", releaseName)
 	}
+
+	return h.finishTeardown(ctx, mg, dyn, pkg, updateOpts, log)
+}
+
+// finishTeardown is everything after the release is gone: the release's recorded hook Jobs (#576),
+// then the derived RBAC (#402), then the composition's own record. The hook Jobs go FIRST because
+// deleting them uses the derived grants (hook objects are granted since #311), which the RBAC step
+// releases. A hook Job that could not be deleted stays recorded and fails the pass, so Delete is
+// retried and finishes here even though the release no longer exists.
+func (h *handler) finishTeardown(ctx context.Context, mg *unstructured.Unstructured, dyn dynamic.Interface, pkg *archive.Info, updateOpts tools.UpdateOptions, log logging.Logger) error {
+	pending, err := pendingHookJobs(mg)
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 {
+		remaining, derr := deleteHookJobs(ctx, dyn, pending)
+		setPendingHookJobs(mg, remaining)
+		if derr != nil {
+			if _, uerr := tools.Update(ctx, mg, updateOpts); uerr != nil {
+				return fmt.Errorf("%w (and recording the %d hook Jobs still to delete failed: %v)", derr, len(remaining), uerr)
+			}
+			return fmt.Errorf("deleting the release's hook Jobs (%d of %d remain, retried on the next pass): %w", len(remaining), len(pending), derr)
+		}
+		log.Debug("Deleted the release's hook Jobs", "count", len(pending))
+	}
+	helmMetrics := metrics.NewHelmMetrics(ctx)
 
 	log.Debug("Uninstalling RBAC", "package", pkg.URL)
 
