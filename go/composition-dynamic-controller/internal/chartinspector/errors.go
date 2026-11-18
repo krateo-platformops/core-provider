@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 
 	"github.com/krateo-platformops/plumbing/http/response"
@@ -103,3 +105,38 @@ type MissingParameterError struct {
 }
 
 func (e *MissingParameterError) Error() string { return e.Name + " is required" }
+
+// UnreachableError is a request that got NO answer from chart-inspector: the dial or the exchange
+// failed (refused, timed out, reset), or the response stream was cut before its end. chart-inspector
+// said nothing about the composition, so a caller must not read it as a verdict on the blueprint or
+// on the composition (#577: every core-provider roll refused connections for ~35 s, and the cdc
+// recorded Ready=False/Unavailable on every composition reconciling in that window).
+//
+// NARROWER THAN "NOT A STATUS ERROR". A 200 whose body is not the protocol's JSON is an answer, a
+// wrong one, and is not this: only a stream that ENDED EARLY (io.ErrUnexpectedEOF) or failed in the
+// network (net.Error) while being read counts as unreachable.
+type UnreachableError struct{ Err error }
+
+func (e *UnreachableError) Error() string { return e.Err.Error() }
+func (e *UnreachableError) Unwrap() error { return e.Err }
+
+// IsUnreachable reports whether err's chain carries an *UnreachableError.
+func IsUnreachable(err error) bool {
+	var ue *UnreachableError
+	return errors.As(err, &ue)
+}
+
+// streamCut reports a read error that means the transport failed mid-response, not that the
+// content was wrong.
+func streamCut(err error) bool {
+	var ne net.Error
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &ne)
+}
+
+// unreachableIfCut wraps err as UnreachableError when it is a cut stream, and leaves it alone otherwise.
+func unreachableIfCut(err error) error {
+	if streamCut(err) {
+		return &UnreachableError{Err: err}
+	}
+	return err
+}

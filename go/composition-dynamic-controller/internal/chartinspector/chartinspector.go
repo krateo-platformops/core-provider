@@ -153,7 +153,7 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getting chartinspector: %w", err)
+		return nil, &UnreachableError{Err: fmt.Errorf("getting chartinspector: %w", err)}
 	}
 	// Closed on EVERY path, as http.Client requires of a caller. This defer used to sit below the
 	// non-200 return, so a refused or failed request's body was never closed.
@@ -171,7 +171,7 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 	if resp.StatusCode != http.StatusOK {
 		bbody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("reading response body: %w", err)
+			return nil, unreachableIfCut(fmt.Errorf("reading response body: %w", err))
 		}
 
 		return nil, &StatusError{Code: resp.StatusCode, Body: string(bbody)}
@@ -184,23 +184,31 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 	// expect a JSON array
 	tok, err := dec.Token()
 	if err != nil {
-		return nil, fmt.Errorf("decoding chartinspector response: %w", err)
+		return nil, unreachableIfCut(fmt.Errorf("decoding chartinspector response: %w", err))
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
 		// fall back to decode whole payload
 		if err := dec.Decode(&resources); err != nil {
-			return nil, fmt.Errorf("decoding chartinspector response: %w", err)
+			return nil, unreachableIfCut(fmt.Errorf("decoding chartinspector response: %w", err))
 		}
 	} else {
 		for dec.More() {
 			var r Resource
 			if err := dec.Decode(&r); err != nil {
-				return nil, fmt.Errorf("decoding chartinspector element: %w", err)
+				return nil, unreachableIfCut(fmt.Errorf("decoding chartinspector element: %w", err))
 			}
 			resources = append(resources, r)
 		}
-		// read closing ']'
-		_, _ = dec.Token()
+		// The closing ']' is REQUIRED. dec.More() is also false when the stream ends early, so without
+		// this a response cut between two elements returned the elements before the cut as the whole
+		// answer, and the cdc would generate RBAC from a partial list (#577).
+		end, err := dec.Token()
+		if err != nil {
+			return nil, unreachableIfCut(fmt.Errorf("decoding chartinspector response: the array did not end: %w", err))
+		}
+		if delim, ok := end.(json.Delim); !ok || delim != ']' {
+			return nil, fmt.Errorf("decoding chartinspector response: the array ended with %v, not ']'", end)
+		}
 	}
 
 	return resources, nil

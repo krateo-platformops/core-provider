@@ -97,8 +97,12 @@ func chartRenderableFailure(err error) (reason conditionreason.Reason, message s
 				detailOrNoBody(se))
 		}
 	}
-	// No status at all: the request never got an answer.
-	return conditionreason.ChartInspectorUnavailable, fmt.Sprintf("could not reach chart-inspector: %v", err)
+	// No status. Either the request never got an answer (#577: the caller keeps Ready for a bounded
+	// grace on this one), or a 200 came back that is not the protocol's JSON.
+	if chartinspector.IsUnreachable(err) {
+		return conditionreason.ChartInspectorUnavailable, fmt.Sprintf("could not reach chart-inspector: %v", err)
+	}
+	return conditionreason.ChartInspectorUnavailable, fmt.Sprintf("chart-inspector answered, but the answer could not be read: %v", err)
 }
 
 // detailOrNoBody says so when chart-inspector sent nothing, rather than ending a message on a colon.
