@@ -42,7 +42,33 @@ func renderShippedChart(t *testing.T, overrides map[string]any) map[string]strin
 }
 
 // renderChartAt is renderShippedChart for the chart at chartDir (#570 also renders target-chart).
+// NOTES.txt is not a manifest and is not returned (renderChartWithNotes returns it).
 func renderChartAt(t *testing.T, chartDir string, overrides map[string]any) map[string]string {
+	t.Helper()
+	manifests, _ := renderChartWithNotes(t, chartDir, overrides)
+	return manifests
+}
+
+// splitNotes removes every NOTES.txt from the engine's output and returns the chart's own, as helm's
+// install does (helm v3.20.2 pkg/action/action.go:149-165): NOTES.txt is rendered like any template
+// but is neither a resource nor a hook, so it is never applied. Without this, a test walking the
+// rendered files as manifests reads the notes as YAML (#589 added the chart's first NOTES.txt).
+func splitNotes(chartName string, files map[string]string) (map[string]string, string) {
+	notes := ""
+	for k, v := range files {
+		if strings.HasSuffix(k, "NOTES.txt") {
+			if k == chartName+"/templates/NOTES.txt" {
+				notes = v
+			}
+			delete(files, k)
+		}
+	}
+	return files, notes
+}
+
+// renderChartWithNotes renders the chart at chartDir as `helm install` would and returns its
+// manifests and its rendered NOTES.txt ("" when it has none).
+func renderChartWithNotes(t *testing.T, chartDir string, overrides map[string]any) (map[string]string, string) {
 	t.Helper()
 	shippedChart := chartDir
 	// The chart carries the release workflow's placeholders (CHART_VERSION / APP_VERSION), which are
@@ -89,7 +115,7 @@ func renderChartAt(t *testing.T, chartDir string, overrides map[string]any) map[
 	if err != nil {
 		t.Fatalf("rendering the shipped chart: %v", err)
 	}
-	return out
+	return splitNotes(chrt.Name(), out)
 }
 
 // mountedTemplate returns the file core-provider would read from the mounted ConfigMap rendered by

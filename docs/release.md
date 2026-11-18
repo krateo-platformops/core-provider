@@ -63,9 +63,8 @@ see the history note in `helm/core-provider/values.yaml`).
      (`CHART_VERSION`/`APP_VERSION` → the tag), packages and pushes to
      `oci://ghcr.io/krateo-platformops/charts/`: `core-provider:X.Y.Z`,
      `core-provider-target:X.Y.Z` (the remote-target prerequisites chart,
-     `helm/target-chart/`), and `core-provider-crds` at its own literal pin
-     (`helm/core-provider-crds/` — no placeholders, so it republishes unchanged
-     until its version is bumped).
+     `helm/target-chart/`), and `core-provider-crds:X.Y.Z` (`helm/core-provider-crds/`,
+     versioned from the tag like the others since #157).
 
 4. **Verify** the artifacts pair up:
 
@@ -111,8 +110,10 @@ The two owned CRDs are generated from the Go types (`make generate` in
 `go/core-provider/`), committed under `go/core-provider/crds/`, and drift-gated in PR
 CI. The `core-provider` chart does **not** package them — the Krateo installer's
 bootstrap applies them (standalone installs: `kubectl apply -f go/core-provider/crds/`
-or the `core-provider-crds` chart, whose templates must be refreshed and whose
-version bumped by hand when the CRDs change), and the engine
+or the `core-provider-crds` chart at the same version, whose templates must be
+refreshed when the CRDs change; `TestShippedCRDChartIsTheGeneratedCRDs` fails until they
+are, and `TestServedKindsRequiredIsEveryGeneratedCRD` until the engine's startup check
+(#589) lists every served Kind), and the engine
 embeds the `CompositionDefinition` CRD for remote-target seeding
 (`internal/tools/deploy/remoteseed.go`). The old cross-repo `crds → chart-repo`
 publish job was dropped with the monorepo fold (#65). The generated *composition*

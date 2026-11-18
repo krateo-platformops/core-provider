@@ -32,16 +32,29 @@ compositions are reconciled — that flag belongs to the installer chart, not th
 
 ## Direct install (standalone)
 
-The chart does **not** package the two owned CRDs (the installer's bootstrap owns
-them); standalone, apply them first — from this repo, or via the separately-versioned
-`core-provider-crds` chart also published from here (`helm/core-provider-crds/`,
-`oci://ghcr.io/krateo-platformops/charts/core-provider-crds`):
+The `core-provider` chart does **not** contain the two owned CRDs
+(`compositiondefinitions.core.krateo.io`, `kubernetestargets.core.krateo.io`). They ship
+in the `core-provider-crds` chart, published from this repo (`helm/core-provider-crds/`,
+`oci://ghcr.io/krateo-platformops/charts/core-provider-crds`) and released **at the same
+version** as `core-provider` on every tag (#157). Install it first, at the same version:
 
 ```sh
-kubectl apply -f go/core-provider/crds/
-helm install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
-  --version 2.12.4 --namespace krateo-system --create-namespace
+# VERSION: the latest release, https://github.com/krateo-platformops/core-provider/releases/latest
+helm upgrade --install core-provider-crds oci://ghcr.io/krateo-platformops/charts/core-provider-crds \
+  --version "$VERSION" --namespace krateo-system --create-namespace
+helm upgrade --install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
+  --version "$VERSION" --namespace krateo-system
 ```
+
+Pin both to **one** resolved version. Two independently resolved charts are only
+coincidentally in step.
+
+Without the CRDs the engine refuses to start (#589). It logs one error naming the
+missing Kinds, the `core-provider-crds` chart and the version to install, then exits,
+and recovers on the restart after the CRDs are installed. A `CompositionDefinition`
+applied meanwhile fails with
+`no matches for kind "CompositionDefinition" in version "core.krateo.io/v1alpha1"`.
+The chart's `NOTES.txt` says the same after every `helm install`.
 
 The chart deploys the engine **and** a chart-inspector Deployment/Service, ships the
 CDC asset templates (mounted into the engine pod under `/tmp/assets/…`), and applies

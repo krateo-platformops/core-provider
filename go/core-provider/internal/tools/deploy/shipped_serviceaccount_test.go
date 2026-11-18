@@ -53,7 +53,12 @@ func renderShippedChartE(t *testing.T, overrides map[string]any) (map[string]str
 	if err != nil {
 		return nil, err
 	}
-	return engine.Render(chrt, vals)
+	out, err := engine.Render(chrt, vals)
+	if err != nil {
+		return nil, err
+	}
+	manifests, _ := splitNotes(chrt.Name(), out)
+	return manifests, nil
 }
 
 // serviceAccountUse is who the chart's ServiceAccounts, workloads and bindings name.
