@@ -202,7 +202,7 @@ func main() {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout())
 	defer cancel()
 
 	server.SetKeepAlivesEnabled(false)
@@ -212,4 +212,16 @@ func main() {
 	}
 
 	log.Info("server gracefully stopped")
+}
+
+// shutdownTimeoutEnv names the drain deadline the chart derives from the pod's termination budget
+// (#582): terminationGracePeriodSeconds minus the preStop sleep minus 5 s, so Shutdown gives up
+// before the kubelet's SIGKILL rather than being cut by it. A CONTRACT with the chart
+// (templates/chart-inspector/deployment.yaml); each side pins the literal in a test.
+const shutdownTimeoutEnv = "SHUTDOWN_TIMEOUT"
+
+// shutdownTimeout is how long Shutdown waits for in-flight renders. 30 s when the chart does not
+// set it (an older chart), which is what this process always used.
+func shutdownTimeout() time.Duration {
+	return env.Duration(shutdownTimeoutEnv, 30*time.Second)
 }

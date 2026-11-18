@@ -250,6 +250,14 @@ chartInspector:
   # withdrawal. Set to 0 to disable the hook entirely.
   preStopSleepSeconds: 10
 
+  # The pod's whole termination budget (#582), and it must cover BOTH phases: the preStop sleep
+  # above, then chart-inspector draining its in-flight renders. Without it the pod got the 30 s
+  # default, the 10 s sleep left ~20 s, and a render still running then (an umbrella takes ~1 min;
+  # WriteTimeout is 300 s) was SIGKILLed mid-response on every roll. 90 = the sleep + 75 s for the
+  # longest render + margin. chart-inspector is told what is left (SHUTDOWN_TIMEOUT = this - sleep
+  # - 5 s), so its own shutdown deadline ends before the kubelet's SIGKILL, never after.
+  terminationGracePeriodSeconds: 90
+
   imagePullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
