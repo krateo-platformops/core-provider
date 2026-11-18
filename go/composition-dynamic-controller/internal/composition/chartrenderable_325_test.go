@@ -39,6 +39,14 @@ func schemaViolationStatus(msg string) *response.Status {
 	return st
 }
 
+// templateRefusedBody is #583's 400: response.New(400, err) with chart-inspector's TemplateRefused reason.
+func templateRefusedBody(t *testing.T, msg string) string {
+	t.Helper()
+	st := response.New(http.StatusBadRequest, errors.New(msg))
+	st.Reason = "TemplateRefused" // the literal chart-inspector pins
+	return encodeStatus(t, st)
+}
+
 func encodeStatus(t *testing.T, st *response.Status) string {
 	t.Helper()
 	b, err := json.Marshal(st)
@@ -70,6 +78,15 @@ func TestChartRenderableFailureInputStates(t *testing.T) {
 			wantReason:  reasonValuesSchemaViolation,
 			mustHave:    []string{helmSaid, "values.schema.json", "HTTP 400"},
 			mustNotHave: []string{`"kind":"Status"`, `\"global\"`, `\n`},
+		},
+		{
+			// #583: chart-inspector's 400 MARKED TemplateRefused is the chart's own refusal, and must
+			// name the chart and the values, not the schema and not chart-inspector.
+			name:        "400 MARKED TemplateRefused: the chart's templates refused the values",
+			err:         fmt.Errorf("getting resources: %w", &chartinspector.StatusError{Code: 400, Body: templateRefusedBody(t, "install failed: the chart's templates failed on these values: execution error at (c/templates/x.yaml:1:3): kinds omits Repository")}),
+			wantReason:  reasonTemplateRefused,
+			mustHave:    []string{"templates refused these values", "change the values or the chart", "kinds omits Repository", "HTTP 400"},
+			mustNotHave: []string{"values.schema.json", "install the missing CRD", `"kind":"Status"`},
 		},
 		{
 			// THE CONTROL for the marker: chart-inspector's OTHER 400s (parameters) carry reason
@@ -230,6 +247,7 @@ func TestChartRenderableReasonStringsAreStable(t *testing.T) {
 		{reasonValuesSchemaViolation, "ValuesSchemaViolation"},
 		{reasonInspectorRejected, "InspectorRejected"},
 		{reasonInspectorUnavailable, "InspectorUnavailable"},
+		{reasonTemplateRefused, "TemplateRefused"},
 	} {
 		if c.got != c.want {
 			t.Errorf("reason = %q, want %q: a consumer matches this string exactly", c.got, c.want)
@@ -243,5 +261,12 @@ func TestValuesSchemaViolationReasonIsTheContractLiteral(t *testing.T) {
 	if chartinspector.ReasonValuesSchemaViolation != "ValuesSchemaViolation" {
 		t.Errorf("ReasonValuesSchemaViolation = %q; chart-inspector sends \"ValuesSchemaViolation\"",
 			chartinspector.ReasonValuesSchemaViolation)
+	}
+}
+
+// #583: the TemplateRefused marker is the same kind of contract with chart-inspector.
+func TestTemplateRefusedReasonIsTheContractLiteral(t *testing.T) {
+	if chartinspector.ReasonTemplateRefused != "TemplateRefused" {
+		t.Errorf("ReasonTemplateRefused = %q; chart-inspector sends \"TemplateRefused\"", chartinspector.ReasonTemplateRefused)
 	}
 }

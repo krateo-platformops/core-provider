@@ -251,21 +251,28 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		// Answered with the code that says WHOSE fault this is; see installFailureStatus for the
 		// three classes and why each gets the code it does (#265, #325).
-		code := installFailureStatus(err)
-		switch code {
-		case http.StatusBadRequest:
+		code, reason := installFailureStatus(err)
+		switch reason {
+		case ReasonValuesSchemaViolation:
 			err = withKrateoGlobalNote(err)
 			log.ErrorContext(ctx, "chart values do not satisfy the chart's values.schema.json",
 				slog.Any("err", err),
 			)
-		case http.StatusUnprocessableEntity:
+		case ReasonTemplateRefused:
+			log.ErrorContext(ctx, "the chart's templates refused these values",
+				slog.Any("err", err),
+			)
+		}
+		if code == http.StatusUnprocessableEntity {
 			log.ErrorContext(ctx, "chart references a kind this cluster does not serve",
 				slog.Any("err", err),
 			)
 		}
 		st := response.New(code, err)
-		if code == http.StatusBadRequest {
-			st.Reason = ReasonValuesSchemaViolation
+		// The reason follows the CLASS, never the code: two classes answer 400 now (#583). A class
+		// without its own reason keeps the one response.New derives from the code.
+		if reason != "" {
+			st.Reason = reason
 		}
 		response.Encode(w, st)
 		return
@@ -377,6 +384,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // value; the two modules cannot share a declaration, so each pins the literal in a test.
 const ReasonValuesSchemaViolation response.StatusReason = "ValuesSchemaViolation"
 
+// ReasonTemplateRefused marks the 400 for a render that failed INSIDE the chart's templates: a
+// `fail`/`required` the chart calls on purpose, or a template error (core-provider#583, plumbing
+// helmconfig.ErrTemplateExecution, v1.96.0). Like a schema violation it is the chart and the values,
+// not this server, and only the author or the values can clear it. Before #583 it fell into the
+// 500 class, and the cdc reported "chart-inspector itself failed; not the blueprint's fault".
+//
+// A CONTRACT WITH THE CDC, pinned on both sides like ReasonValuesSchemaViolation.
+const ReasonTemplateRefused response.StatusReason = "TemplateRefused"
+
 // installFailureStatus maps an Install failure to the HTTP status that tells the caller WHOSE fault
 // it is. A 5xx is a claim about THIS SERVER: it is the one class a caller is entitled to read as
 // "not my fault, retry later", so answering it for a caller's mistake sends the caller to this
@@ -422,14 +438,18 @@ const ReasonValuesSchemaViolation response.StatusReason = "ValuesSchemaViolation
 // names: a values key spelled "ensure CRDs are installed first" makes both fire (measured in
 // TestHandler_SchemaViolationWhoseTextLooksLikeAnUnservedKindIs400Not422). A typed sentinel is the
 // stronger evidence, so it decides.
-func installFailureStatus(err error) int {
+func installFailureStatus(err error) (int, response.StatusReason) {
 	switch {
 	case errors.Is(err, helmconfig.ErrValuesSchema):
-		return http.StatusBadRequest
+		return http.StatusBadRequest, ReasonValuesSchemaViolation
+	case errors.Is(err, helmconfig.ErrTemplateExecution):
+		// A typed sentinel again (#583), so it is decided before the substring-matching mapping
+		// check, for the same reason the schema check is.
+		return http.StatusBadRequest, ReasonTemplateRefused
 	case helmv3.IsRESTMappingMiss(err):
-		return http.StatusUnprocessableEntity
+		return http.StatusUnprocessableEntity, ""
 	default:
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, ""
 	}
 }
 

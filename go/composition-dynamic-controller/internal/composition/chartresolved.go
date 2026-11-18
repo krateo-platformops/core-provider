@@ -35,6 +35,7 @@ const (
 	reasonUnservedKind          = conditionreason.ReasonUnservedKind
 	reasonValuesSchemaViolation = conditionreason.ReasonValuesSchemaViolation
 	reasonInspectorRejected     = conditionreason.ReasonInspectorRejected
+	reasonTemplateRefused       = conditionreason.ReasonTemplateRefused
 	reasonInspectorUnavailable  = conditionreason.ReasonInspectorUnavailable
 )
 
@@ -83,6 +84,11 @@ func chartRenderableFailure(err error) (reason conditionreason.Reason, message s
 				"the chart's values do not satisfy its values.schema.json, so helm refused to render "+
 					"it; this does not resolve by itself, change the values or the schema "+
 					"(chart-inspector HTTP %d): %s", se.Code, detailOrNoBody(se))
+		case se.TemplateRefused():
+			return conditionreason.ChartTemplateRefused, fmt.Sprintf(
+				"the chart's own templates refused these values (a fail/required in the chart, or a "+
+					"template error), so it cannot render; this does not resolve by itself, change the "+
+					"values or the chart (chart-inspector HTTP %d): %s", se.Code, detailOrNoBody(se))
 		case se.ClientSide():
 			return conditionreason.ChartInspectorRejected, fmt.Sprintf(
 				"chart-inspector refused the request (HTTP %d) without marking it a values-schema "+

@@ -61,7 +61,19 @@ func (e *StatusError) Reason() string {
 	return string(st.Reason)
 }
 
-// ClientSide reports any 4xx, including the two above.
+// ReasonTemplateRefused is the Status reason chart-inspector puts on the 400 for a render that
+// failed INSIDE the chart's templates (core-provider#583): a `fail`/`required` the chart calls, or a
+// template error. A CONTRACT like ReasonValuesSchemaViolation: chart-inspector declares the same
+// value, and each module pins the literal in a test.
+const ReasonTemplateRefused = "TemplateRefused"
+
+// TemplateRefused reports a 400 that chart-inspector MARKED as the chart's templates refusing the
+// values. By what the response says, as for ValuesSchemaViolation.
+func (e *StatusError) TemplateRefused() bool {
+	return e.Code == http.StatusBadRequest && e.Reason() == ReasonTemplateRefused
+}
+
+// ClientSide reports any 4xx, including the ones above.
 func (e *StatusError) ClientSide() bool { return e.Code >= 400 && e.Code < 500 }
 
 // ServerSide reports a 5xx: chart-inspector itself failed and the caller's blueprint is not

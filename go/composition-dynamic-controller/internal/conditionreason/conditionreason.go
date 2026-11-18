@@ -198,6 +198,7 @@ const (
 	ReasonUnservedKind             = "UnservedKind"
 	ReasonValuesSchemaViolation    = "ValuesSchemaViolation"
 	ReasonInspectorRejected        = "InspectorRejected"
+	ReasonTemplateRefused          = "TemplateRefused"
 	ReasonInspectorUnavailable     = "InspectorUnavailable"
 	ReasonRBACApplied              = "Applied"
 	ReasonRBACNamespaceTerminating = "NamespaceTerminating"
@@ -242,6 +243,9 @@ var (
 	ChartValuesSchemaViolation = on(TypeChartRenderable, ReasonValuesSchemaViolation, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector answered 400: the values do not satisfy the chart's values.schema.json",
 		Clearance{Indefinite, "until the author fixes the values or the schema (#325)"})
+	ChartTemplateRefused = on(TypeChartRenderable, ReasonTemplateRefused, metav1.ConditionFalse, WriterCDC,
+		"chart-inspector answered 400 TemplateRefused: the chart's own templates refused these values (a fail/required in the chart, or a template error)",
+		Clearance{Indefinite, "until the author changes the values or the chart (#583)"})
 	ChartInspectorRejected = on(TypeChartRenderable, ReasonInspectorRejected, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector refused the request with another 4xx: the cdc and chart-inspector disagree about the request",
 		Clearance{Indefinite, "until the version skew or defect is fixed"})
@@ -316,7 +320,7 @@ func Table() []Reason {
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,
-		ChartRenderable, ChartUnservedKind, ChartValuesSchemaViolation, ChartInspectorRejected, ChartInspectorUnavailable,
+		ChartRenderable, ChartUnservedKind, ChartValuesSchemaViolation, ChartTemplateRefused, ChartInspectorRejected, ChartInspectorUnavailable,
 		RBACApplied, RBACApplyFailed, RBACNamespaceTerminating, RBACNotEvaluated,
 		ApiResolved, ApiPartiallyResolved, ApiStageOutcomesUnknown, ApiEmpty, ApiAuthnUnreachable, ApiAuthnError, ApiAuthnRejected, ApiResolveFailed, apiAuthnPassthrough,
 	}
