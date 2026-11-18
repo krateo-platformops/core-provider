@@ -122,9 +122,17 @@ func TestChartRenderableFailureInputStates(t *testing.T) {
 		},
 		{
 			name:       "no response: InspectorUnavailable, could not reach",
-			err:        fmt.Errorf("getting chartinspector: %w", errors.New("dial tcp 10.0.0.1:8081: connect: connection refused")),
+			err:        &chartinspector.UnreachableError{Err: fmt.Errorf("getting chartinspector: %w", errors.New("dial tcp 10.0.0.1:8081: connect: connection refused"))},
 			wantReason: reasonInspectorUnavailable,
 			mustHave:   []string{"could not reach chart-inspector", "connection refused"},
+		},
+		{
+			// #577: an answer that is not the protocol's JSON is not "could not reach".
+			name:        "a 200 that does not decode: InspectorUnavailable, answer unreadable",
+			err:         fmt.Errorf("decoding chartinspector response: %w", errors.New("invalid character '<'")),
+			wantReason:  reasonInspectorUnavailable,
+			mustHave:    []string{"answered, but the answer could not be read", "invalid character"},
+			mustNotHave: []string{"could not reach"},
 		},
 		{
 			name:        "403 with a Status body: a refusal, message parsed",
