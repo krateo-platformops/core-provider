@@ -23,9 +23,14 @@ Normally installed by the **Krateo installer**, which pins the chart. Standalone
 
 ```sh
 # VERSION: the latest release, https://github.com/krateo-platformops/core-provider/releases/latest
-helm install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
+# The CRDs ship in their own chart, released at the same version: install it first.
+helm install core-provider-crds oci://ghcr.io/krateo-platformops/charts/core-provider-crds \
   --version "$VERSION" --namespace krateo-system --create-namespace
+helm install core-provider oci://ghcr.io/krateo-platformops/charts/core-provider \
+  --version "$VERSION" --namespace krateo-system
 ```
+
+Without `core-provider-crds` the engine refuses to start and logs which CRDs are missing (#589).
 
 **Install from the OCI registry above, not from `https://charts.krateo.io`.** That HTTP index carries
 an unrelated, older `core-provider` lineage (newest `1.0.1-rc1` when checked on 2026-11-07) and none

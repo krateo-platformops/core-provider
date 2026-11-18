@@ -32,6 +32,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/telemetry"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/health"
+	"github.com/krateo-platformops/core-provider/internal/tools/servedkinds"
 	coretelemetry "github.com/krateo-platformops/core-provider/internal/tools/telemetry"
 	"github.com/stoewer/go-strcase"
 )
@@ -236,6 +237,15 @@ func run() int {
 	})
 	if err != nil {
 		log.Error(err, "Cannot create controller manager")
+		return 1
+	}
+
+	// #589. The Kinds this engine reconciles are CRDs from the separate core-provider-crds chart.
+	// Without them the manager would start and fail only at the cache-sync timeout, with a message
+	// naming neither the chart nor the version. Ask the manager's own RESTMapper first and refuse to
+	// start with one error that names both. A restart after the CRDs are installed recovers.
+	if err := servedkinds.Check(mgr.GetRESTMapper(), servedkinds.Required, buildVersion); err != nil {
+		log.Error(err, "Cannot start: required CRDs are not served")
 		return 1
 	}
 

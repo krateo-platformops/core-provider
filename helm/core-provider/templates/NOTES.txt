@@ -1,0 +1,15 @@
+core-provider {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+This chart does NOT contain the CompositionDefinition and KubernetesTarget CRDs
+(compositiondefinitions.core.krateo.io, kubernetestargets.core.krateo.io).
+They ship in the separate core-provider-crds chart, released at the same version.
+Install it at {{ .Chart.Version }}, the version of this chart:
+
+  helm upgrade --install core-provider-crds oci://ghcr.io/krateo-platformops/charts/core-provider-crds \
+    --version {{ .Chart.Version }} --namespace {{ .Release.Namespace }}
+
+Until it is installed, the engine refuses to start and logs which CRDs are missing,
+and `kubectl apply` of a CompositionDefinition fails with
+  no matches for kind "CompositionDefinition" in version "core.krateo.io/v1alpha1"
+
+Installed through the Krateo installer? It installs both charts at one version; nothing to do.
