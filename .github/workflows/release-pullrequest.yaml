@@ -438,6 +438,39 @@ jobs:
           fi
           echo "ran $n top-level envtest tests"
 
+  envtest-chart-inspector:
+    # chart-inspector's envtest-tagged tests (#583: a template `fail` answered 400 TemplateRefused
+    # through the REAL chain). They need a reachable kube-apiserver because helm's install checks
+    # reachability BEFORE it renders, so the closed-port fixture of the unit tests never reaches a
+    # template. Without this job they would run only on a developer's laptop: a test with a control
+    # that nothing executes reads as coverage and gates nothing (same rationale as envtest-cdc).
+    name: envtest (real apiserver, chart-inspector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      # The same exact setup-envtest pin as envtest-cdc, for the same reasons (see there).
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260125163108-a19ec76a3c5d
+      - name: Run the chart-inspector envtest suite
+        working-directory: go/chart-inspector
+        run: |
+          set -euo pipefail
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.36.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS"
+          go test -tags envtest -count=1 -timeout 15m -v ./... 2>&1 | tee /tmp/envtest.log
+          # The suite FAILS without KUBEBUILDER_ASSETS rather than skipping, but guard skips anyway:
+          # a skip here means the job executed nothing.
+          if grep -q -- "--- SKIP" /tmp/envtest.log; then
+            echo "::error::an envtest test SKIPPED, so this job proved nothing"
+            grep -- "--- SKIP" /tmp/envtest.log
+            exit 1
+          fi
+          # Denominator: the #583 test must have RUN, or a renamed/excluded file passes vacuously.
+          grep -q -- "--- PASS: TestEnvtest_TemplateRefused" /tmp/envtest.log || { echo "::error::TestEnvtest_TemplateRefused did not run"; exit 1; }
+
   lint-docs:
     # THE canonical documentation-conformance check (the Krateo Documentation Standard):
     # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.

@@ -16,6 +16,7 @@ import (
 	"github.com/krateo-platformops/chart-inspector/internal/handlers"
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	helmv3 "github.com/krateo-platformops/plumbing/helm/v3"
+	"github.com/krateo-platformops/plumbing/http/response"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -92,6 +93,14 @@ func serveChart(t *testing.T, archive []byte) string {
 // pointing at chartURL, and a composition whose spec (the chart's values) is spec.
 func realChainFixture(t *testing.T, chartURL string, spec map[string]any) http.Handler {
 	t.Helper()
+	return realChainFixtureAt(t, &rest.Config{Host: "https://127.0.0.1:1"}, chartURL, spec)
+}
+
+// realChainFixtureAt is realChainFixture against the API server restCfg names: a closed port above,
+// a real envtest apiserver where the render must actually run (helm's install checks reachability
+// BEFORE it renders, so a closed port never reaches a template).
+func realChainFixtureAt(t *testing.T, restCfg *rest.Config, chartURL string, spec map[string]any) http.Handler {
+	t.Helper()
 	// Keep helm away from the developer's kubeconfig and any real cluster: settings.Namespace()
 	// reads KUBECONFIG, and the memory driver keeps release storage in-process.
 	t.Setenv("KUBECONFIG", t.TempDir()+"/absent")
@@ -100,7 +109,6 @@ func realChainFixture(t *testing.T, chartURL string, spec map[string]any) http.H
 	t.Setenv("HELM_CONFIG_HOME", t.TempDir())
 	t.Setenv("HELM_DATA_HOME", t.TempDir())
 
-	restCfg := &rest.Config{Host: "https://127.0.0.1:1"}
 	hc, err := helmv3.NewClient(restCfg)
 	if err != nil {
 		t.Fatalf("building plumbing's helm client: %v", err)
@@ -320,11 +328,15 @@ func TestInstallFailureStatus(t *testing.T) {
 		GroupKind:        schema.GroupKind{Group: "kagent.dev", Kind: "RemoteMCPServer"},
 		SearchedVersions: []string{"v1alpha2"},
 	})
+	tmpl := helmconfig.ErrTemplateExecution
 	cases := []struct {
 		name string
 		err  error
 		want int
 	}{
+		// #583: a failure inside the chart's templates is the chart's, 400 like the schema class.
+		{"template execution, as plumbing wraps it", fmt.Errorf("install failed: %w", fmt.Errorf("%w: %w", tmpl, errors.New("execution error at (c/templates/x.yaml:1:3): no"))), http.StatusBadRequest},
+		{"control: template execution TEXT without the sentinel", errors.New("install failed: execution error at (c/templates/x.yaml:1:3): no"), http.StatusInternalServerError},
 		{"the sentinel itself", sentinel, http.StatusBadRequest},
 		{"wrapped once, as plumbing returns it", fmt.Errorf("%w: chart \"c\": - at '/replicas': got string", sentinel), http.StatusBadRequest},
 		{"wrapped twice", fmt.Errorf("outer: %w", fmt.Errorf("%w: detail", sentinel)), http.StatusBadRequest},
@@ -339,8 +351,19 @@ func TestInstallFailureStatus(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := installFailureStatus(c.err); got != c.want {
+			got, reason := installFailureStatus(c.err)
+			if got != c.want {
 				t.Errorf("installFailureStatus(%q) = %d, want %d", c.err, got, c.want)
+			}
+			// The reason follows the class: each 400 names which one it is, nothing else names one.
+			// The class's own reason, "" for a class that keeps the code's default (the handler then
+			// leaves response.New's reason alone; TestHandler_* assert that on the wire).
+			wantReason := map[bool]response.StatusReason{true: ReasonValuesSchemaViolation, false: ""}[c.want == http.StatusBadRequest]
+			if errors.Is(c.err, helmconfig.ErrTemplateExecution) {
+				wantReason = ReasonTemplateRefused
+			}
+			if reason != wantReason {
+				t.Errorf("installFailureStatus(%q) reason = %q, want %q", c.err, reason, wantReason)
 			}
 		})
 	}
@@ -362,5 +385,12 @@ func TestHandler_ParameterBadRequestDoesNotClaimASchemaViolation(t *testing.T) {
 	if b := decodeStatus(t, rec); b.Reason == "ValuesSchemaViolation" {
 		t.Errorf("a missing-parameter 400 carries reason ValuesSchemaViolation; the cdc would tell the " +
 			"chart author their values are wrong when the cdc sent an incomplete request")
+	}
+}
+
+// #583: the TemplateRefused reason is a contract with the cdc, which pins the same literal.
+func TestTemplateRefusedReasonIsTheContractLiteral(t *testing.T) {
+	if ReasonTemplateRefused != "TemplateRefused" {
+		t.Errorf("ReasonTemplateRefused = %q; the cdc matches \"TemplateRefused\"", ReasonTemplateRefused)
 	}
 }
