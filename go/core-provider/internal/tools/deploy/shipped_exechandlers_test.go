@@ -60,12 +60,14 @@ func execHandlers(c corev1.Container) []string {
 }
 
 // shippedContainers returns every container the chart runs with its defaults: core-provider's and
-// chart-inspector's Deployments as helm renders them, and the per-version controller after both
-// render stages (shipped_probes_test.go).
+// chart-inspector's Deployments as helm renders them, and, after both render stages, the per-version
+// controller (shipped_probes_test.go) and a pool's controller (renderPoolDeployment, the function
+// EnsurePool applies).
 func shippedContainers(t *testing.T) map[string]corev1.Container {
 	t.Helper()
 	out := map[string]corev1.Container{}
-	for path, manifest := range renderShippedChart(t, nil) {
+	manifests := renderShippedChart(t, nil)
+	for path, manifest := range manifests {
 		for _, doc := range strings.Split(manifest, "\n---") {
 			var head struct{ Kind string }
 			if err := yaml.Unmarshal([]byte(doc), &head); err != nil {
@@ -86,6 +88,18 @@ func shippedContainers(t *testing.T) map[string]corev1.Container {
 	dep, _ := renderControllerObjects(t, nil)
 	for _, c := range dep.Spec.Template.Spec.Containers {
 		out["per-version controller/"+c.Name] = c
+	}
+	sizing, err := LoadPoolSizing(mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"), "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := renderPoolDeployment(PoolOptions{Pool: "general", Namespace: "krateo-system", Sizing: sizing,
+		DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml")}, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range pool.Spec.Template.Spec.Containers {
+		out["pool controller/"+c.Name] = c
 	}
 	return out
 }
@@ -124,10 +138,10 @@ func TestShippedChart_NoExecHandlersOnDistrolessImages(t *testing.T) {
 			t.Errorf("%s runs on %s (no shell, no coreutils) but carries %v: the kubelet cannot run it", name, base, h)
 		}
 	}
-	// Denominator: chart-inspector and the per-version controller are the distroless ones today. A zero
-	// here would make the loop above vacuous.
-	if len(containers) != 3 || distroless != 2 {
-		t.Fatalf("control: want 3 shipped containers, 2 on distroless; got %d, %d", len(containers), distroless)
+	// Denominator: chart-inspector, the per-version controller and the pool controller are the
+	// distroless ones today. A zero here would make the loop above vacuous.
+	if len(containers) != 4 || distroless != 3 {
+		t.Fatalf("control: want 4 shipped containers, 3 on distroless; got %d, %d", len(containers), distroless)
 	}
 }
 

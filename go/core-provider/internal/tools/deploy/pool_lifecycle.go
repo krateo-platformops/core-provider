@@ -166,20 +166,9 @@ func EnsurePool(ctx context.Context, opts PoolOptions) error {
 		return fmt.Errorf("pool %s: applying its membership index: %w", opts.Pool, err)
 	}
 
-	resources, err := json.Marshal(opts.Sizing.Resources)
+	dep, err := renderPoolDeployment(opts, cm.Data)
 	if err != nil {
-		return fmt.Errorf("pool %s: encoding its resources: %w", opts.Pool, err)
-	}
-	dep := appsv1.Deployment{}
-	if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.Workload},
-		opts.DeploymentTemplatePath,
-		"pool", opts.Pool,
-		"poolDeployment", names.Workload,
-		"poolConfigMap", names.EnvConfigMap,
-		"poolServiceAccount", saNN.Name,
-		"poolResources", string(resources),
-		"config_checksum", configChecksum(cm.Data)); err != nil {
-		return fmt.Errorf("pool %s: rendering its Deployment: %w", opts.Pool, err)
+		return err
 	}
 	if _, err := kubecli.Apply(ctx, opts.DynClient, deploymentGVR, &dep, applyOpts); err != nil {
 		return fmt.Errorf("pool %s: applying its Deployment: %w", opts.Pool, err)
@@ -250,4 +239,27 @@ func DeletePool(ctx context.Context, dyn dynamic.Interface, pool, namespace stri
 		}
 	}
 	return nil
+}
+
+// renderPoolDeployment renders the pool's Deployment from opts.DeploymentTemplatePath (assets/cdc/
+// pool-deployment.yaml): the pool's ServiceAccount, its process ConfigMap, its sizing, and that
+// ConfigMap's checksum (processEnv is its data) on the pod.
+func renderPoolDeployment(opts PoolOptions, processEnv map[string]string) (appsv1.Deployment, error) {
+	names := PoolNames(opts.Pool)
+	resources, err := json.Marshal(opts.Sizing.Resources)
+	if err != nil {
+		return appsv1.Deployment{}, fmt.Errorf("pool %s: encoding its resources: %w", opts.Pool, err)
+	}
+	dep := appsv1.Deployment{}
+	if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.Workload},
+		opts.DeploymentTemplatePath,
+		"pool", opts.Pool,
+		"poolDeployment", names.Workload,
+		"poolConfigMap", names.EnvConfigMap,
+		"poolServiceAccount", PoolServiceAccount(opts.Pool, opts.Namespace).Name,
+		"poolResources", string(resources),
+		"config_checksum", configChecksum(processEnv)); err != nil {
+		return appsv1.Deployment{}, fmt.Errorf("pool %s: rendering its Deployment: %w", opts.Pool, err)
+	}
+	return dep, nil
 }
