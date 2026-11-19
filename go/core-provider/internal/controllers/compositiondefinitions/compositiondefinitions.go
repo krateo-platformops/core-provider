@@ -951,7 +951,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if err != nil {
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("deriving GVK from chart: %w", err), log)
 	}
-	specSchemaBytes, err := chart.ChartJsonSchema(pkgInfo, dir)
+	// #568 child 6: the one seam for the spec schema. An authored values.schema.json wins; without
+	// one, it is inferred only when the definition opted in (krateo.io/values-schema: infer), and
+	// never for a definition being deleted, whose teardown must not depend on inference.
+	inferOptIn, invalidOptIn := chart.OptIn(cr.GetAnnotations())
+	specSchema, err := chart.SpecSchema(pkgInfo, dir, inferOptIn && !deleted)
+	specSchemaBytes := specSchema.Bytes
 	if err != nil {
 		// #566: a chart with NO root values.schema.json can never become a typed CRD, and core-provider
 		// requires one (Diego, 2026-11-17: refuse it explicitly, no permissive fallback). Said on
@@ -962,7 +967,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		// cannot be read keeps the unreadable-chart path. Not on a definition being deleted: its
 		// teardown must not depend on its chart.
 		if !deleted && errors.Is(err, fs.ErrNotExist) {
-			return valuesSchemaMissing(cr, cr.Spec.Chart, err)
+			return valuesSchemaMissing(cr, cr.Spec.Chart, invalidOptIn, err)
 		}
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting spec schema: %w", err), log)
 	}
@@ -1123,6 +1128,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			// #362: the owner generates the CRD and reports on it; a follower has no verdict of its own.
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(specSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
+			cr.SetConditions(valuesSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner, specSchemaBytes)
 		}
 		// #387: the owner now, so a follower's Ready message no longer describes this definition.
@@ -1139,7 +1145,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// #362: what crdgen could not carry faithfully. The condition is recomputed on every pass from
 	// the current render (the cache returns the warnings with the CRD); Events fire only when the
 	// render actually ran.
-	cr.SetConditions(schemaEnforcedCondition(generated.Warnings))
+	cr.SetConditions(schemaSourceConditions(specSchema, generated.Warnings)...)
 	emitSchemaEvents(e.rec, cr, generated.Warnings, generated.Fresh)
 
 	statusFields := statusFieldsFromSpec(cr)
@@ -1585,10 +1591,12 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("waiting for CompositionDefinition %s/%s to establish %s", owner.Namespace, owner.Name, gvk.String())
 	}
 
-	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
+	inferOptIn, _ := chart.OptIn(cr.GetAnnotations())
+	specSchema, err := chart.SpecSchema(pkg, dir, inferOptIn) // #568 child 6: the same seam as Observe
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
 	}
+	specSchemaBytes := specSchema.Bytes
 	crd, err := crdutils.GenerateCRD(specSchemaBytes, gvk)
 	if err != nil {
 		return fmt.Errorf("error generating CRD: %w", err)
@@ -1785,10 +1793,12 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
-	specSchemaBytes, err := chart.ChartJsonSchema(pkg, dir)
+	inferOptIn, _ := chart.OptIn(cr.GetAnnotations())
+	specSchema, err := chart.SpecSchema(pkg, dir, inferOptIn) // #568 child 6: the same seam as Observe
 	if err != nil {
 		return fmt.Errorf("error getting JSON schema: %w", err)
 	}
+	specSchemaBytes := specSchema.Bytes
 	crd, err := crdutils.GenerateCRD(specSchemaBytes, gvk)
 	if err != nil {
 		return fmt.Errorf("error generating CRD: %w", err)
