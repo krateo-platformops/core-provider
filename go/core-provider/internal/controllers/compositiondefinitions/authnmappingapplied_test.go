@@ -1,6 +1,8 @@
 package compositiondefinitions
 
 import (
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"strings"
 	"testing"
 
@@ -34,7 +36,7 @@ func TestRecordAuthnMappingApplied(t *testing.T) {
 
 	cd := cdWith(true, "spoke-1")
 	recordAuthnMappingApplied(cd, deploy.AuthnSupport{NotInstalled: true})
-	if st, r, m, ok := get(cd); !ok || st != "False" || r != string(reasonAuthnNotInstalled) || !strings.Contains(m, "KubernetesTarget apps/spoke-1") {
+	if st, r, m, ok := get(cd); !ok || st != "False" || r != string(rtv1.ConditionReason(cdreason.AuthnNotInstalled.String())) || !strings.Contains(m, "KubernetesTarget apps/spoke-1") {
 		t.Errorf("remote target without authn: %s/%s %q (present %v), want False/AuthnNotInstalled naming KubernetesTarget apps/spoke-1", st, r, m, ok)
 	}
 
@@ -45,7 +47,7 @@ func TestRecordAuthnMappingApplied(t *testing.T) {
 	}
 
 	recordAuthnMappingApplied(cd, deploy.AuthnSupport{})
-	if st, r, _, ok := get(cd); !ok || st != "True" || r != string(reasonAuthnMappingApplied) {
+	if st, r, _, ok := get(cd); !ok || st != "True" || r != string(rtv1.ConditionReason(cdreason.AuthnMappingApplied.String())) {
 		t.Errorf("authn installed: %s/%s (present %v), want True/Applied", st, r, ok)
 	}
 

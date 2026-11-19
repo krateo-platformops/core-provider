@@ -3,6 +3,7 @@ package compositiondefinitions
 import (
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"strings"
 	"testing"
 
@@ -72,7 +73,7 @@ func TestRecordApiRefRBAC_AnUnrelatedErrorChangesNothing(t *testing.T) {
 
 func TestRecordApiRefRBAC_RemovedWithTheApiRef(t *testing.T) {
 	cr := withApiRef()
-	cr.SetConditions(rtv1.Condition{Type: conditionTypeSchemaFullyEnforced, Status: metav1.ConditionTrue, Reason: reasonSchemaFullyEnforced})
+	cr.SetConditions(rtv1.Condition{Type: conditionTypeSchemaFullyEnforced, Status: metav1.ConditionTrue, Reason: rtv1.ConditionReason(cdreason.SchemaFullyEnforced.String())})
 	recordApiRefRBAC(cr, restactionrbac.NotConfigured())
 
 	cr.Spec.ApiRef = nil

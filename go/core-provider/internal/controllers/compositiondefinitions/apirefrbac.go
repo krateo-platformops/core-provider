@@ -2,9 +2,9 @@ package compositiondefinitions
 
 import (
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/restactionrbac"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // conditionTypeApiRefRBACComplete says whether the read-set of a declared apiRef could be resolved
@@ -15,9 +15,7 @@ import (
 //
 // A definition with no apiRef does not carry the condition. Observe retries on the error it returns,
 // so a False is never a durable mark: it clears on the first pass that resolves.
-const conditionTypeApiRefRBACComplete rtv1.ConditionType = "ApiRefRBACComplete"
-
-const reasonReadSetResolved rtv1.ConditionReason = "ReadSetResolved"
+const conditionTypeApiRefRBACComplete = cdreason.TypeApiRefRBACComplete
 
 // recordApiRefRBAC records what a Deploy or Lookup learned about the apiRef's read-set.
 //
@@ -29,22 +27,18 @@ func recordApiRefRBAC(cr *compositiondefinitionsv1alpha1.CompositionDefinition, 
 		return
 	}
 	if failure, ok := restactionrbac.AsError(err); ok {
-		cr.SetConditions(rtv1.Condition{
-			Type:               conditionTypeApiRefRBACComplete,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             rtv1.ConditionReason(failure.Cause),
-			Message:            failure.Error(),
-		})
+		r, known := cdreason.ApiRefRBACFailure(failure.Cause)
+		if !known {
+			// Unreachable while TestEveryRESTActionCauseIsRegistered holds: every Cause has a row.
+			// "Answered in a way nothing here recognises" is the true statement about a cause the
+			// registry does not know.
+			r, _ = cdreason.ApiRefRBACFailure(restactionrbac.CauseSnowplowError)
+		}
+		cr.SetConditions(r.WithMessage(failure.Error()))
 		return
 	}
 	if err == nil {
-		cr.SetConditions(rtv1.Condition{
-			Type:               conditionTypeApiRefRBACComplete,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             reasonReadSetResolved,
-		})
+		cr.SetConditions(cdreason.ApiRefReadSetResolved.Condition())
 	}
 }
 

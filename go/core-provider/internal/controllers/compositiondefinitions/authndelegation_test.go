@@ -1,6 +1,8 @@
 package compositiondefinitions
 
 import (
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"testing"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -21,13 +23,13 @@ func TestRecordAuthnDelegation(t *testing.T) {
 	cr := declared()
 	recordAuthnDelegation(cr, deploy.AuthnSupport{}) // authn-crds 0.36.0
 	c := cr.GetCondition(conditionTypeAuthnDelegation)
-	if c.Status != metav1.ConditionFalse || c.Reason != reasonDelegationUnsupported {
-		t.Errorf("declared on 0.36.0: condition = %s/%s, want False/%s", c.Status, c.Reason, reasonDelegationUnsupported)
+	if c.Status != metav1.ConditionFalse || c.Reason != rtv1.ConditionReason(cdreason.AuthnDelegationUnsupported.String()) {
+		t.Errorf("declared on 0.36.0: condition = %s/%s, want False/%s", c.Status, c.Reason, rtv1.ConditionReason(cdreason.AuthnDelegationUnsupported.String()))
 	}
 
 	recordAuthnDelegation(cr, deploy.AuthnSupport{Delegation: true}) // after the upgrade
-	if c := cr.GetCondition(conditionTypeAuthnDelegation); c.Status != metav1.ConditionTrue || c.Reason != reasonDelegationRendered {
-		t.Errorf("declared on 0.37.0: condition = %s/%s, want True/%s", c.Status, c.Reason, reasonDelegationRendered)
+	if c := cr.GetCondition(conditionTypeAuthnDelegation); c.Status != metav1.ConditionTrue || c.Reason != rtv1.ConditionReason(cdreason.AuthnDelegationRendered.String()) {
+		t.Errorf("declared on 0.37.0: condition = %s/%s, want True/%s", c.Status, c.Reason, rtv1.ConditionReason(cdreason.AuthnDelegationRendered.String()))
 	}
 
 	// Not declared: no condition at all, so the other 70 definitions carry nothing new.

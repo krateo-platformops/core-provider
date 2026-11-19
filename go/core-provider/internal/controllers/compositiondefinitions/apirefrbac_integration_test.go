@@ -5,6 +5,8 @@ package compositiondefinitions
 
 import (
 	"context"
+	"github.com/krateo-platformops/core-provider/internal/cdreason"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -113,7 +115,7 @@ func assessApiRefRBACCondition(ctx context.Context, t *testing.T, r *resources.R
 	f.exists.Store(true)
 	await("True/ReadSetResolved with no edit", func(c *v1alpha1.CompositionDefinition) bool {
 		rc := c.GetCondition(conditionTypeApiRefRBACComplete)
-		return rc.Status == metav1.ConditionTrue && rc.Reason == reasonReadSetResolved
+		return rc.Status == metav1.ConditionTrue && rc.Reason == rtv1.ConditionReason(cdreason.ApiRefReadSetResolved.String())
 	})
 
 	// It disappears from a definition already deployed, which takes Observe's path.
