@@ -10,7 +10,6 @@ import (
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
-	"github.com/krateo-platformops/plumbing/conditions"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -68,10 +67,6 @@ func scaleToZeroOptedIn(cr *compositiondefinitionsv1alpha1.CompositionDefinition
 // pods lists the controller Deployment's pods. It is called only when availability was lost after a
 // completed rollout (#559), so the common path reads no pods; nil means no pod information.
 func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinition, kind string, dep *appsv1.Deployment, depErr error, pods func() []corev1.Pod) (ready, active rtv1.Condition) {
-	activeType := rtv1.ConditionType(conditions.TypeControllerActive)
-	cond := func(t rtv1.ConditionType, s metav1.ConditionStatus, reason rtv1.ConditionReason, msg string) rtv1.Condition {
-		return rtv1.Condition{Type: t, Status: s, Reason: reason, Message: msg, LastTransitionTime: metav1.Now()}
-	}
 	if depErr != nil || dep == nil {
 		why := "the controller Deployment was not found"
 		if depErr != nil {
@@ -79,7 +74,7 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 			// an unreadable Deployment cannot vouch for Available. The Ready returned here is not used.
 			why = "the controller Deployment could not be read: " + depErr.Error()
 		}
-		return cdreason.Creating.WithMessage(why), cond(activeType, metav1.ConditionUnknown, rtv1.ReasonNotObserved, why)
+		return cdreason.Creating.WithMessage(why), cdreason.ControllerNotObserved.WithMessage(why)
 	}
 	replicas := int32(1) // the apiserver defaults a nil to 1
 	if dep.Spec.Replicas != nil {
@@ -94,12 +89,10 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 			if st != nil && st.LastSeen != nil {
 				msg = "idle: no instances of " + kind + " since " + st.LastSeen.UTC().Format(time.RFC3339) + "; wakes on the first"
 			}
-			reason := rtv1.ConditionReason(conditions.ReasonScaledToZero)
-			return cdreason.ScaledToZero.WithMessage(msg),
-				cond(activeType, metav1.ConditionFalse, reason, msg)
+			return cdreason.ScaledToZero.WithMessage(msg), cdreason.ControllerScaledToZero.WithMessage(msg)
 		}
 		msg := "the controller has 0 replicas, but this definition has not opted into scale-to-zero: nothing reconciles " + kind
-		return cdreason.Unavailable.WithMessage(msg), cond(activeType, metav1.ConditionFalse, rtv1.ReasonUnavailable, msg)
+		return cdreason.Unavailable.WithMessage(msg), cdreason.ControllerUnavailable.WithMessage(msg)
 	}
 
 	msg := "controller running"
@@ -117,7 +110,7 @@ func controllerReadiness(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 			msg = "controller running; scales to zero after " + hd.String() + " without instances"
 		}
 	}
-	running := cond(activeType, metav1.ConditionTrue, rtv1.ConditionReason(conditions.ReasonRunning), msg)
+	running := cdreason.ControllerRunning.WithMessage(msg)
 	name := dep.Namespace + "/" + dep.Name
 	switch state, why := controllerRollout(dep, replicas); state {
 	case rolloutInProgress:

@@ -28,6 +28,7 @@ package cdreason
 import (
 	"errors"
 
+	"github.com/krateo-platformops/core-provider/internal/tools/restactionrbac"
 	"github.com/krateo-platformops/plumbing/conditions"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -145,6 +146,118 @@ var (
 		"Delete: the definition is being deleted")
 )
 
+// The condition types a CompositionDefinition carries besides Ready and Synced (#568 child 5). The
+// rollup reads none of them (verdict NotRead), but consumers gate on them (installer reads
+// SchemaFullyEnforced), so their reasons are a closed, documented set like Ready's: every row below
+// is the only way core-provider builds that condition (TestNoRegisteredConditionBuiltOutsideCdreason).
+const (
+	// TypeControllerActive: replicas are declared for the definition's controller (scale-to-zero
+	// reports on it). Defined in plumbing/conditions, shared with the cdc.
+	TypeControllerActive rtv1.ConditionType = conditions.TypeControllerActive
+	// TypeSchemaFullyEnforced: the generated CRD enforces everything the chart's values.schema.json
+	// states (#362).
+	TypeSchemaFullyEnforced rtv1.ConditionType = "SchemaFullyEnforced"
+	// TypeSpecSchemaCurrent: the served CRD version carries the spec schema the generator produces
+	// today (#534).
+	TypeSpecSchemaCurrent rtv1.ConditionType = "SpecSchemaCurrent"
+	// TypeApiRefRBACComplete: the apiRef's RESTAction read-set was resolved into RBAC. Present only
+	// while the definition declares an apiRef.
+	TypeApiRefRBACComplete rtv1.ConditionType = "ApiRefRBACComplete"
+	// TypeAuthnDelegation: a declared spec.apiRef.delegation reaches the controller's authn mapping
+	// (#405). Present only while delegation is declared.
+	TypeAuthnDelegation rtv1.ConditionType = "AuthnDelegation"
+	// TypeAuthnMappingApplied: the controller's authn mapping is rendered where the controller runs
+	// (#251). Present only while the definition has a mapping (an apiRef).
+	TypeAuthnMappingApplied rtv1.ConditionType = "AuthnMappingApplied"
+)
+
+// The reasons of those types, each with the one status it is written with.
+var (
+	ControllerRunning = on(TypeControllerActive, conditions.ReasonRunning, metav1.ConditionTrue, WriterCoreProvider,
+		"the controller Deployment has replicas declared; the message says whether scale-to-zero applies and when")
+	ControllerScaledToZero = on(TypeControllerActive, conditions.ReasonScaledToZero, metav1.ConditionFalse, WriterCoreProvider,
+		"0 replicas, and the definition opted into scale-to-zero: idle, wakes on the first instance (#393)")
+	ControllerUnavailable = on(TypeControllerActive, rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider,
+		"0 replicas, and the definition did NOT opt into scale-to-zero: nothing reconciles the Kind")
+	ControllerNotObserved = on(TypeControllerActive, rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterCoreProvider,
+		"the controller Deployment was not found or could not be read")
+
+	SchemaFullyEnforced = on(TypeSchemaFullyEnforced, "FullyEnforced", metav1.ConditionTrue, WriterCoreProvider,
+		"the generated CRD enforces every constraint in the chart's values schema")
+	SchemaConstraintsNotEnforced = on(TypeSchemaFullyEnforced, "ConstraintsNotEnforced", metav1.ConditionFalse, WriterCoreProvider,
+		"crdgen could not express some constraints, so the cluster accepts values the schema rejects; the message names them (recomputed on every Observe)")
+	SchemaEnforcedOwnedElsewhere = on(TypeSchemaFullyEnforced, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
+		"a follower: another definition generates the CRD; the message names it")
+
+	SpecSchemaCurrent = on(TypeSpecSchemaCurrent, "Current", metav1.ConditionTrue, WriterCoreProvider,
+		"the served and generated spec schemas are identical")
+	SpecSchemaLooserPending = on(TypeSpecSchemaCurrent, "LooserSchemaPending", metav1.ConditionFalse, WriterCoreProvider,
+		"transient: the generated schema is provably looser and the next Update writes it")
+	SpecSchemaNotLooser = on(TypeSpecSchemaCurrent, "GeneratedSchemaNotLooser", metav1.ConditionFalse, WriterCoreProvider,
+		"until the chart version changes: the generated schema differs in a way not provably looser, so the served one is kept rather than risk refusing stored values")
+	SpecSchemaOwnedElsewhere = on(TypeSpecSchemaCurrent, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
+		"a follower: another definition generates the CRD")
+
+	ApiRefReadSetResolved = on(TypeApiRefRBACComplete, "ReadSetResolved", metav1.ConditionTrue, WriterCoreProvider,
+		"the apiRef's RESTAction read-set was resolved and its RBAC rendered")
+
+	AuthnDelegationRendered = on(TypeAuthnDelegation, "Rendered", metav1.ConditionTrue, WriterCoreProvider,
+		"the authn mapping CRD serves spec.delegation and it is rendered onto the mapping")
+	AuthnDelegationUnsupported = on(TypeAuthnDelegation, "DelegationUnsupported", metav1.ConditionFalse, WriterCoreProvider,
+		"the installed authn mapping CRD does not serve spec.delegation (authn-crds < 0.37.0), so it is not rendered rather than pruned")
+
+	AuthnMappingApplied = on(TypeAuthnMappingApplied, "Applied", metav1.ConditionTrue, WriterCoreProvider,
+		"the mapping CRD exists where the controller runs and the mapping is rendered there")
+	AuthnNotInstalled = on(TypeAuthnMappingApplied, "AuthnNotInstalled", metav1.ConditionFalse, WriterCoreProvider,
+		"the cluster the controller runs in has no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping is not written")
+)
+
+// apiRefRBACFailures are ApiRefRBACComplete=False, one per restactionrbac.Cause: each sends an
+// operator somewhere different, which is why they are told apart.
+var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
+	restactionrbac.CauseRESTActionNotFound: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionNotFound), metav1.ConditionFalse, WriterCoreProvider,
+		"snowplow says the RESTAction does not exist"),
+	restactionrbac.CauseRESTActionForbidden: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionForbidden), metav1.ConditionFalse, WriterCoreProvider,
+		"the caller may not read the RESTAction; it MAY ALSO NOT EXIST, so this never means missing"),
+	restactionrbac.CauseStageUnresolvable: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseStageUnresolvable), metav1.ConditionFalse, WriterCoreProvider,
+		"a stage cannot be enumerated without dispatching it"),
+	restactionrbac.CauseInvalidApiRef: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseInvalidApiRef), metav1.ConditionFalse, WriterCoreProvider,
+		"snowplow refused the request itself, such as extras naming a reserved key"),
+	restactionrbac.CauseUnauthorized: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseUnauthorized), metav1.ConditionFalse, WriterCoreProvider,
+		"no usable identity reached snowplow"),
+	restactionrbac.CauseSnowplowUnavailable: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseSnowplowUnavailable), metav1.ConditionFalse, WriterCoreProvider,
+		"snowplow could not be reached, or ran out of time"),
+	restactionrbac.CauseSnowplowError: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseSnowplowError), metav1.ConditionFalse, WriterCoreProvider,
+		"snowplow, or something in front of it, answered in a way nothing here recognises (including cyclic stages)"),
+	restactionrbac.CauseNotConfigured: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseNotConfigured), metav1.ConditionFalse, WriterCoreProvider,
+		"core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef"),
+}
+
+// ApiRefRBACFailure is the ApiRefRBACComplete=False reason for cause, and false for a cause this
+// registry does not list (TestEveryRESTActionCauseIsRegistered keeps that from happening silently).
+func ApiRefRBACFailure(cause restactionrbac.Cause) (Reason, bool) {
+	r, ok := apiRefRBACFailures[cause]
+	return r, ok
+}
+
+// nonReady is every non-Ready, non-Synced row, in a fixed order: by type, then True, False, Unknown.
+func nonReady() []Reason {
+	out := []Reason{
+		ControllerRunning, ControllerScaledToZero, ControllerUnavailable, ControllerNotObserved,
+		SchemaFullyEnforced, SchemaConstraintsNotEnforced, SchemaEnforcedOwnedElsewhere,
+		SpecSchemaCurrent, SpecSchemaLooserPending, SpecSchemaNotLooser, SpecSchemaOwnedElsewhere,
+		ApiRefReadSetResolved,
+	}
+	for _, c := range []restactionrbac.Cause{
+		restactionrbac.CauseRESTActionNotFound, restactionrbac.CauseRESTActionForbidden, restactionrbac.CauseStageUnresolvable,
+		restactionrbac.CauseInvalidApiRef, restactionrbac.CauseUnauthorized, restactionrbac.CauseSnowplowUnavailable,
+		restactionrbac.CauseSnowplowError, restactionrbac.CauseNotConfigured,
+	} {
+		out = append(out, apiRefRBACFailures[c])
+	}
+	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled)
+}
+
 // The reasons provider-runtime's managed reconciler writes on the same objects. Unexported: core-provider
 // must not write them itself.
 var (
@@ -174,11 +287,11 @@ func on(condType rtv1.ConditionType, reason rtv1.ConditionReason, status metav1.
 // Table is every reason a CompositionDefinition's Ready and Synced can carry, core-provider first, in
 // a fixed order.
 func Table() []Reason {
-	return []Reason{
+	return append([]Reason{
 		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, ValuesSchemaMissing, DerivedNameTooLong, Deleting,
 		runtimeNotObserved, runtimeCreating, runtimeDeleting,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused,
-	}
+	}, nonReady()...)
 }
 
 // RuntimeConstructors are provider-runtime's own constructors for the reasons it writes, so a test can
