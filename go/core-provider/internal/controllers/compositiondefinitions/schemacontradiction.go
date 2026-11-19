@@ -6,6 +6,7 @@ import (
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
+	chartpkg "github.com/krateo-platformops/core-provider/internal/tools/chart"
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
 	"github.com/krateo-platformops/plumbing/crdgen"
 	"github.com/krateo-platformops/provider-runtime/pkg/reconciler"
@@ -38,7 +39,7 @@ func schemaContradiction(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 // valuesSchemaMissing reports a chart with no root values.schema.json (#566): Ready=False/
 // ValuesSchemaMissing naming the chart, and a ReadyAssessed error, so the runtime keeps that Ready and
 // Synced=False/ReconcileError carries the same text. Nothing is generated or applied.
-func valuesSchemaMissing(cr *compositiondefinitionsv1alpha1.CompositionDefinition, chart *compositiondefinitionsv1alpha1.ChartInfo, cause error) (reconciler.ExternalObservation, error) {
+func valuesSchemaMissing(cr *compositiondefinitionsv1alpha1.CompositionDefinition, chart *compositiondefinitionsv1alpha1.ChartInfo, invalidOptIn string, cause error) (reconciler.ExternalObservation, error) {
 	name := "the chart"
 	if chart != nil {
 		name = fmt.Sprintf("chart %s %s", chart.Url, chart.Version)
@@ -46,7 +47,12 @@ func valuesSchemaMissing(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 			name = fmt.Sprintf("chart %s (%s) %s", chart.Url, chart.Repo, chart.Version)
 		}
 	}
-	msg := fmt.Sprintf("%s has no values.schema.json at its root; core-provider needs one to type the composition CRD (a wrapper chart can add one): %v", name, cause)
+	// #568 child 6: the message names the opt-in, and a mistyped opt-in by its value.
+	optIn := fmt.Sprintf("or annotate the definition %s: %s to infer one from values.yaml", chartpkg.ValuesSchemaAnnotation, chartpkg.ValuesSchemaInfer)
+	if invalidOptIn != "" {
+		optIn = fmt.Sprintf("its %s annotation is %q, which is not an opt-in: the only accepted value is %q", chartpkg.ValuesSchemaAnnotation, invalidOptIn, chartpkg.ValuesSchemaInfer)
+	}
+	msg := fmt.Sprintf("%s has no values.schema.json at its root; core-provider needs one to type the composition CRD (a wrapper chart can add one, %s): %v", name, optIn, cause)
 	cr.SetConditions(cdreason.ValuesSchemaMissing.WithMessage(msg))
 	return reconciler.ExternalObservation{}, reconciler.ReadyAssessed(errors.New(msg))
 }

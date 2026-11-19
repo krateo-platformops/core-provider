@@ -12,7 +12,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.17
 	github.com/krateo-platformops/audit v0.15.0
-	github.com/krateo-platformops/plumbing v1.96.0
+	github.com/krateo-platformops/plumbing v1.100.0
 	github.com/krateo-platformops/provider-runtime v1.20.0
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.12.1
@@ -134,11 +134,14 @@ require (
 	google.golang.org/grpc v1.85.0 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	k8s.io/cli-runtime v0.37.2 // indirect
 	k8s.io/code-generator v0.37.2 // indirect
 	k8s.io/component-base v0.37.2 // indirect
 	k8s.io/gengo/v2 v2.0.0-20260408192533-25e2208e0dc3 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
+	k8s.io/kubectl v0.37.2 // indirect
 	k8s.io/streaming v0.37.2 // indirect
 	oras.land/oras-go/v2 v2.6.2 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect

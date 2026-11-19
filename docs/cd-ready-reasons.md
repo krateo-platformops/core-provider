@@ -54,6 +54,7 @@ written by the managed reconciler on the same objects. The set is CLOSED.
 | SchemaFullyEnforced | `FullyEnforced` | True | core-provider | — | the generated CRD enforces every constraint in the chart's values schema |
 | SchemaFullyEnforced | `ConstraintsNotEnforced` | False | core-provider | — | crdgen could not express some constraints, so the cluster accepts values the schema rejects; the message names them (recomputed on every Observe) |
 | SchemaFullyEnforced | `OwnedByAnotherDefinition` | Unknown | core-provider | — | a follower: another definition generates the CRD; the message names it |
+| SchemaFullyEnforced | `SchemaInferred` | Unknown | core-provider | — | the spec schema was inferred (ValuesSchemaAuthored=False): it has no authored constraints, so True, which means authored constraints all enforced, cannot be claimed (#568 D6) |
 | SpecSchemaCurrent | `Current` | True | core-provider | — | the served and generated spec schemas are identical |
 | SpecSchemaCurrent | `LooserSchemaPending` | False | core-provider | — | transient: the generated schema is provably looser and the next Update writes it |
 | SpecSchemaCurrent | `GeneratedSchemaNotLooser` | False | core-provider | — | until the chart version changes: the generated schema differs in a way not provably looser, so the served one is kept rather than risk refusing stored values |
@@ -71,3 +72,6 @@ written by the managed reconciler on the same objects. The set is CLOSED.
 | AuthnDelegation | `DelegationUnsupported` | False | core-provider | — | the installed authn mapping CRD does not serve spec.delegation (authn-crds < 0.37.0), so it is not rendered rather than pruned |
 | AuthnMappingApplied | `Applied` | True | core-provider | — | the mapping CRD exists where the controller runs and the mapping is rendered there |
 | AuthnMappingApplied | `AuthnNotInstalled` | False | core-provider | — | the cluster the controller runs in has no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping is not written |
+| ValuesSchemaAuthored | `Authored` | True | core-provider | — | the chart ships values.schema.json at its root, and the CRD is generated from it |
+| ValuesSchemaAuthored | `InferredFromValues` | False | core-provider | — | the chart ships no values.schema.json and the definition opted in (krateo.io/values-schema: infer): the schema is inferred from values.yaml, typed-open, with no authored constraints; the message gives the rules version and the untyped paths |
+| ValuesSchemaAuthored | `OwnedByAnotherDefinition` | Unknown | core-provider | — | a follower: another definition generates the CRD; the message names it |

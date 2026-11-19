@@ -169,6 +169,10 @@ const (
 	// TypeAuthnMappingApplied: the controller's authn mapping is rendered where the controller runs
 	// (#251). Present only while the definition has a mapping (an apiRef).
 	TypeAuthnMappingApplied rtv1.ConditionType = "AuthnMappingApplied"
+	// TypeValuesSchemaAuthored: whether the CRD's spec schema is the chart's own values.schema.json or
+	// was inferred from its values.yaml files (#568 D6; inference is opt-in, krateo.io/values-schema:
+	// infer). Ready is unaffected: an inferred definition reads Available.
+	TypeValuesSchemaAuthored rtv1.ConditionType = "ValuesSchemaAuthored"
 )
 
 // The reasons of those types, each with the one status it is written with.
@@ -188,6 +192,8 @@ var (
 		"crdgen could not express some constraints, so the cluster accepts values the schema rejects; the message names them (recomputed on every Observe)")
 	SchemaEnforcedOwnedElsewhere = on(TypeSchemaFullyEnforced, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it")
+	SchemaInferred = on(TypeSchemaFullyEnforced, "SchemaInferred", metav1.ConditionUnknown, WriterCoreProvider,
+		"the spec schema was inferred (ValuesSchemaAuthored=False): it has no authored constraints, so True, which means authored constraints all enforced, cannot be claimed (#568 D6)")
 
 	SpecSchemaCurrent = on(TypeSpecSchemaCurrent, "Current", metav1.ConditionTrue, WriterCoreProvider,
 		"the served and generated spec schemas are identical")
@@ -210,6 +216,13 @@ var (
 		"the mapping CRD exists where the controller runs and the mapping is rendered there")
 	AuthnNotInstalled = on(TypeAuthnMappingApplied, "AuthnNotInstalled", metav1.ConditionFalse, WriterCoreProvider,
 		"the cluster the controller runs in has no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping is not written")
+
+	ValuesSchemaAuthored = on(TypeValuesSchemaAuthored, "Authored", metav1.ConditionTrue, WriterCoreProvider,
+		"the chart ships values.schema.json at its root, and the CRD is generated from it")
+	ValuesSchemaInferred = on(TypeValuesSchemaAuthored, "InferredFromValues", metav1.ConditionFalse, WriterCoreProvider,
+		"the chart ships no values.schema.json and the definition opted in (krateo.io/values-schema: infer): the schema is inferred from values.yaml, typed-open, with no authored constraints; the message gives the rules version and the untyped paths")
+	ValuesSchemaOwnedElsewhere = on(TypeValuesSchemaAuthored, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
+		"a follower: another definition generates the CRD; the message names it")
 )
 
 // apiRefRBACFailures are ApiRefRBACComplete=False, one per restactionrbac.Cause: each sends an
@@ -244,7 +257,7 @@ func ApiRefRBACFailure(cause restactionrbac.Cause) (Reason, bool) {
 func nonReady() []Reason {
 	out := []Reason{
 		ControllerRunning, ControllerScaledToZero, ControllerUnavailable, ControllerNotObserved,
-		SchemaFullyEnforced, SchemaConstraintsNotEnforced, SchemaEnforcedOwnedElsewhere,
+		SchemaFullyEnforced, SchemaConstraintsNotEnforced, SchemaEnforcedOwnedElsewhere, SchemaInferred,
 		SpecSchemaCurrent, SpecSchemaLooserPending, SpecSchemaNotLooser, SpecSchemaOwnedElsewhere,
 		ApiRefReadSetResolved,
 	}
@@ -255,7 +268,8 @@ func nonReady() []Reason {
 	} {
 		out = append(out, apiRefRBACFailures[c])
 	}
-	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled)
+	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled,
+		ValuesSchemaAuthored, ValuesSchemaInferred, ValuesSchemaOwnedElsewhere)
 }
 
 // The reasons provider-runtime's managed reconciler writes on the same objects. Unexported: core-provider
