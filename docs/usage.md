@@ -128,6 +128,32 @@ the change in flight finish first; on a composition with nothing in flight it wa
 and applies it. Removing either annotation resumes reconciliation; the controller then restores what
 the chart renders.
 
+## Limiting what the controller may do: `krateo.io/management-policy`
+
+A set of verbs on a composition, from `observe`, `create`, `update` and `delete`, for example
+`krateo.io/management-policy: observe,create`. `observe` is always implied, and the historical values
+`default`, `observe-create-update`, `observe-delete` and `observe` are aliases for their sets. The
+definition is plumbing's `managementpolicy`, shared with the runtimes (unstructured-runtime#110). A
+value that does not parse acts as `observe` only. Measured on envtest (`TestEnvtest_597_*`, #597):
+
+| the composition | `create` withheld | `update` withheld |
+|---|---|---|
+| release not installed | nothing is installed; `Ready=False/CreateWithheldByPolicy`, whose message names the policy and how to allow create; a parent counts it **failed** | — |
+| chart version or values changed | — | **not applied**; the installed chart is frozen; `Ready=True/UpdateWithheldByPolicy` names the installed and the wanted chart version; `status.helmChartVersion` stays at the **installed** version |
+| a child changed out of band | — | **not corrected**; `Ready=True/UpdateWithheldByPolicy` names the children it would create, delete or patch |
+
+- **Only the healthy verdict is replaced.** If a child is unhealthy, Ready keeps that reason and its
+  message adds that updates are withheld. A parent counts `UpdateWithheldByPolicy` healthy.
+- **While update is withheld, nothing is written to the release:** the controller runs helm's own
+  merge as a server-side dry run (plumbing `UpgradeConfig.WriteNothing`). Its derived RBAC is still
+  refreshed, so it keeps the access it needs to observe and delete.
+- **Drift that cannot be measured** (a child kind's webhook denies the dry run, or the stored release
+  names a kind the cluster no longer serves) is not a failure: Ready's message says why, under
+  `UpdateWithheldByPolicy` or, when a child is unhealthy, after the rollup's own reason.
+- **Not yet withheld:** a helm operation stuck past its grace period is still rolled back (#597, open).
+- `krateo.io/deletion-policy: orphan` keeps the release on delete, whatever the management policy
+  allows; so does a deletion-policy value that is neither `delete` nor `orphan`.
+
 ## Consuming the docs at the right version
 
 Image tag == chart version == repo tag (one version line). Read this bundle at the
