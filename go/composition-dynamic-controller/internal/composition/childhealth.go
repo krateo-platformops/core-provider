@@ -1228,6 +1228,11 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 			// change), so the parent names this reason beside the child. The literal is plumbing
 			// managementpolicy's, which every writer of it reports.
 			return childEval{state: childFailed, detail: conditionreason.ReasonCreateWithheldByPolicy}
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == conditionreason.ReasonRecoveryWithheldByPolicy:
+			// #597: the child's release is stuck in a helm operation and its policy withholds the
+			// rollback that would recover it. FAILED: nothing clears it but a human or a policy change,
+			// so a parent counting it converging would wait forever. Named beside the child, as above.
+			return childEval{state: childFailed, detail: conditionreason.ReasonRecoveryWithheldByPolicy}
 		case stringField(cm, "reason") == "CreateUnreachable",
 			stringField(cm, "reason") == "NoCreateVerbDeclared",
 			stringField(cm, "reason") == "NoIdentifierRecorded":

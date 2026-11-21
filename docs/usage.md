@@ -150,7 +150,10 @@ value that does not parse acts as `observe` only. Measured on envtest (`TestEnvt
 - **Drift that cannot be measured** (a child kind's webhook denies the dry run, or the stored release
   names a kind the cluster no longer serves) is not a failure: Ready's message says why, under
   `UpdateWithheldByPolicy` or, when a child is unhealthy, after the rollup's own reason.
-- **Not yet withheld:** a helm operation stuck past its grace period is still rolled back (#597, open).
+- **A release stuck in a helm operation** past its grace period (or whose controller is gone) is **not**
+  rolled back: the rollback is a write. `Ready=False/RecoveryWithheldByPolicy` names the helm status and
+  how long it has been pending, and a parent counts it failed. It lasts until a human recovers the
+  release, or the policy allows update. Within the grace, `PendingHelmOperation` is unchanged.
 - `krateo.io/deletion-policy: orphan` keeps the release on delete, whatever the management policy
   allows; so does a deletion-policy value that is neither `delete` nor `orphan`.
 

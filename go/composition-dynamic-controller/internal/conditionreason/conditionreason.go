@@ -52,6 +52,10 @@ const (
 	// one definition both runtimes report.
 	ReasonCreateWithheldByPolicy = managementpolicy.ReasonCreateWithheld
 	ReasonUpdateWithheldByPolicy = managementpolicy.ReasonUpdateWithheld
+	// RecoveryWithheldByPolicy (core-provider#597, Diego 2026-11-21): this controller's own. A release
+	// stuck in a helm operation is not rolled back, because the rollback is a write that
+	// krateo.io/management-policy withholds.
+	ReasonRecoveryWithheldByPolicy = "RecoveryWithheldByPolicy"
 )
 
 // Writer is who writes a reason on a composition.
@@ -161,6 +165,9 @@ var (
 	UpdateWithheldByPolicy = ready(ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterCDC,
 		"stampReady: healthy, and krateo.io/management-policy withholds update, so the INSTALLED chart is FROZEN: a changed chart version or values, or drift, is reported and not applied, so the release may not be at the definition's chart version or values (#110 D4/D7, #597); the message names the installed and wanted versions, the drifted children, or why drift could not be assessed. Replaces only Available: a failing rollup keeps its own reason, and its message notes the withheld update",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update, or the definition's chart and the composition's values return to what is installed"})
+	RecoveryWithheldByPolicy = ready(ReasonRecoveryWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
+		"Observe: the release is stuck in a helm operation past its grace period (or its controller is gone), and the recovery, a helm rollback, is a write krateo.io/management-policy withholds (it withholds update), so the release is not rolled back (#597); the message names the helm status, how long it has been pending, and what would recover it",
+		Clearance{Indefinite, "until a human recovers the release (for example a helm rollback), or krateo.io/management-policy allows update and the next reconcile recovers it"})
 )
 
 // The reasons unstructured-runtime writes on the same compositions. Unexported: the cdc must not
@@ -328,7 +335,7 @@ func Table() []Reason {
 	return []Reason{
 		Available, AvailablePartialCoverage, ReconcileGracefullyPaused,
 		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation, HooksMayNotHaveRun,
-		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded, CreateWithheldByPolicy, UpdateWithheldByPolicy,
+		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded, CreateWithheldByPolicy, UpdateWithheldByPolicy, RecoveryWithheldByPolicy,
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/krateo-platformops/plumbing/managementpolicy"
@@ -37,6 +38,8 @@ func TestRollup_WithheldByPolicyChildren(t *testing.T) {
 		wantDetail     string
 	}{
 		{"False", "CreateWithheldByPolicy", childFailed, "CreateWithheldByPolicy"},
+		{"False", "RecoveryWithheldByPolicy", childFailed, "RecoveryWithheldByPolicy"},
+		{"False", "PendingHelmOperation", childConverging, ""}, // CONTROL: within the grace, still converging
 		{"True", "UpdateWithheldByPolicy", childHealthy, ""},
 		{"False", "Creating", childConverging, ""},
 		{"False", "NoCreateVerbDeclared", childFailed, ""},
@@ -108,5 +111,23 @@ func TestUpdateWithheldMessage(t *testing.T) {
 	}
 	if driftUnassessable(errors.New("boom")) || driftUnassessable(fmt.Errorf("x: %w", helmconfig.ErrWriteNothingConflict)) {
 		t.Error("CONTROL: any other error, a WriteNothing conflict included, is a real failure")
+	}
+}
+
+// RecoveryWithheldByPolicy's message names the helm status, the age, the cause (the grace, or a gone
+// controller) and the remedy.
+func TestRecoveryWithheldMessage(t *testing.T) {
+	mg := &unstructured.Unstructured{Object: map[string]any{}}
+	mg.SetAnnotations(map[string]string{"krateo.io/management-policy": "observe"})
+	d := managementpolicy.For(mg.GetAnnotations(), nil)
+	got := recoveryWithheldMessage(mg, d, "pending-upgrade", 90*time.Minute+500*time.Millisecond, false, "")
+	for _, want := range []string{"pending-upgrade", "1h30m0s", "past the", "grace", "roll the release back", `"observe"`, "a human must recover the release, or allow update"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("past the grace: %q lacks %q", got, want)
+		}
+	}
+	got = recoveryWithheldMessage(mg, d, "pending-install", time.Minute, true, "started by a deleted pod")
+	if !strings.Contains(got, "the controller that started it is gone (started by a deleted pod)") || strings.Contains(got, "past the") {
+		t.Errorf("orphaned: %q; want the gone controller named, not the grace", got)
 	}
 }

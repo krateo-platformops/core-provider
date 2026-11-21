@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
@@ -84,6 +85,18 @@ func updateWithheldMessage(mg *unstructured.Unstructured, d managementpolicy.Dec
 		return head + ": drift is not corrected"
 	}
 	return fmt.Sprintf("%s: drift is not corrected (%s)", head, strings.Join(parts, "; "))
+}
+
+// recoveryWithheldMessage is RecoveryWithheldByPolicy's message: the helm status, how long it has been
+// pending, why it is not recovered, and what would recover it.
+func recoveryWithheldMessage(mg *unstructured.Unstructured, d managementpolicy.Decision, status string, pendingFor time.Duration, orphan bool, orphanWhy string) string {
+	stuck := fmt.Sprintf("past the %s grace", pendingOperationGrace)
+	if orphan {
+		stuck = "and the controller that started it is gone (" + orphanWhy + ")"
+	}
+	return fmt.Sprintf("the release is stuck in helm status %s, pending for %s %s; recovering it would roll the release back, "+
+		"which %s withholds (it withholds update); a human must recover the release, or allow update",
+		status, pendingFor.Truncate(time.Second), stuck, policyPhrase(mg, d))
 }
 
 // driftUnassessable reports whether a WriteNothing reconcile error means only that drift could not be

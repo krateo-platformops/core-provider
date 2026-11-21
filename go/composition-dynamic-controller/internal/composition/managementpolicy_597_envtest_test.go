@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +20,10 @@ import (
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
+	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage"
 	"helm.sh/helm/v3/pkg/storage/driver"
+	helmtime "helm.sh/helm/v3/pkg/time"
 	corev1 "k8s.io/api/core/v1"
 	apixv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -183,6 +187,8 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 		chartVersion        string         // status.helmChartVersion after Observe
 		rolesBefore         int            // derived ClusterRoles/ClusterRoleBindings present just before Observe
 		rolesAfter          int
+		histBefore          string // "rev:status ..." of the release history, before and after Observe
+		histAfter           string
 	}
 	// clusterRBAC is the set of ClusterRole and ClusterRoleBinding names; the derived RBAC for this
 	// chart is cluster-scoped (the inspector stub names no namespace).
@@ -263,6 +269,18 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 			}
 			return r.Version
 		}
+		history := func() string {
+			rs, err := st.History(relName)
+			if err != nil {
+				t.Fatalf("reading release history %s: %v", relName, err)
+			}
+			sort.Slice(rs, func(i, j int) bool { return rs[i].Version < rs[j].Version })
+			var out []string
+			for _, r := range rs {
+				out = append(out, fmt.Sprintf("%d:%s", r.Version, r.Info.Status))
+			}
+			return strings.Join(out, " ")
+		}
 		cm := func() string {
 			c, err := kube.CoreV1().ConfigMaps(ns).Get(ctx, "app", metav1.GetOptions{})
 			if err != nil {
@@ -271,6 +289,36 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 			return c.Data["k"]
 		}
 
+		// "stuck": the state a controller killed mid-upgrade leaves (as recoverstuck_envtest_test.go
+		// builds it): revision 2 is applied by a real upgrade, then helm's own storage is set to rev 1
+		// deployed and rev 2 pending-upgrade, pending for an hour, far past pendingOperationGrace. No
+		// operation record exists, so it is not "orphaned": the grace alone decides.
+		if arm == "stuck" {
+			up := cur.DeepCopy()
+			up.Object["spec"] = map[string]any{"k": "v2"}
+			if up, err = dyn.Resource(gvr).Namespace(ns).Update(ctx, up, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.Observe(ctx, up); err != nil || rev() != 2 {
+				t.Fatalf("premise: a default-policy Observe must upgrade to revision 2 (err %v, revision %d)", err, rev())
+			}
+			for v, status := range map[int]release.Status{1: release.StatusDeployed, 2: release.StatusPendingUpgrade} {
+				r, err := st.Get(relName, v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Info.Status = status
+				if v == 2 {
+					r.Info.LastDeployed = helmtime.Time{Time: time.Now().Add(-time.Hour)}
+				}
+				if err := st.Update(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if cur, err = dyn.Resource(gvr).Namespace(ns).Get(ctx, "fw", metav1.GetOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		// Then the policy is set (unstructured-runtime D6 reacts at once to this edit).
 		if policy != "" {
 			ann := cur.GetAnnotations()
@@ -285,7 +333,7 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 			cur.Object["spec"] = map[string]any{"k": "v2"}
 		case "version":
 			h.packageInfoGetter = p597Getter{url: url020, version: "0.2.0"}
-		case "drift", "dropRoles":
+		case "drift", "dropRoles", "stuck":
 		}
 		if cur, err = dyn.Resource(gvr).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			t.Fatal(err)
@@ -337,20 +385,22 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 		var o outcome
 		o.revBefore, o.cmBefore = rev(), cm()
 		o.rolesBefore = present()
+		o.histBefore = history()
 		if got := cur.GetAnnotations()["krateo.io/management-policy"]; got != policy {
 			t.Fatalf("premise: the composition must carry policy %q, has %q", policy, got)
 		}
 		o.obs, o.observeErr = h.Observe(ctx, cur)
 		o.revAfter, o.cmAfter = rev(), cm()
 		o.rolesAfter = present()
+		o.histAfter = history()
 		after, err := dyn.Resource(gvr).Namespace(ns).Get(ctx, "fw", metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		o.ready = readyOf(after)
 		o.chartVersion, _, _ = unstructured.NestedString(after.Object, "status", "helmChartVersion")
-		t.Logf("policy=%q arm=%s: upToDate=%v Ready=%v/%v %q helmChartVersion=%q derived RBAC %d of %d -> %d",
-			policy, arm, o.obs.ResourceUpToDate, o.ready["status"], o.ready["reason"], o.ready["message"], o.chartVersion, o.rolesBefore, len(derived), o.rolesAfter)
+		t.Logf("policy=%q arm=%s: upToDate=%v Ready=%v/%v %q helmChartVersion=%q derived RBAC %d of %d -> %d, history [%s] -> [%s]",
+			policy, arm, o.obs.ResourceUpToDate, o.ready["status"], o.ready["reason"], o.ready["message"], o.chartVersion, o.rolesBefore, len(derived), o.rolesAfter, o.histBefore, o.histAfter)
 		t.Logf("policy=%q arm=%s: revision %d -> %d, child k %q -> %q, Observe err=%v",
 			policy, arm, o.revBefore, o.revAfter, o.cmBefore, o.cmAfter, o.observeErr)
 		return o
@@ -419,6 +469,37 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 		o := run(t, "o-rbac", "observe", "dropRoles")
 		if o.rolesBefore != 0 || o.rolesAfter == 0 || o.revAfter != o.revBefore {
 			t.Errorf("RBAC under observe: derived RBAC %d -> %d, revision %d -> %d; want the deleted derived RBAC re-applied and the release untouched", o.rolesBefore, o.rolesAfter, o.revBefore, o.revAfter)
+		}
+	})
+
+	// A release stuck past the grace (Diego, 2026-11-21): the recovery is a rollback, a write the policy
+	// withholds, so under observe the history is untouched and Ready=False/RecoveryWithheldByPolicy.
+	// CONTROL: the default policy rolls it back.
+	t.Run("control: default policy, a release stuck past the grace is rolled back", func(t *testing.T) {
+		o := run(t, "d-stuck", "", "stuck")
+		// Recovered: new revisions were written past the stuck one, and the latest is deployed. (helm
+		// leaves revision 2's own record at pending-upgrade; it is history, not the release's state.)
+		h := strings.Fields(o.histAfter)
+		if o.histBefore != "1:deployed 2:pending-upgrade" || o.revAfter <= 2 || len(h) == 0 || !strings.HasSuffix(h[len(h)-1], ":deployed") {
+			t.Errorf("control: history [%s] -> [%s], revision %d; want the stuck release recovered: a later revision, deployed", o.histBefore, o.histAfter, o.revAfter)
+		}
+	})
+	t.Run("observe: a release stuck past the grace is NOT rolled back", func(t *testing.T) {
+		o := run(t, "o-stuck", "observe", "stuck")
+		msg, _ := o.ready["message"].(string)
+		if o.histAfter != o.histBefore || o.histAfter != "1:deployed 2:pending-upgrade" {
+			t.Errorf("history [%s] -> [%s]; under observe nothing may be written to the release", o.histBefore, o.histAfter)
+		}
+		if o.observeErr != nil || !o.obs.ResourceExists || !o.obs.ResourceUpToDate {
+			t.Errorf("observation %+v err %v; want {exists, up to date}, so the runtime dispatches nothing", o.obs, o.observeErr)
+		}
+		for _, want := range []string{"pending-upgrade", "roll the release back", `"observe"`, "a human must recover the release, or allow update"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message %q lacks %q", msg, want)
+			}
+		}
+		if o.ready["status"] != "False" || o.ready["reason"] != "RecoveryWithheldByPolicy" {
+			t.Errorf("Ready=%v/%v; want False/RecoveryWithheldByPolicy", o.ready["status"], o.ready["reason"])
 		}
 	})
 

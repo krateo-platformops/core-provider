@@ -569,6 +569,30 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			}
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 		}
+		// #597 (Diego, 2026-11-21): the recovery below is a helm ROLLBACK, a write to the release, and
+		// a withheld update withholds every write to the release. So it is not attempted; Ready says
+		// the release is stuck and that only a human (or allowing update) can recover it.
+		//
+		// The observation is {exists, up to date}, the same stand-down as the in-flight branch above,
+		// and deliberately: exists, so the runtime never dispatches a Create (an install over a stuck
+		// release); up to date, so it has no drift to act on and dispatches no Update. The update is
+		// withheld anyway, but up to date also keeps the runtime off its withheld-update path, which
+		// would describe drift this pass never measured: the reconcile that measures it cannot run
+		// while helm holds the pending lock.
+		if updateWithheld {
+			log.Info("Release stuck in an incomplete helm operation, and the management policy withholds update, so it is not rolled back",
+				"status", string(rel.Status), "pendingFor", pendingFor.String(), "orphan", orphan, "policy", policyValue(mg))
+			unstructuredtools.SetConditions(mg, conditionreason.RecoveryWithheldByPolicy.WithMessage(
+				recoveryWithheldMessage(mg, decision, string(rel.Status), pendingFor, orphan, why)))
+			_, uerr := updateStatus(ctx, mg, updateOpts)
+			if err := pendingConditionWriteOutcome(uerr); err != nil {
+				return controller.ExternalObservation{}, err
+			}
+			if uerr != nil {
+				log.Debug("Could not record the recovery-withheld condition", "error", uerr)
+			}
+			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		}
 		// Stuck longer than any real operation => genuinely wedged (e.g. controller died mid-op). Roll
 		// back once to clear the stale pending/uninstalling lock so a fresh upgrade (or a clean re-drive
 		// of the uninstall) can proceed — helm refuses to operate on a release stuck pending/uninstalling.
