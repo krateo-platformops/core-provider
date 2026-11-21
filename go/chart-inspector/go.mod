@@ -7,15 +7,15 @@ toolchain go1.26.10
 require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/krateo-platformops/core-provider v0.0.0-20260803144138-97785b777edd
-	github.com/krateo-platformops/plumbing v1.100.0
-	github.com/krateo-platformops/provider-runtime v1.20.1
+	github.com/krateo-platformops/plumbing v1.102.0
+	github.com/krateo-platformops/provider-runtime v1.21.0
 	github.com/krateo-platformops/unstructured-runtime v1.7.5
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag/v2 v2.0.0-rc4
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
-	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.45.0
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.45.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0

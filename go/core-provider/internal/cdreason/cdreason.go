@@ -288,6 +288,20 @@ var (
 		"the pass failed (message: the error); with Ready=False/SchemaDefaultContradiction it reads \"observe failed: \" followed by Ready's message")
 	runtimeSyncedPaused = on(rtv1.TypeSynced, rtv1.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/paused is set; Ready is left as it was")
+
+	// provider-runtime v1.21.0 (unstructured-runtime#110): the management policy reported on a
+	// CompositionDefinition that carries krateo.io/management-policy or krateo.io/deletion-policy. The
+	// reconciler writes them after core-provider's Observe in the same pass, and writes status once,
+	// so there is no second writer: core-provider writes a CompositionDefinition's conditions only
+	// through the reconciler's single status write.
+	runtimeCreateWithheld = ready(rtv1.ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterRuntime, Failed,
+		"the external resource (the CRD) is absent and krateo.io/management-policy withholds create, observe-only included; nothing is created until a human changes the policy (#110 D4)")
+	runtimeUpdateWithheld = ready(rtv1.ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterRuntime, Healthy,
+		"core-provider's Observe found drift and krateo.io/management-policy withholds update: replaces a healthy Ready only, so the definition works but is NOT brought to its desired state; an unhealthy Ready keeps its own reason, with \"updates are withheld by policy\" appended (#110 D4)")
+	runtimeSyncedPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonManagementPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
+		"krateo.io/management-policy does not parse: the reconciler acts on nothing (observe only); wins over the pass's own Synced outcome; paused and deferred passes keep theirs")
+	runtimeSyncedDeletionPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
+		"krateo.io/deletion-policy is neither delete nor orphan, so the external resource is KEPT on delete; reported on every pass while set")
 )
 
 func ready(reason rtv1.ConditionReason, status metav1.ConditionStatus, writer Writer, verdict Verdict, meaning string) Reason {
@@ -303,8 +317,8 @@ func on(condType rtv1.ConditionType, reason rtv1.ConditionReason, status metav1.
 func Table() []Reason {
 	return append([]Reason{
 		Available, ScaledToZero, Creating, Unavailable, RemoteChartUnreachable, SchemaDefaultContradiction, ValuesSchemaMissing, DerivedNameTooLong, Deleting,
-		runtimeNotObserved, runtimeCreating, runtimeDeleting,
-		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused,
+		runtimeNotObserved, runtimeCreating, runtimeDeleting, runtimeCreateWithheld, runtimeUpdateWithheld,
+		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedPolicyInvalid, runtimeSyncedDeletionPolicyInvalid,
 	}, nonReady()...)
 }
 
@@ -314,5 +328,7 @@ func RuntimeConstructors() []rtv1.Condition {
 	return []rtv1.Condition{
 		rtv1.NotObserved(), rtv1.Creating(), rtv1.Deleting(),
 		rtv1.ReconcileSuccess(), rtv1.ReconcileError(errors.New("e")), rtv1.ReconcilePaused(),
+		rtv1.CreateWithheldByPolicy("m"), rtv1.UpdateWithheldByPolicy("m"),
+		rtv1.ManagementPolicyInvalid("m"), rtv1.DeletionPolicyInvalid("m"),
 	}
 }
