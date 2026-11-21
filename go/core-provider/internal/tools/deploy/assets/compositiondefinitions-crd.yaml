@@ -518,15 +518,23 @@ spec:
                       Kinds lists each kind the release manifest contains with its object count, by count
                       descending, then apiVersion, then kind. At most ChartContentsMaxKinds entries.
                     items:
-                      description: ChartContentsKind is one kind of the rendered release
-                        manifest and how many objects of it.
+                      description: |-
+                        ChartContentsKind is one kind of the rendered release manifest and how many objects of it.
+
+                        The length bounds are ENFORCED HERE, at admission, not only by the writer (installer, reviewing
+                        #605: "a bound that lives in the writer is a bound a different writer does not have"). They are the
+                        Kubernetes name limits, generous on purpose: a cap tighter than a valid name would make the
+                        definition's status write fail. apiVersion: a DNS-1123 subdomain group (253) + "/" + a DNS-1123
+                        label version (63) = 317. kind: 253, an upper bound no valid kind exceeds.
                       properties:
                         apiVersion:
+                          maxLength: 317
                           type: string
                         count:
                           minimum: 1
                           type: integer
                         kind:
+                          maxLength: 253
                           type: string
                       required:
                       - apiVersion
