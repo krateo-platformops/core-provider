@@ -717,9 +717,17 @@ type ChartContents struct {
 }
 
 // ChartContentsKind is one kind of the rendered release manifest and how many objects of it.
+//
+// The length bounds are ENFORCED HERE, at admission, not only by the writer (installer, reviewing
+// #605: "a bound that lives in the writer is a bound a different writer does not have"). They are the
+// Kubernetes name limits, generous on purpose: a cap tighter than a valid name would make the
+// definition's status write fail. apiVersion: a DNS-1123 subdomain group (253) + "/" + a DNS-1123
+// label version (63) = 317. kind: 253, an upper bound no valid kind exceeds.
 type ChartContentsKind struct {
+	// +kubebuilder:validation:MaxLength=317
 	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
+	// +kubebuilder:validation:MaxLength=253
+	Kind string `json:"kind"`
 	// +kubebuilder:validation:Minimum=1
 	Count int `json:"count"`
 }

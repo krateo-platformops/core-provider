@@ -136,4 +136,21 @@ func TestEnvtest_ChartContentsRoundTripsTheCRD(t *testing.T) {
 	if _, err := writeContents(create("not-default"), compositiondefinitionsv1alpha1.ChartContents{ChartVersion: "1.0.0", Values: "custom"}); err == nil {
 		t.Error(`values "custom" accepted; the CRD allows only "default"`)
 	}
+
+	// The name bounds are enforced at admission, not only by the writer. POSITIVE CONTROL first: a
+	// name exactly at each limit (a 253-char DNS subdomain group + "/" + a 63-char version = 317; a
+	// 253-char kind) is ACCEPTED, so the cap cannot be refusing a valid Kubernetes name. Then one
+	// byte past each limit is refused.
+	atLimit := compositiondefinitionsv1alpha1.ChartContentsKind{APIVersion: strings.Repeat("g", 253) + "/" + strings.Repeat("v", 63), Kind: strings.Repeat("K", 253), Count: 1}
+	if _, err := writeContents(create("name-at-limit"), compositiondefinitionsv1alpha1.ChartContents{ChartVersion: "1.0.0", Values: "default", Kinds: []compositiondefinitionsv1alpha1.ChartContentsKind{atLimit}}); err != nil {
+		t.Errorf("control: names exactly at the limits refused: %v", err)
+	}
+	for name, k := range map[string]compositiondefinitionsv1alpha1.ChartContentsKind{
+		"api-too-long":  {APIVersion: strings.Repeat("g", 254) + "/" + strings.Repeat("v", 63), Kind: "K", Count: 1},
+		"kind-too-long": {APIVersion: "v1", Kind: strings.Repeat("K", 254), Count: 1},
+	} {
+		if _, err := writeContents(create(name), compositiondefinitionsv1alpha1.ChartContents{ChartVersion: "1.0.0", Values: "default", Kinds: []compositiondefinitionsv1alpha1.ChartContentsKind{k}}); err == nil {
+			t.Errorf("%s: accepted; the CRD must bound apiVersion at 317 and kind at 253", name)
+		}
+	}
 }
