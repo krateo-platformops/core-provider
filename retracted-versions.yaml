@@ -1,0 +1,28 @@
+# Published versions that must not be pinned.
+#
+# A tag cannot be withdrawn: it stays in the registry and looks like any other release. This list is
+# how a release is marked bad where a pinning session will see it. installer's CI reads it (from this
+# repo's root, see installer's .github/retraction-sources.yaml) and refuses a pin on a listed version,
+# so nothing depends on anyone having been told.
+#
+# An entry is a claim this repo makes about its OWN release, so its reason must say what was measured
+# and what was inferred. A version that is merely SUPERSEDED by a better one (no worse than what it
+# replaces) does not belong here: listing it would claim it is worse than its neighbours.
+#
+# `charts` names charts this repo publishes (go/core-provider/retracted_versions_test.go enforces the
+# set from .github/scripts/verify-release-artifacts.sh). `use` is the version to pin instead.
+retracted:
+  # A range is written as the explicit list of its versions, not as bounds: installer's
+  # check-retracted-versions.py accepts `version:` or a non-empty `versions:` list, never both.
+  - versions: [2.13.85, 2.13.86, 2.13.87, 2.13.88, 2.13.89, 2.13.90, 2.13.91, 2.13.92, 2.13.93, 2.13.94]
+    charts: [core-provider]
+    use: 2.13.95
+    reason: >-
+      core-provider#484: adding a served version to a CompositionDefinition's CRD kept every vacated
+      version through its grace period, so the CRD could carry a third large schema version.
+      MEASURED (envtest, real etcd): a CRD with a third ~560 KB-schema version is refused with
+      "etcdserver: request is too large". INFERRED from the code, not reproduced end to end on a
+      cluster: on a definition whose versions each carry roughly 500 KB or more of schema, the
+      controller then wedges retrying that write. Only the core-provider chart (the controller) is
+      affected; core-provider-crds at the same versions is not. Fixed in 2.13.95 (#489); any later
+      release also has the fix.
