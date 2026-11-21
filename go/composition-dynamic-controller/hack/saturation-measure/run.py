@@ -37,7 +37,17 @@ API = "composition.krateo.io/v0-2-0"
 KIND = "Loadchart"
 CHART = "oci://ghcr.io/krateo-platformops/charts/core-provider"
 EXPECTED_CONTEXT = "gke_integration-test-431120_us-central1-a_cpu-sat-66"
-RESULTS = os.path.expanduser("~/krateo/cpu-sat-66-results/results.jsonl")
+RESULTS = os.path.expanduser(os.environ.get("RESULTS", "~/krateo/cpu-sat-66-results/results.jsonl"))
+# POOL mode (core-provider 2.13.111+, docs/design/cdc-pooling.md section 5c): the load definition sets
+# spec.controller.pool: POOL, and its reconciles run in that pool's shared cdc process instead of the
+# dedicated loadcharts-v0-2-0-controller. The pool's Deployment and process ConfigMap are found by their
+# krateo.io/cdc-pool label on the live objects, never by a constructed name. The saturation keys reach
+# the pool through cdc.env (the chart renders cdc.env into the pool's process ConfigMap too).
+POOL = os.environ.get("POOL", "")
+# The pool is sized like the dedicated arm so the only difference is pool mode: workers 16 (the
+# dedicated arm's COMPOSITION_CONTROLLER_WORKERS; the chart default 10 would cap concurrency lower and
+# measure that instead), and the dedicated arm's requests and memory limit, with the arm's CPU limit.
+POOL_WORKERS = "16"
 STEADY_WAIT = 45  # the issue discards the first ~40s; the backlog starts after it
 DRAIN_TIMEOUT = 1800
 MAX_SAMPLE_GAP = 45  # a sample takes a few seconds; more than this means the driver was not running
@@ -84,6 +94,22 @@ def sentinels(marker):
     return sum(1 for c in items if c.get("data", {}).get("marker") == marker), len(items)
 
 
+def by_pool_label(kind):
+    items = json.loads(kubectl("-n", CTRL_NS, "get", kind, "-l", f"krateo.io/cdc-pool={POOL}", "-o", "json"))["items"]
+    if kind == "cm":
+        items = [i for i in items if "COMPOSITION_CONTROLLER_POOL_INDEX" in i.get("data", {})]
+    if len(items) != 1:
+        sys.exit(f"want one pool {kind} labelled krateo.io/cdc-pool={POOL}, found {[i['metadata']['name'] for i in items]}")
+    return items[0]["metadata"]["name"]
+
+
+def resolve_controller():
+    """In pool mode, point CDC and ENV_CM at the live pool objects (dedicated mode keeps the constants)."""
+    global CDC, ENV_CM
+    if POOL:
+        CDC, ENV_CM = by_pool_label("deploy"), by_pool_label("cm")
+
+
 def cdc_pod():
     pods = json.loads(kubectl("-n", CTRL_NS, "get", "pods", "-o", "json"))["items"]
     live = [p for p in pods if p["metadata"]["name"].startswith(CDC) and "deletionTimestamp" not in p["metadata"]]
@@ -97,12 +123,19 @@ def set_arm(limit, threshold):
     sh("helm", "upgrade", "core-provider", CHART, "--version", os.environ["CHART_VERSION"], "-n", "krateo-system",
        "-f", f"{HERE}/values-base.yaml",
        "--set", f"cdc.resources.limits.cpu={limit}",
+       # Rendered only when a definition names a pool, so harmless on dedicated arms.
+       "--set", f"cdc.pool.default.workers={POOL_WORKERS}",
+       "--set", "cdc.pool.default.resources.requests.cpu=50m",
+       "--set", "cdc.pool.default.resources.requests.memory=128Mi",
+       "--set", "cdc.pool.default.resources.limits.memory=512Mi",
+       "--set", f"cdc.pool.default.resources.limits.cpu={limit}",
        "--set-string", f"cdc.env.COMPOSITION_CONTROLLER_SATURATION_ENABLED={'true' if on else 'false'}",
        "--set-string", f"cdc.env.COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD={threshold if on else '0'}",
        "--wait", "--timeout", "5m")
     # The old core-provider replica must be GONE, not merely superseded: until it exits it keeps
     # reconciling and restarting the cdc (two replicas, no leader election, during every upgrade).
     settle("one core-provider pod", one_core_provider)
+    resolve_controller()
 
     # core-provider applies this on its own reconcile, so wait for what the cdc will actually read.
     # Ready stays True while a bad value blocks every rollout, so Synced and the ConfigMap are the
@@ -110,6 +143,8 @@ def set_arm(limit, threshold):
     want = {"COMPOSITION_CONTROLLER_SATURATION_ENABLED": "true" if on else "false",
             "COMPOSITION_CONTROLLER_CPU_PRESSURE_THRESHOLD": threshold if on else "0",
             "OTEL_ENABLED": "true", "OTEL_EXPORT_INTERVAL": "5s"}
+    if POOL:
+        want["COMPOSITION_CONTROLLER_POOL_WORKERS"] = POOL_WORKERS
     deadline = time.time() + 300
     while True:
         data = json.loads(kubectl("-n", CTRL_NS, "get", "cm", ENV_CM, "-o", "json")).get("data", {})
@@ -310,6 +345,7 @@ def one(n, limit, threshold, run, count, payload, mode="steady"):
                                    f"involvedObject.name={name},reason=Unhealthy", "-o", "json"))["items"]
     result = {
         "mode": mode, "limit": limit, "threshold": threshold, "run": run,
+        "pool": POOL or None, "controller": CDC,
         "objects": n, "count": count, "payloadKB": payload,
         "chart": os.environ["CHART_VERSION"], "drained": done, "sentinels": total, "complete": done == n,
         "drain_s": round(t1 - t0, 1),
@@ -353,6 +389,8 @@ def main():
     a = ap.parse_args()
     guard_context()
     globals()["DRAIN_TIMEOUT"] = a.drain_timeout
+    if a.cmd != "setup":
+        resolve_controller()
 
     if a.cmd == "setup":
         apply_all(a.objects, "setup", a.count, a.payload)
@@ -373,7 +411,8 @@ def main():
         for line in open(RESULTS):
             r = json.loads(line)
             # same_pod False is a discard even on records written before the harness recorded it as one.
-            if r.get("chart") == os.environ["CHART_VERSION"] and not r.get("discard") and r.get("same_pod") is not False:
+            if (r.get("chart") == os.environ["CHART_VERSION"] and (r.get("pool") or "") == POOL
+                    and not r.get("discard") and r.get("same_pod") is not False):
                 key = (r["mode"], r["limit"], r["threshold"], r["run"])
                 done[key] = done.get(key, 0) + 1
 
