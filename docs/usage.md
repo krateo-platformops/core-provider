@@ -16,7 +16,17 @@ timestamp: 2026-08-07T00:00:00Z
   conversion and the `krateo.io/composition-version` label is stamped by a
   `MutatingAdmissionPolicy` (GA in `admissionregistration.k8s.io/v1` at 1.36).
 - Charts you manage must ship a **`values.schema.json`** and be a single-root tgz —
-  the CRD is generated from that schema; a chart without it fails CRD generation.
+  the CRD is generated from that schema. A chart without it reads
+  `Ready=False/ValuesSchemaMissing`, **unless the definition opts in to inference**
+  with the annotation `krateo.io/values-schema: infer` (#568). The schema is then
+  inferred from the chart's `values.yaml` files (plumbing `valuesschema`, rules v1):
+  typed-open, every values.yaml leaf a `default`, no authored constraints.
+  - The definition reads `ValuesSchemaAuthored=False/InferredFromValues`, naming the
+    rules version and the paths that accept any value, and
+    `SchemaFullyEnforced=Unknown/SchemaInferred`. Ready is unaffected.
+  - An authored `values.schema.json` always wins over the annotation.
+  - Any other annotation value is not an opt-in: the definition stays
+    `ValuesSchemaMissing`, and the message names the value.
 - The `apiRefRBAC` feature (on by default) expects the **authn** component's
   serviceaccount login strategy (CRD `serviceaccount.authn.krateo.io`) and
   **snowplow** in-cluster; set `apiRefRBAC.enabled=false` on clusters without them
