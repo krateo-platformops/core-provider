@@ -250,6 +250,14 @@ var (
 	runtimeSyncedDeferred = on(condition.TypeSynced, condition.ReasonReconcileDeferred, metav1.ConditionFalse, WriterRuntime,
 		"worker: the runtime chose not to call the handler this pass, an endpoint's rate limit or its own concurrency limit; Ready is not touched",
 		Clearance{NextPass, "the message names the next attempt when the server gave one"})
+	// unstructured-runtime v1.31.0 (#110, #117). krateo.io/management-policy is an annotation, so
+	// nothing validates it at admission: these two are the only detector of a bad value.
+	runtimeSyncedPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonInvalid, metav1.ConditionFalse, WriterRuntime,
+		"worker: krateo.io/management-policy does not parse (an unknown verb, or a stray separator), so the runtime acts on nothing, as observe; it wins over every other pass outcome on Synced (the pass's own events and errors still occur); the message names the annotation and the bad token",
+		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"})
+	runtimeSyncedDeletionPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
+		"worker: krateo.io/deletion-policy is neither delete nor orphan, so the external resource will be KEPT on delete; reported on every pass while set, not only while deleting; the message names the value",
+		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"})
 )
 
 // ChartRenderable, written by the cdc from chart-inspector's answer (chartresolved.go).
@@ -339,6 +347,7 @@ func Table() []Reason {
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,
+		runtimeSyncedPolicyInvalid, runtimeSyncedDeletionPolicyInvalid,
 		ChartRenderable, ChartUnservedKind, ChartValuesSchemaViolation, ChartTemplateRefused, ChartInspectorRejected, ChartInspectorUnavailable,
 		RBACApplied, RBACApplyFailed, RBACNamespaceTerminating, RBACNotEvaluated,
 		ApiResolved, ApiPartiallyResolved, ApiStageOutcomesUnknown, ApiEmpty, ApiAuthnUnreachable, ApiAuthnError, ApiAuthnRejected, ApiResolveFailed, apiAuthnPassthrough,
@@ -363,5 +372,7 @@ func RuntimeConstructors() []metav1.Condition {
 		condition.ReconcileError(errors.New("e")),
 		condition.ReconcilePaused(),
 		condition.ReconcileDeferred("k", time.Time{}),
+		condition.ManagementPolicyInvalid("m"),
+		condition.DeletionPolicyInvalid("m"),
 	}
 }
