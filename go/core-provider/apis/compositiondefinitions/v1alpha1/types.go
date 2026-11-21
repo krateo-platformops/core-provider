@@ -564,6 +564,13 @@ type CompositionDefinitionStatus struct {
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
+	// Contents is what the chart renders at its DEFAULT values: the kinds, and how many objects of
+	// each, of the release manifest helm would install (core-provider#599). It is for display (the
+	// portal's blueprint page); it never affects Ready. A composition's own values can change the
+	// counts, which is why Values is always "default".
+	// +optional
+	Contents *ChartContents `json:"contents,omitempty"`
+
 	// ScaleToZero is the scale-to-zero reconciler's state for a definition that opted in (#393).
 	// Absent otherwise. Written ONLY by that reconciler, with a merge patch on this field; the
 	// definition's main reconciler reads it to report Ready and ControllerActive.
@@ -660,4 +667,59 @@ func (mg *CompositionDefinition) SetConditions(c ...rtv1.Condition) {
 // GetCondition of this CompositionDefinition.
 func (mg *CompositionDefinition) GetCondition(ct rtv1.ConditionType) rtv1.Condition {
 	return mg.Status.GetCondition(ct)
+}
+
+// ChartContentsMaxKinds bounds ChartContents.Kinds; the kinds beyond it are counted in Omitted.
+const ChartContentsMaxKinds = 50
+
+// ChartContentsUnknownMaxLength bounds ChartContents.Unknown, in bytes (the CRD MaxLength above).
+const ChartContentsUnknownMaxLength = 1024
+
+// ChartContents is what a definition's chart renders at its default values (core-provider#599).
+//
+// It is the release MANIFEST, as `helm get manifest` would show it after an install at default
+// values: rendered templates only. Hooks are excluded (helm keeps them out of the manifest and
+// deletes most of them after they run), and so are the files in crds/ (helm installs them apart
+// from the release and never tracks them). Objects rendered by subcharts are included.
+//
+// Exactly one of Kinds and Unknown is set. Unknown names why the chart could not be rendered at its
+// defaults (a value the chart requires, a values.schema.json the defaults violate, a missing
+// dependency), so an empty Kinds is never read as "creates nothing".
+type ChartContents struct {
+	// ChartVersion is the version of the chart this was rendered from. After a chart version
+	// change it still names the previous version until the new render is written.
+	ChartVersion string `json:"chartVersion"`
+
+	// Values is always "default": the chart's own values, no composition's.
+	// +kubebuilder:validation:Enum=default
+	Values string `json:"values"`
+
+	// Kinds lists each kind the release manifest contains with its object count, by count
+	// descending, then apiVersion, then kind. At most ChartContentsMaxKinds entries.
+	// +optional
+	// +kubebuilder:validation:MaxItems=50
+	// +listType=atomic
+	Kinds []ChartContentsKind `json:"kinds,omitempty"`
+
+	// Omitted is the number of kinds not listed because Kinds is capped. ABSENT (omitempty) when the
+	// list is complete, never a literal 0: a reader treats absent as 0.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Omitted int `json:"omitted,omitempty"`
+
+	// Unknown, when set, says why the chart could not be rendered at its default values; Kinds is
+	// then empty. It is helm's error from an OFFLINE render (no cluster client), so it carries no
+	// apiserver text; its content comes from the chart's own files and default values. At most
+	// ChartContentsUnknownMaxLength bytes, truncated with a " ... (truncated)" mark.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Unknown string `json:"unknown,omitempty"`
+}
+
+// ChartContentsKind is one kind of the rendered release manifest and how many objects of it.
+type ChartContentsKind struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	// +kubebuilder:validation:Minimum=1
+	Count int `json:"count"`
 }

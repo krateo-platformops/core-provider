@@ -157,6 +157,34 @@ value that does not parse acts as `observe` only. Measured on envtest (`TestEnvt
 - `krateo.io/deletion-policy: orphan` keeps the release on delete, whatever the management policy
   allows; so does a deletion-policy value that is neither `delete` nor `orphan`.
 
+## What a definition's chart creates: `status.contents`
+
+A CompositionDefinition's status says what its chart renders **at the chart's default values**
+(core-provider#599). The portal's blueprint page uses it:
+
+```yaml
+status:
+  contents:
+    chartVersion: 0.3.0     # the chart this was rendered from
+    values: default         # always: a composition's own values can change the counts
+    kinds:                  # by count desc, then apiVersion, then kind; at most 50
+      - {apiVersion: rds.services.k8s.aws/v1alpha1, kind: DBInstance, count: 1}
+      - {apiVersion: ec2.services.k8s.aws/v1alpha1, kind: Subnet, count: 3}
+    omitted: 0              # kinds not listed because the list is capped
+    unknown: ""             # set INSTEAD of kinds when the chart cannot render at its defaults
+```
+
+- It is the **release manifest** `helm install` would record: rendered templates, subcharts included,
+  with helm's dependency conditions applied. **Hooks** (helm keeps them out of the manifest) and the
+  **`crds/`** files (installed apart from the release) are not counted.
+- core-provider renders the chart itself, offline, with helm's library: no cluster call, no
+  chart-inspector. `lookup` returns nothing, as in `helm template`.
+- A chart that needs a value it does not default, whose defaults violate its `values.schema.json`, or
+  whose declared dependency is not vendored, gets `unknown` with the reason, never an empty list.
+- After a chart version change, the previous contents stay, with their own `chartVersion`, until the
+  new chart is readable and its render replaces them.
+- It never affects Ready.
+
 ## Consuming the docs at the right version
 
 Image tag == chart version == repo tag (one version line). Read this bundle at the
