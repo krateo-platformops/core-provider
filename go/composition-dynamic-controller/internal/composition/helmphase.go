@@ -110,10 +110,14 @@ func upgradeConfig(ac *helmconfig.ActionConfig) *helmconfig.UpgradeConfig {
 //
 // hold is set for a retiring controller (retiringController, core-provider#519): Reconcile then heals
 // drift but never moves the release to a changed chart or values.
-func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context) error, hold bool) *helmconfig.UpgradeConfig {
+func reconcileConfig(ac *helmconfig.ActionConfig, record func(ctx context.Context) error, hold, writeNothing bool) *helmconfig.UpgradeConfig {
 	cfg := upgradeConfig(ac)
 	cfg.BeforeRevision = record
 	cfg.HoldDesiredStateChange = hold
+	// core-provider#597: a withheld update observes the release and writes NOTHING to it (plumbing
+	// v1.102.0). upgradeConfig sets none of Force, Wait, WaitForJobs or Atomic, which WriteNothing
+	// refuses.
+	cfg.WriteNothing = writeNothing
 	return cfg
 }
 

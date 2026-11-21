@@ -114,6 +114,9 @@ var unevaluatedCauses = []unevaluatedCause{causeNoReadyCondition, causeAssertedR
 type childEval struct {
 	state childState
 	cause unevaluatedCause
+	// detail, for a childFailed child, is the reason the parent's message names beside the child, when
+	// the reason is a deliberate refusal a reader would otherwise take for a malfunction (#597).
+	detail string
 }
 
 func is(s childState) childEval { return childEval{state: s} }
@@ -283,7 +286,11 @@ func (h *handler) rollupManagedChildren(ctx context.Context, dyn dynamic.Interfa
 		ev := h.childEvalOf(ctx, dyn, ref)
 		switch ev.state {
 		case childFailed:
-			failing = append(failing, childID(ref))
+			id := childID(ref)
+			if ev.detail != "" {
+				id += " (" + ev.detail + ")"
+			}
+			failing = append(failing, id)
 		case childConverging:
 			// Named, not just counted. The previous "%d of %d managed children are not ready"
 			// gave an operator a number and no way to reach the child: status.managed lists
@@ -1213,6 +1220,19 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 			// named the state, the less this rollup understood it. A generic Unavailable would have
 			// bucketed correctly all along.
 			return is(childFailed)
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == conditionreason.ReasonCreateWithheldByPolicy:
+			// #110 D4 / #597: the child's krateo.io/management-policy withholds create, so it is not
+			// installed and will not be until a human changes the policy. FAILED, not converging: a
+			// parent reading "Creating" would wait forever on a deliberate refusal. Distinct from
+			// NoCreateVerbDeclared below (the API declares no create; the remedy is a declaration
+			// change), so the parent names this reason beside the child. The literal is plumbing
+			// managementpolicy's, which every writer of it reports.
+			return childEval{state: childFailed, detail: conditionreason.ReasonCreateWithheldByPolicy}
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == conditionreason.ReasonRecoveryWithheldByPolicy:
+			// #597: the child's release is stuck in a helm operation and its policy withholds the
+			// rollback that would recover it. FAILED: nothing clears it but a human or a policy change,
+			// so a parent counting it converging would wait forever. Named beside the child, as above.
+			return childEval{state: childFailed, detail: conditionreason.ReasonRecoveryWithheldByPolicy}
 		case stringField(cm, "reason") == "CreateUnreachable",
 			stringField(cm, "reason") == "NoCreateVerbDeclared",
 			stringField(cm, "reason") == "NoIdentifierRecorded":

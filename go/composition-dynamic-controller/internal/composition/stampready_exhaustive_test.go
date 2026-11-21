@@ -40,6 +40,8 @@ var importedStringConsts = map[string]string{
 	"conditionreason.ReasonHelmOperationInProgress":  conditionreason.ReasonHelmOperationInProgress,
 	"conditionreason.ReasonPendingHelmOperation":     conditionreason.ReasonPendingHelmOperation,
 	"conditionreason.ReasonHooksMayNotHaveRun":       conditionreason.ReasonHooksMayNotHaveRun,
+	// #597: produced by withUpdateWithheld (managementpolicy.go).
+	"conditionreason.ReasonUpdateWithheldByPolicy": conditionreason.ReasonUpdateWithheldByPolicy,
 }
 
 // resolveSelector reads a qualified identifier (pkg.CONST) into its string value.

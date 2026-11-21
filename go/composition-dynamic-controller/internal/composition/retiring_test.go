@@ -30,10 +30,10 @@ func TestRetiringController(t *testing.T) {
 
 // The hold reaches plumbing's Reconcile for a retiring controller, and only for it.
 func TestReconcileConfigCarriesTheHold(t *testing.T) {
-	if cfg := reconcileConfig(&helmconfig.ActionConfig{}, nil, true); !cfg.HoldDesiredStateChange {
+	if cfg := reconcileConfig(&helmconfig.ActionConfig{}, nil, true, false); !cfg.HoldDesiredStateChange {
 		t.Error("retiring: HoldDesiredStateChange not set")
 	}
-	if cfg := reconcileConfig(&helmconfig.ActionConfig{}, nil, false); cfg.HoldDesiredStateChange {
+	if cfg := reconcileConfig(&helmconfig.ActionConfig{}, nil, false, false); cfg.HoldDesiredStateChange {
 		t.Error("current: HoldDesiredStateChange set")
 	}
 }

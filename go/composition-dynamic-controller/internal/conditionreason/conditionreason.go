@@ -23,6 +23,7 @@ package conditionreason
 import (
 	"errors"
 	compositioncondition "github.com/krateo-platformops/composition-dynamic-controller/internal/condition"
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"time"
@@ -46,6 +47,15 @@ const (
 	// HooksMayNotHaveRun: krateo.io/hooks-unverified is set; an interrupted helm operation's hooks
 	// may not have run (core-provider#563).
 	ReasonHooksMayNotHaveRun = "HooksMayNotHaveRun"
+	// CreateWithheldByPolicy and UpdateWithheldByPolicy (unstructured-runtime#110 D4, core-provider#597):
+	// krateo.io/management-policy withholds the verb. The literals are plumbing managementpolicy's, the
+	// one definition both runtimes report.
+	ReasonCreateWithheldByPolicy = managementpolicy.ReasonCreateWithheld
+	ReasonUpdateWithheldByPolicy = managementpolicy.ReasonUpdateWithheld
+	// RecoveryWithheldByPolicy (core-provider#597, Diego 2026-11-21): this controller's own. A release
+	// stuck in a helm operation is not rolled back, because the rollback is a write that
+	// krateo.io/management-policy withholds.
+	ReasonRecoveryWithheldByPolicy = "RecoveryWithheldByPolicy"
 )
 
 // Writer is who writes a reason on a composition.
@@ -149,6 +159,15 @@ var (
 		"stampReady: no child could be assessed, and at least one read was refused by RBAC (#318)", Clearance{Indefinite, "until the controller may read its children (an RBAC change)"})
 	InventoryNotRecorded = ready(ReasonInventoryNotRecorded, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: the managed-children inventory was never recorded", Clearance{NextPass, "the next Update records the inventory (core-provider#326)"})
+	CreateWithheldByPolicy = ready(ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
+		"Observe: the release is not installed and krateo.io/management-policy withholds create, so nothing is installed (#110 D4, #597); the message names the policy value and how to allow create",
+		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create, or installs the release by other means"})
+	UpdateWithheldByPolicy = ready(ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterCDC,
+		"stampReady: healthy, and krateo.io/management-policy withholds update, so the INSTALLED chart is FROZEN: a changed chart version or values, or drift, is reported and not applied, so the release may not be at the definition's chart version or values (#110 D4/D7, #597); the message names the installed and wanted versions, the drifted children, or why drift could not be assessed. Replaces only Available: a failing rollup keeps its own reason, and its message notes the withheld update",
+		Clearance{Indefinite, "until krateo.io/management-policy allows update, or the definition's chart and the composition's values return to what is installed"})
+	RecoveryWithheldByPolicy = ready(ReasonRecoveryWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
+		"Observe: the release is stuck in a helm operation past its grace period (or its controller is gone), and the recovery, a helm rollback, is a write krateo.io/management-policy withholds (it withholds update), so the release is not rolled back (#597); the message names the helm status, how long it has been pending, and what would recover it",
+		Clearance{Indefinite, "until a human recovers the release (for example a helm rollback), or krateo.io/management-policy allows update and the next reconcile recovers it"})
 )
 
 // The reasons unstructured-runtime writes on the same compositions. Unexported: the cdc must not
@@ -316,7 +335,7 @@ func Table() []Reason {
 	return []Reason{
 		Available, AvailablePartialCoverage, ReconcileGracefullyPaused,
 		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation, HooksMayNotHaveRun,
-		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded,
+		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded, CreateWithheldByPolicy, UpdateWithheldByPolicy, RecoveryWithheldByPolicy,
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,
 		runtimeSyncedSuccess, runtimeSyncedError, runtimeSyncedPaused, runtimeSyncedDeferred,

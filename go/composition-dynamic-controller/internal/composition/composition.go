@@ -33,6 +33,7 @@ import (
 	"github.com/krateo-platformops/plumbing/helm/v3"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	"github.com/krateo-platformops/plumbing/maps"
 	"github.com/krateo-platformops/plumbing/tracecontext"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
@@ -415,6 +416,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		return controller.ExternalObservation{}, fmt.Errorf("getting package info: %w", err)
 	}
 	retiring, retiringWhy := retiringController(pkg)
+	// core-provider#597: the same decision the runtime gates the dispatch with, read once for this pass.
+	decision := meta.ManagementDecision(mg)
+	updateWithheld := !decision.May(managementpolicy.Update)
 
 	hc, err := helm.NewClient(h.kubeconfig, append(h.helmCacheOpts(),
 		helm.WithNamespace(mg.GetNamespace()),
@@ -448,6 +452,19 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			h.eventRecorder.Event(mg, event.Normal(reasonRetiringLeftInstall, "Observe",
 				"Release not found; this controller is retiring and leaves the install to the current version's controller: "+retiringWhy))
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		}
+		if !decision.May(managementpolicy.Create) {
+			// #597 (D4): nothing is installed, and Ready says so as a refusal, not as "creating". The
+			// condition is RETURNED, not written here: the runtime persists a handler's conditions on
+			// every branch of its absent-resource handling (unstructured-runtime #241), so this cannot
+			// race its own status write.
+			log.Info("Release not found, and the management policy withholds create; nothing installed",
+				"policy", policyValue(mg))
+			return controller.ExternalObservation{
+				ResourceExists:   false,
+				ResourceUpToDate: false,
+				Conditions:       []metav1.Condition{conditionreason.CreateWithheldByPolicy.WithMessage(createWithheldMessage(mg, decision))},
+			}, nil
 		}
 		log.Debug("Release not found.")
 		return controller.ExternalObservation{
@@ -549,6 +566,30 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			}
 			if uerr != nil {
 				log.Debug("Could not record the pending-operation condition", "error", uerr)
+			}
+			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		}
+		// #597 (Diego, 2026-11-21): the recovery below is a helm ROLLBACK, a write to the release, and
+		// a withheld update withholds every write to the release. So it is not attempted; Ready says
+		// the release is stuck and that only a human (or allowing update) can recover it.
+		//
+		// The observation is {exists, up to date}, the same stand-down as the in-flight branch above,
+		// and deliberately: exists, so the runtime never dispatches a Create (an install over a stuck
+		// release); up to date, so it has no drift to act on and dispatches no Update. The update is
+		// withheld anyway, but up to date also keeps the runtime off its withheld-update path, which
+		// would describe drift this pass never measured: the reconcile that measures it cannot run
+		// while helm holds the pending lock.
+		if updateWithheld {
+			log.Info("Release stuck in an incomplete helm operation, and the management policy withholds update, so it is not rolled back",
+				"status", string(rel.Status), "pendingFor", pendingFor.String(), "orphan", orphan, "policy", policyValue(mg))
+			unstructuredtools.SetConditions(mg, conditionreason.RecoveryWithheldByPolicy.WithMessage(
+				recoveryWithheldMessage(mg, decision, string(rel.Status), pendingFor, orphan, why)))
+			_, uerr := updateStatus(ctx, mg, updateOpts)
+			if err := pendingConditionWriteOutcome(uerr); err != nil {
+				return controller.ExternalObservation{}, err
+			}
+			if uerr != nil {
+				log.Debug("Could not record the recovery-withheld condition", "error", uerr)
 			}
 			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 		}
@@ -684,8 +725,23 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			TakeOwnership: true,
 			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
 			Timeout: helmOperationTimeout,
-		}, recordRevision, retiring))
+		}, recordRevision, retiring, updateWithheld))
 	})
+	// #597: under a withheld update the reconcile wrote nothing, and two of its errors mean only that
+	// drift could not be MEASURED (a webhook denied the dry run, or the stored manifest needs a
+	// repair that would be a write). Not a reconcile failure: Ready says why (Diego, 2026-11-21).
+	withheld := ""
+	if updateWithheld && err != nil && driftUnassessable(err) {
+		withheld = unassessableMessage(mg, decision, installedChartVersion(rel), err)
+		log.Info("Updates are withheld by the management policy, and drift could not be assessed", "error", err.Error())
+		err = nil
+		if reconcileRes == nil {
+			reconcileRes = &helmconfig.ReconcileResult{WriteWithheld: true, ObjectsComplete: true}
+		}
+		if reconcileRes.Release == nil {
+			reconcileRes.Release = rel
+		}
+	}
 	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
 	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
 		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
@@ -702,6 +758,18 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, fmt.Errorf("reconciling helm chart: %w", err), updateOpts)
 	}
 	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Observe")
+	if updateWithheld && withheld == "" {
+		withheld = updateWithheldMessage(mg, decision, reconcileRes, installedChartVersion(rel), pkg.Version)
+		if withheld != "" {
+			log.Info("Updates are withheld by the management policy; nothing applied", "withheld", withheld)
+		}
+	}
+	// What status.helmChartVersion records: the chart that is RUNNING. Under a withheld update that is
+	// the stored release's, not the definition's (installer: "healthy" must not read as "arrived").
+	chartVersion := pkg.Version
+	if updateWithheld {
+		chartVersion = installedChartVersion(rel)
+	}
 
 	// The reconcile converged the cluster in-place. When it detected a real change it also wrote a
 	// fresh revision (reconcileRes.Release); otherwise Release is the stored release. Report the
@@ -816,7 +884,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		digest:          digest,
 		message:         readyMessageAvailable,
 		chartURL:        pkg.URL,
-		chartVersion:    pkg.Version,
+		chartVersion:    chartVersion,
+		updateWithheld:  withheld,
 		releaseStatus:   string(rel.Status),
 		releaseRevision: rel.Revision,
 		releaseName:     rel.Name,
@@ -835,6 +904,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// reconcile previously returned before the checks below and must keep doing so, or this fix
 	// quietly changes which drift reason an operator sees.
 	if selfHealed {
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+	// #597: something would change and the policy withholds it. Reported as not up to date, so the
+	// runtime takes its own withheld-update branch (no Update dispatched), as for any other kind.
+	if updateWithheld && reconcileRes.WouldChange {
 		return controller.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1306,7 +1383,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				PostRenderer:          postrenderLabels,
 				TakeOwnership:         true,
 				Timeout:               helmOperationTimeout, // #410
-			}, recordRevision, retiring))
+			}, recordRevision, retiring, false)) // the runtime dispatches Update only when the policy allows it
 			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
 			if rerr != nil {

@@ -171,6 +171,10 @@ type statusManagerOpts struct {
 	// signature at every caller to return a verdict only one of them wants.
 	absentChildren *[]string
 
+	// updateWithheld, when set, is what a withheld update would have applied (#597): it replaces an
+	// Available verdict with UpdateWithheldByPolicy, and is appended to any other verdict's message.
+	updateWithheld string
+
 	// recordManaged says this reconcile DECODED a release and may therefore write
 	// status.managed -- including writing `[]` when the render produced nothing. Observe leaves it
 	// false: it passes resources: nil on the assumption that Create/Update already recorded them,
@@ -488,7 +492,7 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 	// readyMessageAvailable, not opts.message — same reason as the verdict above. This is the
 	// defaultMsg resolveReady falls back to for the Available arm, so a per-phase string here would
 	// reach the condition even with the verdict fixed.
-	return stampReady(mg, withHooksUnverified(resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), mg), opts.force)
+	return stampReady(mg, withUpdateWithheld(withHooksUnverified(resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), mg), opts.updateWithheld), opts.force)
 }
 
 // stampReady writes the Ready condition a readyOutcome calls for.
@@ -524,6 +528,8 @@ func stampReady(mg *unstructured.Unstructured, out readyOutcome, force bool) err
 		return setHooksMayNotHaveRunStatus(mg, out.message, force)
 	case "Available":
 		return setAvaibleStatus(mg, out.message, force)
+	case conditionreason.ReasonUpdateWithheldByPolicy:
+		return setReadyCondition(mg, conditionreason.UpdateWithheldByPolicy, out.message, force)
 	case ReasonAvailablePartialCoverage:
 		// Available with a different REASON, so a machine can tell Ready=True-over-most from
 		// Ready=True-over-a-minority. Same Status=True and the same stamping call: the unevaluated
