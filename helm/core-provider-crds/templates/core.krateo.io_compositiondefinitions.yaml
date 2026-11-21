@@ -537,14 +537,18 @@ spec:
                     type: array
                     x-kubernetes-list-type: atomic
                   omitted:
-                    description: Omitted is the number of kinds not listed because
-                      Kinds is capped. 0 when it is complete.
+                    description: |-
+                      Omitted is the number of kinds not listed because Kinds is capped. ABSENT (omitempty) when the
+                      list is complete, never a literal 0: a reader treats absent as 0.
                     minimum: 0
                     type: integer
                   unknown:
                     description: |-
                       Unknown, when set, says why the chart could not be rendered at its default values; Kinds is
-                      then empty.
+                      then empty. It is helm's error from an OFFLINE render (no cluster client), so it carries no
+                      apiserver text; its content comes from the chart's own files and default values. At most
+                      ChartContentsUnknownMaxLength bytes, truncated with a " ... (truncated)" mark.
+                    maxLength: 1024
                     type: string
                   values:
                     description: 'Values is always "default": the chart''s own values,

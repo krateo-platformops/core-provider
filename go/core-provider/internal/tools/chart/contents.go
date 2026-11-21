@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"helm.sh/helm/v3/pkg/chart"
@@ -97,7 +98,7 @@ func chartFiles(fsys fs.FS, dir string) ([]*loader.BufferedFile, string, error) 
 // renderContents is the uncached render, a pure function of the files.
 func renderContents(files []*loader.BufferedFile) v1alpha1.ChartContents {
 	unknown := func(version, format string, a ...any) v1alpha1.ChartContents {
-		return v1alpha1.ChartContents{ChartVersion: version, Values: ContentsValues, Unknown: fmt.Sprintf(format, a...)}
+		return v1alpha1.ChartContents{ChartVersion: version, Values: ContentsValues, Unknown: capUnknown(fmt.Sprintf(format, a...))}
 	}
 	chrt, err := loader.LoadFiles(files)
 	if err != nil {
@@ -266,4 +267,22 @@ OUTER:
 		return fmt.Errorf("found in Chart.yaml, but missing in charts/ directory: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// UnknownMaxBytes bounds ChartContents.Unknown. The text is helm's render error, whose length the chart
+// decides (a template can fail with an arbitrarily long message), and it lands in the definition's
+// status on every reconcile; the CRD schema enforces the same bound.
+const UnknownMaxBytes = v1alpha1.ChartContentsUnknownMaxLength
+
+// capUnknown truncates s to UnknownMaxBytes on a rune boundary, marking that it was cut.
+func capUnknown(s string) string {
+	if len(s) <= UnknownMaxBytes {
+		return s
+	}
+	const mark = " ... (truncated)"
+	cut := UnknownMaxBytes - len(mark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + mark
 }

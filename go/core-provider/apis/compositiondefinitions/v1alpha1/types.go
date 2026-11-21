@@ -672,6 +672,9 @@ func (mg *CompositionDefinition) GetCondition(ct rtv1.ConditionType) rtv1.Condit
 // ChartContentsMaxKinds bounds ChartContents.Kinds; the kinds beyond it are counted in Omitted.
 const ChartContentsMaxKinds = 50
 
+// ChartContentsUnknownMaxLength bounds ChartContents.Unknown, in bytes (the CRD MaxLength above).
+const ChartContentsUnknownMaxLength = 1024
+
 // ChartContents is what a definition's chart renders at its default values (core-provider#599).
 //
 // It is the release MANIFEST, as `helm get manifest` would show it after an install at default
@@ -698,14 +701,18 @@ type ChartContents struct {
 	// +listType=atomic
 	Kinds []ChartContentsKind `json:"kinds,omitempty"`
 
-	// Omitted is the number of kinds not listed because Kinds is capped. 0 when it is complete.
+	// Omitted is the number of kinds not listed because Kinds is capped. ABSENT (omitempty) when the
+	// list is complete, never a literal 0: a reader treats absent as 0.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Omitted int `json:"omitted,omitempty"`
 
 	// Unknown, when set, says why the chart could not be rendered at its default values; Kinds is
-	// then empty.
+	// then empty. It is helm's error from an OFFLINE render (no cluster client), so it carries no
+	// apiserver text; its content comes from the chart's own files and default values. At most
+	// ChartContentsUnknownMaxLength bytes, truncated with a " ... (truncated)" mark.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	Unknown string `json:"unknown,omitempty"`
 }
 

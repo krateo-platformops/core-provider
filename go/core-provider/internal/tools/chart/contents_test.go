@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"unicode/utf8"
 
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 )
@@ -180,5 +181,26 @@ func TestContents_DeterministicAndMemoisedByContent(t *testing.T) {
 	c.Kinds[0].Count = 99
 	if Contents(fixture(files), "c").Kinds[0].Count == 99 {
 		t.Error("mutating a returned result changed the memo")
+	}
+}
+
+// #599 / frontend: Unknown is helm's render error, whose length the chart decides; it is capped so a
+// long template error cannot bloat the definition's status. The cut lands on a rune boundary and is
+// marked. CONTROL: a short message is untouched.
+func TestCapUnknown(t *testing.T) {
+	short := "the chart does not render at its default values: boom"
+	if got := capUnknown(short); got != short {
+		t.Fatalf("control: a short message changed: %q", got)
+	}
+	long := strings.Repeat("é", UnknownMaxBytes) // 2 bytes per rune, so the cut can fall mid-rune
+	got := capUnknown(long)
+	if len(got) > UnknownMaxBytes {
+		t.Fatalf("capped to %d bytes, want <= %d", len(got), UnknownMaxBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("the cut split a rune")
+	}
+	if !strings.HasSuffix(got, " ... (truncated)") {
+		t.Fatalf("no truncation mark: %q", got[len(got)-30:])
 	}
 }
