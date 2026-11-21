@@ -501,6 +501,61 @@ spec:
                   - type
                   type: object
                 type: array
+              contents:
+                description: |-
+                  Contents is what the chart renders at its DEFAULT values: the kinds, and how many objects of
+                  each, of the release manifest helm would install (core-provider#599). It is for display (the
+                  portal's blueprint page); it never affects Ready. A composition's own values can change the
+                  counts, which is why Values is always "default".
+                properties:
+                  chartVersion:
+                    description: |-
+                      ChartVersion is the version of the chart this was rendered from. After a chart version
+                      change it still names the previous version until the new render is written.
+                    type: string
+                  kinds:
+                    description: |-
+                      Kinds lists each kind the release manifest contains with its object count, by count
+                      descending, then apiVersion, then kind. At most ChartContentsMaxKinds entries.
+                    items:
+                      description: ChartContentsKind is one kind of the rendered release
+                        manifest and how many objects of it.
+                      properties:
+                        apiVersion:
+                          type: string
+                        count:
+                          minimum: 1
+                          type: integer
+                        kind:
+                          type: string
+                      required:
+                      - apiVersion
+                      - count
+                      - kind
+                      type: object
+                    maxItems: 50
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  omitted:
+                    description: Omitted is the number of kinds not listed because
+                      Kinds is capped. 0 when it is complete.
+                    minimum: 0
+                    type: integer
+                  unknown:
+                    description: |-
+                      Unknown, when set, says why the chart could not be rendered at its default values; Kinds is
+                      then empty.
+                    type: string
+                  values:
+                    description: 'Values is always "default": the chart''s own values,
+                      no composition''s.'
+                    enum:
+                    - default
+                    type: string
+                required:
+                - chartVersion
+                - values
+                type: object
               controller:
                 description: 'Controller: the Deployment that runs this definition''s
                   controller (core-provider#580).'

@@ -951,6 +951,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if err != nil {
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("deriving GVK from chart: %w", err), log)
 	}
+	// #599: what the chart renders at its default values, for display. Written only from a chart
+	// that was read here, so on a chart version change the previous contents stay (with their own
+	// chartVersion) until the new chart is readable and its render replaces them; an unreadable
+	// chart returns above and leaves them as they were. Never for a definition being deleted, and
+	// never a factor in Ready.
+	if !deleted {
+		recordChartContents(cr, chart.Contents(pkgInfo, dir))
+	}
 	// #568 child 6: the one seam for the spec schema. An authored values.schema.json wins; without
 	// one, it is inferred only when the definition opted in (krateo.io/values-schema: infer), and
 	// never for a definition being deleted, whose teardown must not depend on inference.
