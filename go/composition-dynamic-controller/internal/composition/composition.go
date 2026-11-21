@@ -759,16 +759,19 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	}
 	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Observe")
 	if updateWithheld && withheld == "" {
-		withheld = updateWithheldMessage(mg, decision, reconcileRes, installedChartVersion(rel), pkg.Version)
+		withheld = updateWithheldMessage(mg, decision, reconcileRes, installedChartVersion(rel))
 		if withheld != "" {
 			log.Info("Updates are withheld by the management policy; nothing applied", "withheld", withheld)
 		}
 	}
-	// What status.helmChartVersion records: the chart that is RUNNING. Under a withheld update that is
-	// the stored release's, not the definition's (installer: "healthy" must not read as "arrived").
-	chartVersion := pkg.Version
-	if updateWithheld {
-		chartVersion = installedChartVersion(rel)
+	// What status.helmChartVersion records: the chart that is RUNNING, i.e. the release's own chart
+	// version, on every path. Under a withheld update that is the stored release (installer: "healthy"
+	// must not read as "arrived"); otherwise the reconciled one. Not pkg.Version: that is the
+	// definition's spec.chart.version, EMPTY for a chart named by URL with no version pinned, which
+	// left helmChartVersion '' (measured live, 2026-11-21).
+	chartVersion := installedChartVersion(rel)
+	if !updateWithheld && reconcileRes != nil && reconcileRes.Release != nil {
+		chartVersion = installedChartVersion(reconcileRes.Release)
 	}
 
 	// The reconcile converged the cluster in-place. When it detected a real change it also wrote a
@@ -1194,7 +1197,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 		digest:          digest,
 		message:         readyMessageAvailable,
 		chartURL:        pkg.URL,
-		chartVersion:    pkg.Version,
+		chartVersion:    installedChartVersion(rel), // the installed release's chart, not spec.chart.version (empty for a URL chart)
 		releaseStatus:   string(rel.Status),
 		releaseRevision: rel.Revision,
 		releaseName:     rel.Name,
@@ -1462,7 +1465,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		previousDigest:  previousDigest,
 		message:         readyMessageAvailable,
 		chartURL:        pkg.URL,
-		chartVersion:    pkg.Version,
+		chartVersion:    installedChartVersion(upgradedRel), // the upgraded release's chart, not spec.chart.version
 		releaseStatus:   string(upgradedRel.Status),
 		releaseRevision: upgradedRel.Revision,
 		releaseName:     upgradedRel.Name,

@@ -98,11 +98,16 @@ func serveP597Templates(t *testing.T, version string, templates map[string]strin
 
 // p597Getter serves one chart version; the definition's version is the same, so this controller is
 // never retiring.
-type p597Getter struct{ url, version string }
+type p597Getter struct {
+	url, version string
+	// unpinned: the definition names its chart by URL with NO spec.chart.version, so the package info
+	// carries an empty Version, as for a real URL-named chart. The chart itself is still 0.1.0.
+	unpinned bool
+}
 
 func (g p597Getter) info() *archive.Info {
 	v := g.version
-	if v == "" {
+	if v == "" && !g.unpinned {
 		v = "0.1.0"
 	}
 	return &archive.Info{URL: g.url, Version: v, DefinitionVersion: v,
@@ -333,6 +338,10 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 			cur.Object["spec"] = map[string]any{"k": "v2"}
 		case "version":
 			h.packageInfoGetter = p597Getter{url: url020, version: "0.2.0"}
+		case "unpinnedChange":
+			// The same chart, now named with no version pinned, and a values change.
+			h.packageInfoGetter = p597Getter{url: url, unpinned: true}
+			cur.Object["spec"] = map[string]any{"k": "v2"}
 		case "drift", "dropRoles", "stuck":
 		}
 		if cur, err = dyn.Resource(gvr).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
@@ -460,6 +469,25 @@ func TestEnvtest_597_ObserveWritesUnderAWithheldUpdate(t *testing.T) {
 		if o.revAfter != o.revBefore || o.chartVersion != "0.1.0" || o.ready["reason"] != "UpdateWithheldByPolicy" ||
 			!strings.Contains(msg, "0.1.0") || !strings.Contains(msg, "0.2.0") {
 			t.Errorf("version change under observe: revision %d -> %d, helmChartVersion %q, Ready %v %q; want no upgrade, 0.1.0 recorded, both versions named",
+				o.revBefore, o.revAfter, o.chartVersion, o.ready["reason"], msg)
+		}
+	})
+
+	// A chart named by URL with NO version pinned (measured live, 2026-11-21): status.helmChartVersion
+	// was '' (it recorded spec.chart.version) and the withheld message printed "wants chart , ...".
+	// Now helmChartVersion is the running release's chart version, and the message names the change.
+	t.Run("control: default policy, an unpinned chart records the running chart version", func(t *testing.T) {
+		o := run(t, "d-unpinned", "", "unpinnedChange")
+		if o.revAfter <= o.revBefore || o.chartVersion != "0.1.0" {
+			t.Errorf("unpinned, default policy: revision %d -> %d, helmChartVersion %q; want the change applied and 0.1.0 recorded", o.revBefore, o.revAfter, o.chartVersion)
+		}
+	})
+	t.Run("observe: an unpinned chart's withheld change names no empty version", func(t *testing.T) {
+		o := run(t, "o-unpinned", "observe", "unpinnedChange")
+		msg, _ := o.ready["message"].(string)
+		if o.revAfter != o.revBefore || o.chartVersion != "0.1.0" || o.ready["reason"] != "UpdateWithheldByPolicy" ||
+			strings.Contains(msg, "chart ,") || !strings.Contains(msg, "(values)") {
+			t.Errorf("unpinned, observe: revision %d -> %d, helmChartVersion %q, Ready %v %q; want nothing applied, 0.1.0 recorded, and a message naming the values change without an empty version",
 				o.revBefore, o.revAfter, o.chartVersion, o.ready["reason"], msg)
 		}
 	})

@@ -53,14 +53,17 @@ func createWithheldMessage(mg *unstructured.Unstructured, d managementpolicy.Dec
 
 // updateWithheldMessage says what an update would have done, from a WriteNothing reconcile, or "" when
 // nothing would change (then the composition is simply Available). installed is the stored release's
-// chart version, wanted the definition's.
-func updateWithheldMessage(mg *unstructured.Unstructured, d managementpolicy.Decision, res *helmconfig.ReconcileResult, installed, wanted string) string {
+// chart version. The WANTED side is the change itself: plumbing names both versions for a chart
+// version change ("chart version 0.1.0 -> 0.2.0", from the rendered chart) and says "values" when only
+// values differ. It used to print the definition's spec.chart.version, which is empty for a chart named
+// by URL with no version pinned ("the definition wants chart , ...", measured live 2026-11-21).
+func updateWithheldMessage(mg *unstructured.Unstructured, d managementpolicy.Decision, res *helmconfig.ReconcileResult, installed string) string {
 	if res == nil || !res.WouldChange {
 		return ""
 	}
 	head := fmt.Sprintf("%s withholds update, so the installed chart %s is frozen", policyPhrase(mg, d), installed)
 	if res.DesiredStateChange != "" {
-		return fmt.Sprintf("%s: the definition wants chart %s, and the change (%s) is not applied", head, wanted, res.DesiredStateChange)
+		return fmt.Sprintf("%s: the definition's desired state differs (%s), and it is not applied", head, res.DesiredStateChange)
 	}
 	var parts []string
 	for _, p := range []struct {
