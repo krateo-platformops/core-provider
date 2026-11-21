@@ -44,9 +44,13 @@ written by the managed reconciler on the same objects. The set is CLOSED.
 | Ready | `NotObserved` | Unknown | provider-runtime | unevaluated (rolls up as healthy) | Connect or Observe returned an error not marked ReadyAssessed (for example, the controller Deployment could not be read); the error is on Synced |
 | Ready | `Creating` | False | provider-runtime | converging | the create path: written with every Create outcome, success or failure (the error, if any, is on Synced) |
 | Ready | `Deleting` | False | provider-runtime | converging | the delete path, and an Observe error on a definition being deleted |
+| Ready | `CreateWithheldByPolicy` | False | provider-runtime | failed | the external resource (the CRD) is absent and krateo.io/management-policy withholds create, observe-only included; nothing is created until a human changes the policy (#110 D4) |
+| Ready | `UpdateWithheldByPolicy` | True | provider-runtime | healthy | core-provider's Observe found drift and krateo.io/management-policy withholds update: replaces a healthy Ready only, so the definition works but is NOT brought to its desired state; an unhealthy Ready keeps its own reason, with "updates are withheld by policy" appended (#110 D4) |
 | Synced | `ReconcileSuccess` | True | provider-runtime | — | the pass completed |
 | Synced | `ReconcileError` | False | provider-runtime | — | the pass failed (message: the error); with Ready=False/SchemaDefaultContradiction it reads "observe failed: " followed by Ready's message |
 | Synced | `ReconcilePaused` | False | provider-runtime | — | krateo.io/paused is set; Ready is left as it was |
+| Synced | `ManagementPolicyInvalid` | False | provider-runtime | — | krateo.io/management-policy does not parse: the reconciler acts on nothing (observe only); wins over the pass's own Synced outcome; paused and deferred passes keep theirs |
+| Synced | `DeletionPolicyInvalid` | False | provider-runtime | — | krateo.io/deletion-policy is neither delete nor orphan, so the external resource is KEPT on delete; reported on every pass while set |
 | ControllerActive | `Running` | True | core-provider | — | the controller Deployment has replicas declared; the message says whether scale-to-zero applies and when |
 | ControllerActive | `ScaledToZero` | False | core-provider | — | 0 replicas, and the definition opted into scale-to-zero: idle, wakes on the first instance (#393) |
 | ControllerActive | `Unavailable` | False | core-provider | — | 0 replicas, and the definition did NOT opt into scale-to-zero: nothing reconciles the Kind |
