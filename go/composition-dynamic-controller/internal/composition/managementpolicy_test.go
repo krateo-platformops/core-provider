@@ -89,18 +89,29 @@ func TestUpdateWithheldMessage(t *testing.T) {
 	d := managementpolicy.For(mg.GetAnnotations(), nil)
 
 	for _, res := range []*helmconfig.ReconcileResult{nil, {WriteWithheld: true}} {
-		if got := updateWithheldMessage(mg, d, res, "0.1.0", "0.1.0"); got != "" {
+		if got := updateWithheldMessage(mg, d, res, "0.1.0"); got != "" {
 			t.Errorf("nothing would change: %q; want no message (the composition is simply Available)", got)
 		}
 	}
-	got := updateWithheldMessage(mg, d, &helmconfig.ReconcileResult{WouldChange: true, DesiredStateChange: "chart version 0.1.0 -> 0.2.0"}, "0.1.0", "0.2.0")
-	for _, want := range []string{`"observe"`, "installed chart 0.1.0", "wants chart 0.2.0", "not applied"} {
+	got := updateWithheldMessage(mg, d, &helmconfig.ReconcileResult{WouldChange: true, DesiredStateChange: "chart version 0.1.0 -> 0.2.0"}, "0.1.0")
+	for _, want := range []string{`"observe"`, "installed chart 0.1.0", "chart version 0.1.0 -> 0.2.0", "not applied"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("desired-state change: %q lacks %q", got, want)
 		}
 	}
+	// A values change on a chart named by URL with no version pinned: the message must not carry an
+	// empty version ("wants chart , ..." was measured live, 2026-11-21).
+	got = updateWithheldMessage(mg, d, &helmconfig.ReconcileResult{WouldChange: true, DesiredStateChange: "values"}, "0.1.0")
+	if strings.Contains(got, "chart ,") || strings.Contains(got, "chart  ") {
+		t.Errorf("values change: %q carries an empty version", got)
+	}
+	for _, want := range []string{"installed chart 0.1.0", "(values)", "not applied"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("values change: %q lacks %q", got, want)
+		}
+	}
 	got = updateWithheldMessage(mg, d, &helmconfig.ReconcileResult{WouldChange: true, WouldPatch: 2,
-		WouldPatchObjects: []string{"v1/ConfigMap/ns/a"}, WouldPatchObjectsOmitted: 1, WouldCreateObjects: []string{"v1/Secret/ns/s"}}, "0.1.0", "0.1.0")
+		WouldPatchObjects: []string{"v1/ConfigMap/ns/a"}, WouldPatchObjectsOmitted: 1, WouldCreateObjects: []string{"v1/Secret/ns/s"}}, "0.1.0")
 	for _, want := range []string{"drift is not corrected", "would create v1/Secret/ns/s", "would patch v1/ConfigMap/ns/a and 1 more"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("drift: %q lacks %q", got, want)
