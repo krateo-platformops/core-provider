@@ -101,6 +101,25 @@ It runs after an Update pass that migrated at least one instance, and on every O
 changes `Ready`** and never blocks or undoes the migration. A `Warning` Event
 `MigratedValuesRefused` fires once per new finding.
 
+**`status.migratedValues` is the same finding as data (#623).** Read it instead of parsing the
+message: it is built from the same check, in the same call, and names the same instances and fields
+in the same order.
+
+```
+status.migratedValues.version          v2-0-0     # the served version checked
+status.migratedValues.refusedCount     12         # uncapped
+status.migratedValues.uncheckedCount   0          # uncapped
+status.migratedValues.refused          [{namespace, name, fields: [spec.a, ...], fieldCount}]
+status.migratedValues.unchecked        [{namespace, name}]
+```
+
+Both lists hold at most 10 instances and `fields` at most 5 entries, the same caps as the message. A
+count larger than its list (`refusedCount > len(refused)`, `fieldCount > len(fields)`) means the cap
+hid the rest. To tell a composition whether it is affected, look up its own `namespace`/`name` in
+`refused`; beyond the cap, fall back to the counts. The field is **absent** while the condition is
+absent and when the instance list itself could not be read (the condition is `Unknown` and says why),
+and it is **cleared** when the condition becomes `True`.
+
 **`ControllerActive`** (every local definition, #393) says whether anything is reconciling this
 Kind right now, so a gate branches on a condition rather than matching a reason string. Its
 reasons are shared verbatim with oasgen-provider (plumbing's `conditions` package). Messages carry
