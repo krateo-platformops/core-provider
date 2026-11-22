@@ -9,6 +9,7 @@ import (
 
 	compositionMeta "github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 
+	"github.com/krateo-platformops/plumbing/crdgen"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -497,8 +498,9 @@ type resolvedChart struct {
 }
 
 // chartForVersion returns the chart the controller of ownVersion renders (#461, Diego 2026-11-13):
-//   - the definition's DESIRED version, "v" + spec.chart.version with dots as dashes (the same
-//     normalisation the CRD versions and isVersionMigrationHandover use): spec.chart;
+//   - the definition's DESIRED version, crdgen.NormalizeVersionName(spec.chart.version): the version
+//     the CRD serves for it, the same call core-provider and isVersionMigrationHandover use (#591):
+//     spec.chart;
 //   - any other version: the chart core-provider recorded for it in status.managed.versionInfo when
 //     that version was current (helpers/status.UpdateVersionInfo writes it once and preserves it).
 //     So a retiring controller keeps rendering its own chart until migration relabels the instance,
@@ -520,7 +522,7 @@ func chartForVersion(cd *unstructured.Unstructured, ownVersion string) (resolved
 	if err != nil {
 		return resolvedChart{}, fmt.Errorf("resolving 'spec.chart.version': %w", err)
 	}
-	desired := "v" + strings.ReplaceAll(specVersion, ".", "-")
+	desired := crdgen.NormalizeVersionName(specVersion) // #591: the version the CRD serves
 	if ownVersion == "" || ownVersion == desired {
 		m, _, err := unstructured.NestedMap(cd.UnstructuredContent(), "spec", "chart")
 		if err != nil {

@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
+	"github.com/krateo-platformops/plumbing/crdgen"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	xcontext "github.com/krateo-platformops/unstructured-runtime/pkg/context"
@@ -2011,11 +2011,12 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 	if served := mg.GetLabels()[compositionMeta.CompositionVersionLabel]; served != "" && served != crVersion {
 		return false
 	}
-	// Normalize the owning CD's semver chart version ("0.1.8") to the CR's version form ("v0-1-8").
+	// Normalize the owning CD's semver chart version ("0.1.8", "1.0.0-RC1") to the CR's version form
+	// ("v0-1-8", "v1-0-0-rc1"): the version the CRD serves for it, which is what crVersion is (#591).
 	// The definition's CURRENT chart version, not the chart this controller renders (#461: an older
 	// version's controller renders its own version's chart, and comparing that would read every
 	// migration as a genuine delete).
-	cdVersion := "v" + strings.ReplaceAll(pkg.DefinitionVersion, ".", "-")
+	cdVersion := crdgen.NormalizeVersionName(pkg.DefinitionVersion)
 	return cdVersion != crVersion
 }
 
