@@ -173,6 +173,12 @@ const (
 	// was inferred from its values.yaml files (#568 D6; inference is opt-in, krateo.io/values-schema:
 	// infer). Ready is unaffected: an inferred definition reads Available.
 	TypeValuesSchemaAuthored rtv1.ConditionType = "ValuesSchemaAuthored"
+	// TypeMigratedValuesValid: whether every instance on the served version still satisfies that
+	// version's schema after a version migration moved instances onto it (#614). The apiserver
+	// ratchets validation on update, so a migration can carry a value the new version refuses; this
+	// reports it. Absent until a migration has moved at least one instance. Ready is unaffected: the
+	// migration is not blocked or undone.
+	TypeMigratedValuesValid rtv1.ConditionType = "MigratedValuesValid"
 )
 
 // The reasons of those types, each with the one status it is written with.
@@ -223,6 +229,13 @@ var (
 		"the chart ships no values.schema.json and the definition opted in (krateo.io/values-schema: infer): the schema is inferred from values.yaml, typed-open, with no authored constraints; the message gives the rules version and the untyped paths")
 	ValuesSchemaOwnedElsewhere = on(TypeValuesSchemaAuthored, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it")
+
+	MigratedValuesAllValid = on(TypeMigratedValuesValid, "AllValid", metav1.ConditionTrue, WriterCoreProvider,
+		"every instance on the served version passed a dry-run create through it after the last migration; nothing reopens this until the next migration")
+	MigratedValuesRefused = on(TypeMigratedValuesValid, "ValuesRefusedByNewVersion", metav1.ConditionFalse, WriterCoreProvider,
+		"some instances hold values the served version refuses (validation ratcheting let the migration through); the message names them and the fields, and a write that changes those fields will be refused until they satisfy the new schema; rechecked on every Observe until all pass")
+	MigratedValuesUnchecked = on(TypeMigratedValuesValid, "ValidationIncomplete", metav1.ConditionUnknown, WriterCoreProvider,
+		"no instance was refused, but some could not be judged (the dry run failed for a reason that is not a spec validation error); the message names them; rechecked on every Observe")
 )
 
 // apiRefRBACFailures are ApiRefRBACComplete=False, one per restactionrbac.Cause: each sends an
@@ -269,7 +282,8 @@ func nonReady() []Reason {
 		out = append(out, apiRefRBACFailures[c])
 	}
 	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled,
-		ValuesSchemaAuthored, ValuesSchemaInferred, ValuesSchemaOwnedElsewhere)
+		ValuesSchemaAuthored, ValuesSchemaInferred, ValuesSchemaOwnedElsewhere,
+		MigratedValuesAllValid, MigratedValuesRefused, MigratedValuesUnchecked)
 }
 
 // The reasons provider-runtime's managed reconciler writes on the same objects. Unexported: core-provider

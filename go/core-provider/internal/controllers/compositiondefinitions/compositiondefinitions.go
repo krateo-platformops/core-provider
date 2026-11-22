@@ -1157,6 +1157,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// render actually ran.
 	cr.SetConditions(schemaSourceConditions(specSchema, generated.Warnings)...)
 	emitSchemaEvents(e.rec, cr, generated.Warnings, generated.Fresh)
+	// #614: while instances are reported holding values the served version refuses (or unchecked),
+	// re-validate them, so the condition clears once they are fixed or gone.
+	e.recheckMigratedValues(ctx, cr, gvr, log)
 
 	statusFields := statusFieldsFromSpec(cr)
 	if err := crdutils.ValidateStatusFields(statusFields); err != nil {
@@ -1915,22 +1918,13 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// advanced — are migrated on a later reconcile instead of being orphaned forever (the
 	// new label-scoped controller never selects an old-labelled CR). UpdateCompositionsVersion
 	// is a no-op when nothing carries the old label, so this is safe to run every transition.
+	//
+	// #614: if the pass moved anything, the instances on the current version are then validated
+	// without ratcheting and MigratedValuesValid reports the ones it refuses (migratedvalues.go).
 	if migrate {
 		log.Debug("Migrating Compositions to current version", "gvr", gvr.String())
-		owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
-		migrateOpts := e.migrationLossOptions(ctx, gvr, log)
-		for _, vi := range cr.Status.Managed.VersionInfo {
-			if vi.Version == gvk.Version {
-				continue
-			}
-			// List + re-stamp THROUGH the current served endpoint (gvr, whose version is
-			// gvk.Version): the composition-version policy stamps the request's served version,
-			// so writing via the current endpoint makes it agree with the relabel instead of
-			// re-stamping the old version. Scoped to THIS definition so a shared CRD's other
-			// definitions (legitimately on an older version) are never touched.
-			if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner, migrateOpts); err != nil {
-				return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
-			}
+		if err := e.migrateAndCheck(ctx, cr, gvr, gvk, log); err != nil {
+			return err
 		}
 	}
 

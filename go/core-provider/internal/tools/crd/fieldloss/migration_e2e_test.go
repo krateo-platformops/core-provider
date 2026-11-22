@@ -247,7 +247,7 @@ func TestE2E_NarrowingMigrationRecordsWhatItDrops(t *testing.T) {
 	}
 
 	// The migration itself: relabel v2-0-0 -> v1-0-0 through the narrow (target) endpoint.
-	if err := getters.UpdateCompositionsVersion(ctx, dyn, narrow, "v2-0-0", "v1-0-0",
+	if _, err := getters.UpdateCompositionsVersion(ctx, dyn, narrow, "v2-0-0", "v1-0-0",
 		getters.DefinitionRef{}, opts); err != nil {
 		t.Fatalf("UpdateCompositionsVersion: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestE2E_WideningMigrationReportsNothing(t *testing.T) {
 	}
 
 	called := 0
-	if err := getters.UpdateCompositionsVersion(ctx, dyn, wide, "v1-0-0", "v2-0-0",
+	if _, err := getters.UpdateCompositionsVersion(ctx, dyn, wide, "v1-0-0", "v2-0-0",
 		getters.DefinitionRef{}, getters.MigrationOptions{
 			TargetSchema: st,
 			OnLoss:       func(*unstructured.Unstructured, fieldloss.Report, bool) { called++ },
