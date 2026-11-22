@@ -117,9 +117,12 @@ root                    open, plus x-krateo-values-schema: {source: inferred, ru
 - **In the schema itself**, at the root: `x-krateo-values-schema: {source: inferred, rules: "1"}`
   (the key is `valuesschema.MarkerKey`; `rules` is `RulesVersion`). The portal's form schema
   carries it.[^marker]
-  - **Planned, not yet released:** core-provider will strip a root `x-krateo-values-schema` from an
-    **authored** schema, so the marker is present if and only if `ValuesSchemaAuthored=False`. Until
-    that ships, a chart could include the key in its own schema.
+  - **core-provider owns the marker.** It removes a root `x-krateo-values-schema` from an
+    **authored** schema before anything reads it, at the one seam (`chart.SpecSchema`) that feeds the
+    CRD, its generation cache, the default-contradiction gate, `SpecSchemaCurrent` and the JSON-schema
+    ConfigMap. So the marker is present **if and only if** `ValuesSchemaAuthored=False`, and a chart
+    cannot forge it. Only the root keyword is removed: a property of that name under `properties` is
+    the author's and stays. The rest of the schema keeps its authoring order and literals.[^owned]
 
 ## Limitations and risks
 
@@ -159,4 +162,5 @@ Phrased as of 2026-11-22.
 [^rules]: plumbing `valuesschema/valuesschema.go:16-37` (rules table), `:39-43` (defaults), `:9-14` (no constraints, open), `:45-48` and `:66-68` (`ClosedAnnotation = "krateo.io/values-schema-closed"`), v1.104.0.
 [^conds]: `go/core-provider/internal/cdreason/cdreason.go:175` (type), `:220-225` (the three reasons), `:195` (`SchemaInferred`); messages `compositiondefinitions/valuesschemaauthored.go:24,32,39`.
 [^marker]: plumbing `valuesschema/valuesschema.go:57-64` (`RulesVersion = "1"`, `MarkerKey = "x-krateo-values-schema"`), v1.104.0.
+[^owned]: core-provider `internal/tools/chart/marker.go` (`stripRootMarker`), called from `chart.SpecSchema`'s authored branch (`internal/tools/chart/specschema.go`); tests `marker_test.go`, `marker_cache_568_test.go`, `marker_568_envtest_test.go` (#568 child 7).
 [^stable]: `go/core-provider/internal/cdreason/cdreason.go:200,202` (`LooserSchemaPending`, `GeneratedSchemaNotLooser`); #534; plumbing `valuesschema/valuesschema.go:57-60`.
