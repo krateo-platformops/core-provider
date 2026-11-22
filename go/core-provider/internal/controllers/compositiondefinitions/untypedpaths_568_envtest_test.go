@@ -25,7 +25,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/yaml"
 )
 
 // untypedPathsValues is the inferred chart's values.yaml for the untyped-paths cross-check. Each line
@@ -42,7 +41,8 @@ import (
 //	lists: [[1], [2]]      list of lists: items untyped ("list of lists")         A: lists[]
 //	nested.deep: null      a nested null, for the dotted path                     A: nested.deep
 //	empty: []              empty list: itemsNode returns nil items, so crdgen gives items
-//	                       anyValue(); NO finding is recorded (predicted: in B, not in A)
+//	                       anyValue(); since plumbing v1.105.0 (#226) the report records it
+//	                       ("empty list")                                         A: empty[]
 //
 // A list's untyped finding is reported at its ITEMS path ("x[]", infer.go itemsNode is called with
 // path+"[]"), while B reports a matching items node under the array's path ("x").
@@ -137,15 +137,12 @@ func crdUntypedPaths(s *apiextensionsv1.JSONSchemaProps) []string {
 // CRD's "accepts any value" nodes (B). B is read from the CRD as the APISERVER stores it.
 //
 // The contract (decided 2026-11-22 from this test's measurement): frontend names the field the USER
-// sees, and the report stays verbatim under Details. So the relationship asserted is the MEASURED one,
-// strict in both directions, not A == B:
+// sees, and the report stays verbatim under Details. A names a list's untyped ITEMS (x[]); a form
+// shows the list (x). Mapped that way, A and B must be EQUAL, strict in both directions.
 //
-//   - A names a list's untyped ITEMS (x[]); a form shows the list (x). Mapped that way, every A path
-//     must be in B.
-//   - The only B path A may not reach is an array whose values.yaml value is an EMPTY LIST: a known
-//     report gap. valuesschema records no finding for an empty list, yet crdgen gives its items "any
-//     value" (an array with no items).
-//   - Any other difference, in either direction, fails with both sides printed.
+// Until plumbing v1.105.0 an empty list was the one accepted difference (valuesschema recorded no
+// finding for it, though crdgen gives its items "any value"). plumbing#226 reports it (empty[]), so
+// the exemption is gone and any difference fails with both sides printed.
 func TestEnvtest_568_UntypedPathsReportMatchesTheCRD(t *testing.T) {
 	ctx := context.Background()
 	cl, dyn := startAddEnv(t)
@@ -299,44 +296,16 @@ func TestEnvtest_568_UntypedPathsReportMatchesTheCRD(t *testing.T) {
 		mappedA = append(mappedA, strings.TrimSuffix(p, "[]")) // the list's items -> the list the user sees
 	}
 	sort.Strings(mappedA)
-	var values map[string]any
-	if err := yaml.Unmarshal([]byte(untypedPathsValues), &values); err != nil {
-		t.Fatal(err)
-	}
 	onlyA, onlyB := diffSorted(mappedA, b)
-	var unexplainedB, emptyListGap []string
-	for _, p := range onlyB {
-		if isEmptyListAt(values, p) {
-			emptyListGap = append(emptyListGap, p) // KNOWN REPORT GAP: no finding for an empty list
-			continue
-		}
-		unexplainedB = append(unexplainedB, p)
+	t.Logf("A mapped to the field the user sees: %v", mappedA)
+	if len(onlyA) > 0 || len(onlyB) > 0 {
+		t.Fatalf("the inference report and the CRD disagree:\n  only in A (report, mapped x[] -> x): %v\n  only in B (CRD): %v", onlyA, onlyB)
 	}
-	t.Logf("A mapped to the field the user sees: %v; accepted extra in B (empty lists, a known report gap): %v", mappedA, emptyListGap)
-	if len(onlyA) > 0 || len(unexplainedB) > 0 {
-		t.Fatalf("the inference report and the CRD disagree beyond the measured relationship:\n  only in A (report, mapped x[] -> x): %v\n  only in B (CRD, not an empty list):  %v", onlyA, unexplainedB)
+	// CONTROL: the empty list is now reported by the report itself (plumbing#226), so equality is
+	// not reached by both sides happening to omit it.
+	if i := sort.SearchStrings(a, "empty[]"); i >= len(a) || a[i] != "empty[]" {
+		t.Fatalf("control: the report does not name empty[] (plumbing v1.105.0 reports an empty list's items); A = %v", a)
 	}
-	// CONTROL: the accepted extra is exactly the fixture's one empty list, so the exemption is
-	// exercised and is not silently absorbing something else.
-	if strings.Join(emptyListGap, ",") != "empty" {
-		t.Fatalf("control: the empty-list exemption covered %v, want exactly [empty]", emptyListGap)
-	}
-}
-
-// isEmptyListAt reports whether the values document holds an empty list at the dotted path.
-func isEmptyListAt(values map[string]any, path string) bool {
-	var cur any = values
-	for _, k := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return false
-		}
-		if cur, ok = m[k]; !ok {
-			return false
-		}
-	}
-	l, ok := cur.([]any)
-	return ok && len(l) == 0
 }
 
 func diffSorted(a, b []string) (onlyA, onlyB []string) {

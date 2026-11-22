@@ -111,8 +111,9 @@ root                    open, plus x-krateo-values-schema: {source: inferred, ru
   | `False` | `InferredFromValues` | inferred; the message gives the rules version and the paths that accept any value |
   | `Unknown` | `OwnedByAnotherDefinition` | a follower; another definition generates the CRD |
 
-  The paths in that message name a list's items (`x[]`) where a form shows the list (`x`), and an
-  empty list's items accept any value with no finding at all.[^untyped]
+  The paths in that message name a list's items (`x[]`) where a form shows the list (`x`). Mapped
+  that way they are exactly the CRD's accepts-any-value fields, empty lists included (reported since
+  plumbing v1.105.0; before it, an empty list's items accepted any value with no finding).[^untyped]
 
   An inferred definition also reads `SchemaFullyEnforced=Unknown/SchemaInferred`: with no authored
   constraints, "all enforced" can't be claimed. **Ready is unaffected:** an inferred definition
@@ -131,9 +132,11 @@ root                    open, plus x-krateo-values-schema: {source: inferred, ru
 
 Phrased as of 2026-11-22.
 
-- **Decimal defaults are lost.** `ratio: 0.5` is inferred as `{default: 0.5}`, but the generated
-  CRD has no default for it, while integer, string and list defaults survive. The fix is in crdgen
-  (plumbing) and isn't released yet.
+- **Decimal defaults were lost before core-provider's bump to plumbing v1.105.0.** `ratio: 0.5` is
+  inferred as `{default: 0.5}`, but crdgen dropped the default of an untyped node, so the CRD had
+  none (integer, string and list defaults survived). Fixed in plumbing v1.105.0; measured on a real
+  apiserver, an instance omitting `ratio` and `tuning` now reads back `ratio: 0.5` and
+  `tuning.ratio: 0.5`.
   [#613](https://github.com/krateo-platformops/core-provider/issues/613)
 - **A version migration can leave values the new version refuses, and nothing reports it.** If a
   new chart version changes a field's *kind* (say a boolean becomes integer-or-string), migrating
@@ -166,5 +169,5 @@ Phrased as of 2026-11-22.
 [^conds]: `go/core-provider/internal/cdreason/cdreason.go:175` (type), `:220-225` (the three reasons), `:195` (`SchemaInferred`); messages `compositiondefinitions/valuesschemaauthored.go:24,32,39`.
 [^marker]: plumbing `valuesschema/valuesschema.go:57-64` (`RulesVersion = "1"`, `MarkerKey = "x-krateo-values-schema"`), v1.104.0.
 [^owned]: core-provider `internal/tools/chart/marker.go` (`stripRootMarker`), called from `chart.SpecSchema`'s authored branch (`internal/tools/chart/specschema.go`); tests `marker_test.go`, `marker_cache_568_test.go`, `marker_568_envtest_test.go` (#568 child 7).
-[^untyped]: measured on a real apiserver by `untypedpaths_568_envtest_test.go`: report `[lists[] mixedKinds[] nested.deep nothing ratio]`, stored CRD's any-value fields `[empty lists mixedKinds nested.deep nothing ratio]`; `empty: []` is the only field not reached from the report.
+[^untyped]: measured on a real apiserver by `untypedpaths_568_envtest_test.go` at plumbing v1.105.0: report `[empty[] lists[] mixedKinds[] nested.deep nothing ratio]`, stored CRD's any-value fields `[empty lists mixedKinds nested.deep nothing ratio]`; equal under the `x[]` to `x` mapping. At v1.104.0 the report lacked `empty[]`.
 [^stable]: `go/core-provider/internal/cdreason/cdreason.go:200,202` (`LooserSchemaPending`, `GeneratedSchemaNotLooser`); #534; plumbing `valuesschema/valuesschema.go:57-60`.
