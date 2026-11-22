@@ -200,12 +200,12 @@ func TestEnvtest_568_RulesVersionChangeGoesThrough534(t *testing.T) {
 	})
 
 	// MEASURED: a rules change that turns an int-or-string leaf into "any value" does not reach a
-	// served version. Two things stop it. #534's allowlist lets x-kubernetes-int-or-string be ADDED,
-	// never removed. And crdgen renders an untyped leaf with a default ({default: 2}) as
-	// {x-kubernetes-preserve-unknown-fields: true}, DROPPING the default, so the render also changes
-	// what an omitted field reads as. That is not a pure loosening, and keeping the served schema is
-	// correct, not merely conservative. Recorded so a rules v2 that wants this knows it reaches only
-	// new chart versions.
+	// served version, because #534's allowlist lets x-kubernetes-int-or-string be ADDED, never
+	// removed. Since plumbing v1.105.0 (core-provider#613) crdgen KEEPS an untyped leaf's default
+	// ({default: 2, x-kubernetes-preserve-unknown-fields: true}); before it, the default was dropped
+	// too, and the message reported "replicas.default: removed" as a second difference. Now the
+	// int-or-string removal is the only one. Recorded so a rules v2 that wants this knows it reaches
+	// only new chart versions.
 	t.Run("an int-or-string leaf loosened to any value is not recognised as looser, and stays frozen", func(t *testing.T) {
 		v2 := rulesV2(t, v1, "replicas", func(n map[string]any) { delete(n, "x-kubernetes-int-or-string") })
 		reason, message, refresh, before, after, rendered := decide(t, "Rules568AnyValue", v2)
@@ -213,13 +213,14 @@ func TestEnvtest_568_RulesVersionChangeGoesThrough534(t *testing.T) {
 		if reason != "GeneratedSchemaNotLooser" || refresh {
 			t.Fatalf("reason=%s refresh=%v, want GeneratedSchemaNotLooser, false (measured)", reason, refresh)
 		}
-		if leaf(rendered, "replicas").Default != nil || leaf(rendered, "replicas").XPreserveUnknownFields == nil {
-			t.Fatalf("premise: crdgen renders the untyped leaf as preserve-unknown with no default; got %s", mustJSON(t, leaf(rendered, "replicas")))
+		if r := leaf(rendered, "replicas"); r.Default == nil || string(r.Default.Raw) != "2" || r.XPreserveUnknownFields == nil {
+			t.Fatalf("premise: crdgen renders the untyped leaf as preserve-unknown KEEPING its default 2 (plumbing v1.105.0, #613); got %s", mustJSON(t, r))
 		}
-		for _, want := range []string{"spec.properties.replicas.default: removed", "spec.properties.replicas.x-kubernetes-int-or-string: removed"} {
-			if !strings.Contains(message, want) {
-				t.Errorf("the message must report %q; got %q", want, message)
-			}
+		if !strings.Contains(message, "spec.properties.replicas.x-kubernetes-int-or-string: removed") {
+			t.Errorf("the message must report the int-or-string removal; got %q", message)
+		}
+		if strings.Contains(message, "replicas.default") {
+			t.Errorf("the default is kept since plumbing v1.105.0, so the message must not report it changed; got %q", message)
 		}
 		if strings.Contains(message, "enabled") {
 			t.Errorf("the message reports a path this render did not change (subtests must not share state): %q", message)
