@@ -22,13 +22,10 @@ on:
 
 jobs:
   release-oci:
-    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
     permissions:
       contents: read
       packages: write
     with:
       chart_version: ${{ github.event.inputs.chart_version || '' }}
       app_version: ${{ github.event.inputs.app_version || '' }}
-      # Required since krateo-platformops/.github 77bcf7f (release-oci 2.0.0). core-provider's charts are
-      # platform components, not blueprints/pages/operators: deliberately not indexed. See release-tag.yaml.
-      index_channel: none
