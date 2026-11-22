@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gobuffalo/flect"
@@ -21,6 +20,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/strutil"
 	"github.com/krateo-platformops/core-provider/internal/tools/tgzfs"
 	"github.com/krateo-platformops/plumbing/helm/getter"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -189,7 +189,7 @@ func ChartGroupVersionKind(tgzFS fs.FS, rootDir string) (schema.GroupVersionKind
 
 	return schema.GroupVersionKind{
 		Group:   defaultGroup,
-		Version: fmt.Sprintf("v%s", strings.ReplaceAll(version, ".", "-")),
+		Version: versionname.ForChart(version), // #591: the version the CRD serves
 		Kind:    flect.Pascalize(strutil.ToGolangName(name)),
 	}, nil
 }

@@ -1,14 +1,13 @@
 package chartfs
 
 import (
-	"fmt"
 	"io"
-	"strings"
 
 	"github.com/gobuffalo/flect"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/chart/chartmeta"
 	"github.com/krateo-platformops/core-provider/internal/tools/strutil"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -45,7 +44,7 @@ func GroupVersionKind(fs *ChartFS) (schema.GroupVersionKind, error) {
 
 	return schema.GroupVersionKind{
 		Group:   "composition.krateo.io",
-		Version: fmt.Sprintf("v%s", strings.ReplaceAll(version, ".", "-")),
+		Version: versionname.ForChart(version), // #591: the version the CRD serves
 		Kind:    flect.Pascalize(strutil.ToGolangName(name)),
 	}, nil
 }

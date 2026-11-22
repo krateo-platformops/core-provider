@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,12 +73,6 @@ func chartsOfKind(cds []compositiondefinitionsv1alpha1.CompositionDefinition, gk
 	return out
 }
 
-// crdVersion is the generated CRD version for a chart version ("0.2.45" -> "v0-2-45"), as chartfs
-// derives it.
-func crdVersion(chartVersion string) string {
-	return "v" + strings.ReplaceAll(chartVersion, ".", "-")
-}
-
 // specOfKind reports whether cd's spec names a chart known to generate the Kind.
 //
 // The known set comes from live definitions' status, so the spec clause leans on status one level
@@ -115,7 +109,7 @@ func targetsOrServed(cd *compositiondefinitionsv1alpha1.CompositionDefinition, g
 			}
 		}
 	}
-	return specOfKind(cd, known) && crdVersion(cd.Spec.Chart.Version) == version
+	return specOfKind(cd, known) && versionname.ForChart(cd.Spec.Chart.Version) == version // #591: the served version
 }
 
 // ofKind reports whether cd generates gk at any version, by status or by spec.

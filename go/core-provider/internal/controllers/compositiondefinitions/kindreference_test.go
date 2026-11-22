@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -62,12 +63,12 @@ func chartedCD(namespace, name string, ageRank int, url, version string) composi
 // status.managed is what chartsOfKind reads to learn which charts generate gk.
 func reconciledOn(namespace, name string, ageRank int, gk schema.GroupKind, url, version string) compositiondefinitionsv1alpha1.CompositionDefinition {
 	cd := chartedCD(namespace, name, ageRank, url, version)
-	cd.Status.ApiVersion = gk.Group + "/" + crdVersion(version)
+	cd.Status.ApiVersion = gk.Group + "/" + versionname.ForChart(version)
 	cd.Status.Kind = gk.Kind
 	cd.Status.Managed.Group = gk.Group
 	cd.Status.Managed.Kind = gk.Kind
 	cd.Status.Managed.VersionInfo = []compositiondefinitionsv1alpha1.VersionDetail{{
-		Version: crdVersion(version), Served: true,
+		Version: versionname.ForChart(version), Served: true,
 		Chart: &compositiondefinitionsv1alpha1.ChartInfoProps{Url: url, Version: version},
 	}}
 	return cd

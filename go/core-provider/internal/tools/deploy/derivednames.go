@@ -13,7 +13,7 @@ import (
 )
 
 // #588. Every object core-provider creates for a definition takes its name from the generated GVR:
-// the CRD version is "v" + the chart's Chart.yaml version with dots as dashes, and the dedicated
+// the CRD version is versionname.ForChart of the chart's Chart.yaml version (#591), and the dedicated
 // controller's objects are "<plural>-<crd version>-…". Kubernetes caps those names, and before this
 // check a chart whose plural and version were too long together got its CRD written, then failed
 // (or silently misbehaved) on the controller's objects, leaving a served Kind nothing reconciles.
@@ -27,8 +27,8 @@ import (
 //   - the CRD version is a DNS-1035 label (apiextensions validation). crdgen normalizes the
 //     Chart.yaml version into one (crdgen.NormalizeVersionName: lowercase, every run of other
 //     characters becomes '-', so 1.0.0-RC1 -> v1-0-0-rc1 and 1.0.0+build -> v1-0-0-build), and
-//     Observe uses crdgen's GVR whenever the chart's own spelling is not served (the pluralizer's
-//     discovery path is case-sensitive). So in practice only its LENGTH can fail, at more than 63;
+//     core-provider derives the chart's GVK through the same call (#591).
+//     So in practice only its LENGTH can fail, at more than 63;
 //     the full rule is checked anyway, so a caller that passes an un-normalized version is caught;
 //   - a dedicated controller's Deployment is selected by app.kubernetes.io/name = its name, and the
 //     shipped template renders that label as `trunc 63 .name`. A longer name is cut silently: two
