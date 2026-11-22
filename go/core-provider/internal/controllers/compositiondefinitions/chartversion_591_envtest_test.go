@@ -46,10 +46,15 @@ import (
 // v1-0-0-rc (it collapses runs). Every other old spelling here is refused by the apiserver as a name,
 // so only this row can show a wrongly-named object being written and then missed by the portal's GET.
 //
-// v1.0.0 (a valid Helm chart version) is the one population whose names MOVE: served vv1-0-0 before
-// the fix, v1-0-0 after. It was consistent before and must be consistent after.
+// v1.0.0 (a valid Helm chart version) was served as vv1-0-0 before the fix and must still be (Diego,
+// 2026-11-22: preserve served names): no definition is re-pointed at a new CRD version. The served
+// column is literal, so the row fails if the derivation and crdgen move together.
 func TestEnvtest_591_StatusNamesServedVersion(t *testing.T) {
 	ctx := context.Background()
+	servedName := map[string]string{
+		"1.0.0": "v1-0-0", "1.0.0-RC1": "v1-0-0-rc1", "1.0.0+build.5": "v1-0-0-build-5",
+		"2.0.0-Beta.2": "v2-0-0-beta-2", "1.0.0--rc": "v1-0-0-rc", "v1.0.0": "vv1-0-0",
+	}
 	for _, version := range []string{"1.0.0", "1.0.0-RC1", "1.0.0+build.5", "2.0.0-Beta.2", "1.0.0--rc", "v1.0.0"} {
 		t.Run(version, func(t *testing.T) {
 			cl, dyn := startAddEnv(t)
@@ -84,6 +89,9 @@ func TestEnvtest_591_StatusNamesServedVersion(t *testing.T) {
 			served := map[string]bool{}
 			for _, v := range servedList {
 				served[v] = true
+			}
+			if gvr.Version != servedName[version] {
+				t.Fatalf("the CRD serves %s for chart %s, want %s: the served name moved", gvr.Version, version, servedName[version])
 			}
 			if !served[gvr.Version] {
 				t.Fatalf("the CRD does not serve the gvr apply returned (%s); served %v", gvr.Version, servedList)

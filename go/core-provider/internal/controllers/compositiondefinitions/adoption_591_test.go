@@ -24,6 +24,7 @@ func TestAdopterFor_591_UnreconciledOwnerOfNonPlainVersion(t *testing.T) {
 		{"1.0.0+build.5", "v1-0-0-build-5"},
 		{"2.0.0-Beta.2", "v2-0-0-beta-2"},
 		{"1.0.0--rc", "v1-0-0-rc"},
+		{"v1.0.0", "vv1-0-0"}, // valid in Helm; its served name is preserved
 	} {
 		older := reconciledOn("krateo-system", "widget-old", 0, refGK, refURL, "0.9.0")
 		owner := chartedCD("team", "widget", 1, refURL, c.chartVersion) // no status yet

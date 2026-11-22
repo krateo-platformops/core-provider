@@ -13,7 +13,7 @@ import (
 )
 
 // #588. Every object core-provider creates for a definition takes its name from the generated GVR:
-// the CRD version is crdgen.NormalizeVersionName of the chart's Chart.yaml version (#591), and the dedicated
+// the CRD version is versionname.ForChart of the chart's Chart.yaml version (#591), and the dedicated
 // controller's objects are "<plural>-<crd version>-…". Kubernetes caps those names, and before this
 // check a chart whose plural and version were too long together got its CRD written, then failed
 // (or silently misbehaved) on the controller's objects, leaving a served Kind nothing reconciles.

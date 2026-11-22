@@ -22,6 +22,7 @@ var served591 = []struct{ chartVersion, served string }{
 	{"1.0.0+build.5", "v1-0-0-build-5"},
 	{"2.0.0-Beta.2", "v2-0-0-beta-2"},
 	{"1.0.0--rc", "v1-0-0-rc"},
+	{"v1.0.0", "vv1-0-0"}, // valid in Helm; its served name is preserved
 }
 
 func cd591(chartVersion, specURL string, recorded map[string]string) *unstructured.Unstructured {

@@ -19,8 +19,8 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/retry"
 	"github.com/krateo-platformops/core-provider/internal/tools/strutil"
 	"github.com/krateo-platformops/core-provider/internal/tools/tgzfs"
-	"github.com/krateo-platformops/plumbing/crdgen"
 	"github.com/krateo-platformops/plumbing/helm/getter"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -189,7 +189,7 @@ func ChartGroupVersionKind(tgzFS fs.FS, rootDir string) (schema.GroupVersionKind
 
 	return schema.GroupVersionKind{
 		Group:   defaultGroup,
-		Version: crdgen.NormalizeVersionName(version), // #591: the version the CRD serves
+		Version: versionname.ForChart(version), // #591: the version the CRD serves
 		Kind:    flect.Pascalize(strutil.ToGolangName(name)),
 	}, nil
 }

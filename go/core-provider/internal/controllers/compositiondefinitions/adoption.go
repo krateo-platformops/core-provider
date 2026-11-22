@@ -9,7 +9,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
-	"github.com/krateo-platformops/plumbing/crdgen"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -109,7 +109,7 @@ func targetsOrServed(cd *compositiondefinitionsv1alpha1.CompositionDefinition, g
 			}
 		}
 	}
-	return specOfKind(cd, known) && crdgen.NormalizeVersionName(cd.Spec.Chart.Version) == version // #591: the served version
+	return specOfKind(cd, known) && versionname.ForChart(cd.Spec.Chart.Version) == version // #591: the served version
 }
 
 // ofKind reports whether cd generates gk at any version, by status or by spec.

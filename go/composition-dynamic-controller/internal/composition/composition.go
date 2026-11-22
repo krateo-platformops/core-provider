@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
-	"github.com/krateo-platformops/plumbing/crdgen"
+	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"log/slog"
@@ -2016,7 +2016,7 @@ func isVersionMigrationHandover(mg *unstructured.Unstructured, pkg *archive.Info
 	// The definition's CURRENT chart version, not the chart this controller renders (#461: an older
 	// version's controller renders its own version's chart, and comparing that would read every
 	// migration as a genuine delete).
-	cdVersion := crdgen.NormalizeVersionName(pkg.DefinitionVersion)
+	cdVersion := versionname.ForChart(pkg.DefinitionVersion)
 	return cdVersion != crVersion
 }
 
