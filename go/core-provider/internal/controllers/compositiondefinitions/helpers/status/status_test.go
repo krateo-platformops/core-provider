@@ -59,8 +59,10 @@ func TestUpdateVersionInfo(t *testing.T) {
 }
 
 // TestUpdateVersionInfo_ProjectsLiveCRD verifies VersionInfo is a projection of the live CRD:
-// a version that is no longer in the CRD (pruned) is dropped, while a surviving version keeps its
-// per-version Chart (needed by the undeploy path).
+// a version that is no longer in the CRD (pruned) is dropped, while a surviving NON-current version
+// keeps its per-version Chart (needed by the undeploy path). The current version's chart is refreshed
+// from spec on every call since #609 ("the last in effect"), so the preserved entry here is an older
+// version (v1-0-0) while v2-0-0 is current.
 func TestUpdateVersionInfo_ProjectsLiveCRD(t *testing.T) {
 	cr := &compositiondefinitionsv1alpha1.CompositionDefinition{
 		Status: compositiondefinitionsv1alpha1.CompositionDefinitionStatus{
@@ -79,11 +81,12 @@ func TestUpdateVersionInfo_ProjectsLiveCRD(t *testing.T) {
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{Name: "v1-0-0", Served: true},
+				{Name: "v2-0-0", Served: true},
 				{Name: "vacuum", Served: false, Storage: true},
 			},
 		},
 	}
-	gvr := schema.GroupVersionResource{Group: "g", Version: "v1-0-0", Resource: "r"}
+	gvr := schema.GroupVersionResource{Group: "g", Version: "v2-0-0", Resource: "r"}
 
 	UpdateVersionInfo(cr, crd, gvr)
 
@@ -99,7 +102,10 @@ func TestUpdateVersionInfo_ProjectsLiveCRD(t *testing.T) {
 		t.Fatalf("live version v1-0-0 missing from VersionInfo")
 	}
 	if got["v1-0-0"] == nil || got["v1-0-0"].Version != "keep-me" {
-		t.Errorf("surviving version's Chart must be preserved, got %v", got["v1-0-0"])
+		t.Errorf("surviving non-current version's Chart must be preserved, got %v", got["v1-0-0"])
+	}
+	if got["v2-0-0"] == nil || got["v2-0-0"].Url != "u" {
+		t.Errorf("the current version's Chart is spec.chart, got %v", got["v2-0-0"])
 	}
 	// vacuum is in the CRD, so it is tracked too (it is never served/listed but is a real version).
 	if _, ok := got["vacuum"]; !ok {
