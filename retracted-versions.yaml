@@ -26,3 +26,14 @@ retracted:
       controller then wedges retrying that write. Only the core-provider chart (the controller) is
       affected; core-provider-crds at the same versions is not. Fixed in 2.13.95 (#489); any later
       release also has the fix.
+  - version: 2.13.125
+    charts: [core-provider, core-provider-crds, core-provider-target]
+    use: 2.13.126
+    reason: >-
+      Never published. MEASURED: the 2.13.125 release-tag run failed at startup (run 45080459712,
+      startup_failure), because the shared krateo-platformops/.github release-oci.yaml had made
+      index_channel a required input (77bcf7f) that this repo did not pass; no image or chart exists
+      for the tag (installer checked core-provider 2.13.125 absent, 2.13.117 present as control).
+      Listed although nothing is pullable: charts could still be published for the existing tag
+      later by dispatching release-oci, and Diego decided (2026-11-23) to skip it. 2.13.126 carries
+      the same changes plus the workflow fix (#624).
