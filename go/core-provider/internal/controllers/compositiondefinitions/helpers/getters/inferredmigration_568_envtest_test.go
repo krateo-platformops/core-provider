@@ -232,7 +232,7 @@ func TestEnvtest_568_InferredSchemaAcrossChartVersions(t *testing.T) {
 
 	t.Run("the kyverno 3.7.0 -> 3.8.0 moves migrate, and nothing is lost", func(t *testing.T) {
 		lost = nil
-		if err := UpdateCompositionsVersion(ctx, dyn, gvr2, "v1-0-0", "v2-0-0", DefinitionRef{Name: "def-kyverno", Namespace: "default"}, opts); err != nil {
+		if _, err := UpdateCompositionsVersion(ctx, dyn, gvr2, "v1-0-0", "v2-0-0", DefinitionRef{Name: "def-kyverno", Namespace: "default"}, opts); err != nil {
 			t.Fatalf("readinessTimeout 300 under an int-or-string node, a tag under a now-untyped node and a key removed under a typed-open parent must all migrate: %v", err)
 		}
 		u := get("kyverno-shaped")
@@ -264,7 +264,7 @@ func TestEnvtest_568_InferredSchemaAcrossChartVersions(t *testing.T) {
 		}
 
 		lost = nil
-		if err := UpdateCompositionsVersion(ctx, dyn, gvr2, "v1-0-0", "v2-0-0", DefinitionRef{Name: "def-bool", Namespace: "default"}, opts); err != nil {
+		if _, err := UpdateCompositionsVersion(ctx, dyn, gvr2, "v1-0-0", "v2-0-0", DefinitionRef{Name: "def-bool", Namespace: "default"}, opts); err != nil {
 			t.Fatalf("measured: the label-only migration write is admitted by validation ratcheting; got %v", err)
 		}
 		u := get("bool-to-string")
@@ -326,7 +326,7 @@ func TestEnvtest_568_InferredSchemaAcrossChartVersions(t *testing.T) {
 		opts3 := MigrationOptions{TargetSchema: ts3, OnLoss: func(_ *unstructured.Unstructured, rep fieldloss.Report, _ bool) { lost3 = append(lost3, rep.Paths...) }}
 		gvr3 := gvr1
 		gvr3.Version = "v3-0-0"
-		if err := UpdateCompositionsVersion(ctx, dyn, gvr3, "v1-0-0", "v3-0-0", DefinitionRef{Name: "def-closed", Namespace: "default"}, opts3); err != nil {
+		if _, err := UpdateCompositionsVersion(ctx, dyn, gvr3, "v1-0-0", "v3-0-0", DefinitionRef{Name: "def-closed", Namespace: "default"}, opts3); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Join(lost3, ",") != "spec.webhooksCleanup.autoDeleteWebhooks" {

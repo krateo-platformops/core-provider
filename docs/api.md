@@ -81,6 +81,26 @@ and on a definition with no follower relation, and **cleared** when a follower b
 example, when the owner is deleted). Recorded each time the definition is observed, from the same
 election that names the owner in `ValuesSchemaAuthored`, `Available` and `Ready` messages.
 
+<a id="migratedvaluesvalid"></a>
+**`MigratedValuesValid` says whether every instance on the served version still satisfies that
+version's schema after a version migration (#614).** A migration rewrites only an instance's
+version label, and the apiserver ratchets validation on update, so an instance can move onto a
+version whose schema refuses a value it already holds (a field whose kind changed). core-provider
+checks each instance with a server-side **dry-run create** of a copy through the served version: a
+create is validated in full and persists nothing.
+
+| Status / reason | Meaning |
+|---|---|
+| absent | no migration has moved an instance since this was introduced |
+| `True` / `AllValid` | every instance passed after the last migration; nothing reopens it until the next one |
+| `False` / `ValuesRefusedByNewVersion` | the message names up to 10 instances (`ns/name (spec.field, ...)`); a write that changes those fields is refused until they satisfy the new schema |
+| `Unknown` / `ValidationIncomplete` | none refused, but some could not be judged (the dry run failed for a reason other than a spec validation error) |
+
+It runs after an Update pass that migrated at least one instance, and on every Observe while it is
+`False` or `Unknown`, so it clears once the values are fixed or the instances are gone. **It never
+changes `Ready`** and never blocks or undoes the migration. A `Warning` Event
+`MigratedValuesRefused` fires once per new finding.
+
 **`ControllerActive`** (every local definition, #393) says whether anything is reconciling this
 Kind right now, so a gate branches on a condition rather than matching a reason string. Its
 reasons are shared verbatim with oasgen-provider (plumbing's `conditions` package). Messages carry

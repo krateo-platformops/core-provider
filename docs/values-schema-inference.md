@@ -138,12 +138,14 @@ Phrased as of 2026-11-22.
   apiserver, an instance omitting `ratio` and `tuning` now reads back `ratio: 0.5` and
   `tuning.ratio: 0.5`.
   [#613](https://github.com/krateo-platformops/core-provider/issues/613)
-- **A version migration can leave values the new version refuses, and nothing reports it.** If a
-  new chart version changes a field's *kind* (say a boolean becomes integer-or-string), migrating
-  an instance succeeds: the apiserver's validation ratcheting admits a write that leaves the field
-  unchanged. The instance then holds a value the new version refuses on create. This applies to
-  every composition, not only inferred ones. Decided: core-provider will report such instances on
-  the CompositionDefinition. That isn't built yet.
+- **A version migration can leave values the new version refuses.** If a new chart version changes a
+  field's *kind* (say a boolean becomes integer-or-string), migrating an instance succeeds: the
+  apiserver's validation ratcheting admits a write that leaves the field unchanged. The instance then
+  holds a value the new version refuses on create, and **every** instance created under the old
+  version is affected when the old schema defaulted that field, not only those that set it. This
+  applies to every composition, not only inferred ones. Since the release carrying #614, the
+  definition reports it: `MigratedValuesValid=False/ValuesRefusedByNewVersion` names the instances
+  and fields (see [api.md](api.md#migratedvaluesvalid)).
   [#614](https://github.com/krateo-platformops/core-provider/issues/614)
 - **Integer↔string changes are absorbed.** Rules v1 types integers and strings as
   `x-kubernetes-int-or-string`. Measured: kyverno 3.7.0 → 3.8.0 refuses nothing; for example

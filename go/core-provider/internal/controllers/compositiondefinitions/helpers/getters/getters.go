@@ -187,34 +187,41 @@ func compositionSelector(versionLabel string, owner DefinitionRef) (string, erro
 // the explicit relabel; the explicit label set in updateCompositionWithRetry also covers
 // clusters where the policy is not installed. Owner scoping ensures a version bump of one
 // definition never re-stamps another definition's instances that legitimately share the CRD.
-func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, fromVersion, toVersion string, owner DefinitionRef, opts MigrationOptions) error {
+//
+// It returns how many instances it found labelled fromVersion and processed: the count of a pass
+// that moved something, which is what #614's post-migration validation keys on. An instance that
+// vanished or was already relabelled between the list and the write is still counted; that only
+// makes the validation run, never skip.
+func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, fromVersion, toVersion string, owner DefinitionRef, opts MigrationOptions) (int, error) {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
 	if fromVersion == toVersion {
-		return nil
+		return 0, nil
 	}
 
 	ul, err := getCompositionsWithRetry(ctx, dyn, gvr, fromVersion, owner, log)
 	if err != nil {
-		return fmt.Errorf("error getting compositions: %w", err)
+		return 0, fmt.Errorf("error getting compositions: %w", err)
 	}
 
 	if len(ul.Items) == 0 {
 		log.Debug("No compositions found for the specified GVR and version", "fromVersion", fromVersion, "owner", owner.Name)
-		return nil
+		return 0, nil
 	}
 
 	sourceGVR := gvr
 	sourceGVR.Version = fromVersion
 
+	moved := 0
 	for _, u := range ul.Items {
 		rep := predictLoss(ctx, dyn, sourceGVR, u.GetNamespace(), u.GetName(), opts, log)
 		if err := updateCompositionWithRetry(ctx, dyn, gvr, u.GetNamespace(), u.GetName(), toVersion, rep, opts, log); err != nil {
-			return err
+			return moved, err
 		}
+		moved++
 	}
 
-	return nil
+	return moved, nil
 }
 
 // MigrationOptions carries the #188 field-loss detection into the migration. The zero value
