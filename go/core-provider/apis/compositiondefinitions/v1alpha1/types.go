@@ -532,6 +532,15 @@ type TargetStatus struct {
 	KubeconfigSecretResourceVersion string `json:"kubeconfigSecretResourceVersion,omitempty"`
 }
 
+// DefinitionReference names a CompositionDefinition (core-provider#616).
+type DefinitionReference struct {
+	// Namespace: the referenced definition's namespace.
+	Namespace string `json:"namespace"`
+
+	// Name: the referenced definition's name.
+	Name string `json:"name"`
+}
+
 // CompositionDefinitionStatus is the status of a CompositionDefinition.
 type CompositionDefinitionStatus struct {
 	rtv1.ConditionedStatus `json:",inline"`
@@ -543,6 +552,17 @@ type CompositionDefinitionStatus struct {
 	// Controller: the Deployment that runs this definition's controller (core-provider#580).
 	// +optional
 	Controller *ControllerStatus `json:"controller,omitempty"`
+
+	// Owner: the definition that owns this one's Kind x version (core-provider#616). Set only on a
+	// follower: another definition targets the same Kind and version, generated its CRD and runs the
+	// controller that reconciles this definition's instances. Absent on the owner itself and on a
+	// definition with no follower relation, and cleared when this definition becomes the owner.
+	// Recorded each time the definition is observed, from the same election that names the owner in
+	// its conditions' messages. It describes the last successful observation: a definition being
+	// deleted, or one whose observation stopped on an error before the election, keeps the value it
+	// last recorded until its next successful observation.
+	// +optional
+	Owner *DefinitionReference `json:"owner,omitempty"`
 
 	// Kind: the kind of the custom resource - Last applied kind
 	Kind string `json:"kind,omitempty"`
