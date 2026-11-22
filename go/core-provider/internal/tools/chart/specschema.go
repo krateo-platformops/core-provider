@@ -67,6 +67,12 @@ func OptIn(annotations map[string]string) (infer bool, invalid string) {
 func SpecSchema(fsys fs.FS, dir string, infer bool) (SpecSchemaResult, error) {
 	b, err := ChartJsonSchema(fsys, dir)
 	if err == nil {
+		// The inferred-schema marker is core-provider's to write: an authored schema never carries it
+		// (#568 child 7, marker.go). Removed here, once, so every consumer reads the same bytes.
+		b, err = stripRootMarker(b)
+		if err != nil {
+			return SpecSchemaResult{}, fmt.Errorf("reading the chart's values.schema.json: %w", err)
+		}
 		return SpecSchemaResult{Bytes: b, Source: SchemaAuthored}, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) || !infer {
