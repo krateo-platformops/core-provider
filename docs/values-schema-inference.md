@@ -1,3 +1,12 @@
+---
+type: Usage
+title: core-provider — values-schema inference
+description: What happens to a chart that ships no values.schema.json, how a CompositionDefinition opts in to an inferred schema (krateo.io/values-schema: infer) or uses the values-schema CLI instead, the inference rules (v1), how to tell a schema was inferred, and the known limitations.
+resource: https://github.com/krateo-platformops/core-provider/issues/568
+tags: [values-schema, inference, compositiondefinition]
+timestamp: 2026-11-22T00:00:00Z
+---
+
 # Values-schema inference
 
 core-provider types a composition CRD from the chart's root `values.schema.json`. This page
