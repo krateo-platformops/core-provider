@@ -1269,6 +1269,28 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 			// Falsifier (oasgen-provider): a child leaving this reason without either means it is not
 			// permanent and this mapping must be revisited.
 			return is(childFailed)
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "CreateRefusedPersistently":
+			// rest-dynamic-controller: the vendor has refused this child's create for long enough that
+			// its in-cycle retry budget is spent (oasgen-provider 0.90.0, go/rest-dynamic-controller/
+			// internal/controllers/condition/condition.go:26 the const, :150-199 the constructor).
+			// Contract confirmed with oasgen (core-provider#619): one const, one producer
+			// (create_refusal_report.go:50), written only as Type=Ready, Status=False, and a rename is
+			// announced before it ships.
+			//
+			// NOT permanent, unlike the arm above: the controller retries on EVERY resync (oasgen #768
+			// measured six POSTs per resync), so a later vendor accept turns the child Ready=True and
+			// this parent recomputes on its next pass. FAILED anyway (Diego, 2026-11-22): the refusal is
+			// persistent and the vendor's, so reading it as converging held the parent at Creating
+			// indefinitely while naming nothing (#619).
+			//
+			// NAMED beside the child by its REASON only. The child's message is deliberately not
+			// copied: oasgen says its wording has changed and will change again, and it embeds a
+			// duration ("has not been Ready for <d>") that grows every pass, so carrying it would
+			// rewrite this parent's Ready message on every reconcile. The child's own condition holds it.
+			//
+			// Kept apart from oasgen #898 (a RestDefinition stuck at Creating on a fresh install): that is
+			// the generator's own object, not a REST child, and it reports Creating, which stays converging.
+			return childEval{state: childFailed, detail: "CreateRefusedPersistently"}
 		case stringField(cm, "reason") == condition.ReasonCreateOutcomeUnknown:
 			// unstructured-runtime#93 (v1.21.0): a create the runtime refuses to repeat because its
 			// outcome cannot be determined. It stays until an existence check succeeds or a human,
