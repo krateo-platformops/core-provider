@@ -27,6 +27,7 @@ timestamp: 2026-08-07T00:00:00Z
   - An authored `values.schema.json` always wins over the annotation.
   - Any other annotation value is not an opt-in: the definition stays
     `ValuesSchemaMissing`, and the message names the value.
+  - Rules, CLI vs opt-in, and limitations: [values-schema inference](./values-schema-inference.md).
 - The `apiRefRBAC` feature (on by default) expects the **authn** component's
   serviceaccount login strategy (CRD `serviceaccount.authn.krateo.io`) and
   **snowplow** in-cluster; set `apiRefRBAC.enabled=false` on clusters without them
