@@ -558,7 +558,9 @@ type CompositionDefinitionStatus struct {
 	// controller that reconciles this definition's instances. Absent on the owner itself and on a
 	// definition with no follower relation, and cleared when this definition becomes the owner.
 	// Recorded each time the definition is observed, from the same election that names the owner in
-	// its conditions' messages.
+	// its conditions' messages. It describes the last successful observation: a definition being
+	// deleted, or one whose observation stopped on an error before the election, keeps the value it
+	// last recorded until its next successful observation.
 	// +optional
 	Owner *DefinitionReference `json:"owner,omitempty"`
 
