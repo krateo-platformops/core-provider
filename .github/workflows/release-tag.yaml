@@ -86,6 +86,11 @@ jobs:
     with:
       chart_version: ""
       app_version: ""
+      # Required since krateo-platformops/.github 77bcf7f (release-oci 2.0.0): which krateo-blueprints
+      # index these charts go to. core-provider's charts are platform components installed by installer,
+      # not blueprints, pages or operators, so they are deliberately not indexed. Without this input the
+      # whole release-tag run fails at startup (2.13.125 published nothing).
+      index_channel: none
 
   # #360. A GitHub release is a public claim that a version exists, and it used to be published at
   # tag time, about 30 minutes before the images did. Pull every artifact by tag, and require each

@@ -29,3 +29,6 @@ jobs:
     with:
       chart_version: ${{ github.event.inputs.chart_version || '' }}
       app_version: ${{ github.event.inputs.app_version || '' }}
+      # Required since krateo-platformops/.github 77bcf7f (release-oci 2.0.0). core-provider's charts are
+      # platform components, not blueprints/pages/operators: deliberately not indexed. See release-tag.yaml.
+      index_channel: none
