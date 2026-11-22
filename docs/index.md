@@ -24,6 +24,8 @@ all three images and the chart ship together from a single plain-semver tag.
   the reconcile flow, the digest contract, local vs remote targets.
 - [usage](./usage.md) — install via the Krateo installer pin or direct
   `helm install oci://…`; the Kubernetes >= 1.36 floor; local render.
+- [values-schema-inference](./values-schema-inference.md) — charts with no
+  `values.schema.json`: the `krateo.io/values-schema: infer` opt-in vs the CLI, rules v1, limitations.
 - [configuration](./configuration.md) — the whole config surface: chart values
   (engine / chart-inspector / cdc / apiRefRBAC / otel), env vars, asset templates.
 - [api](./api.md) — the two owned CRDs (`CompositionDefinition`,

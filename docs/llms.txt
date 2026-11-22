@@ -5,6 +5,7 @@
 docs/index.md: the map — what core-provider is + links to the whole bundle and the deep corpus
 docs/overview.md: what it does and how it works — the three monorepo components, reconcile flow, digest contract, local vs remote
 docs/usage.md: install via the Krateo installer pin or direct helm install oci://…; the k8s >= 1.36 floor; CRDs applied from go/core-provider/crds/
+docs/values-schema-inference.md: charts with no values.schema.json — the krateo.io/values-schema: infer opt-in vs the values-schema CLI, rules v1, the ValuesSchemaAuthored condition and marker, limitations (#613, #614)
 docs/configuration.md: the whole config surface — engine/chart-inspector/cdc values, apiRefRBAC, otel, env ConfigMap, CDC asset templates
 docs/api.md: the CompositionDefinition + KubernetesTarget CRDs, generated composition CRDs, chart-inspector HTTP API, metrics endpoint
 docs/examples.md: index of the runnable examples
