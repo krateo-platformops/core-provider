@@ -705,6 +705,25 @@ spec:
                       type: object
                     type: array
                 type: object
+              owner:
+                description: |-
+                  Owner: the definition that owns this one's Kind x version (core-provider#616). Set only on a
+                  follower: another definition targets the same Kind and version, generated its CRD and runs the
+                  controller that reconciles this definition's instances. Absent on the owner itself and on a
+                  definition with no follower relation, and cleared when this definition becomes the owner.
+                  Recorded each time the definition is observed, from the same election that names the owner in
+                  its conditions' messages.
+                properties:
+                  name:
+                    description: 'Name: the referenced definition''s name.'
+                    type: string
+                  namespace:
+                    description: 'Namespace: the referenced definition''s namespace.'
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
               packageUrl:
                 description: 'PackageURL: .tgz or oci chart direct url'
                 type: string

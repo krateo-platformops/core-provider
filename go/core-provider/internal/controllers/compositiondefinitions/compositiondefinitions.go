@@ -1132,6 +1132,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		if err != nil {
 			return reconciler.ExternalObservation{}, err
 		}
+		// #616: status.owner records this election in structure, beside the conditions' messages.
+		cr.Status.Owner = ownerReference(owner)
 		if owner != nil {
 			// #362: the owner generates the CRD and reports on it; a follower has no verdict of its own.
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))

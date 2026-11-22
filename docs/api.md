@@ -67,6 +67,20 @@ reconciling its instances. It is recorded when the definition's deployment is ob
 it describes what is deployed, not what the spec is moving to. `Ready` and `ControllerActive` below
 are read from this same Deployment.
 
+**`status.owner` names the definition a follower defers to (#616).** Read it to link a follower to its
+owner; do not parse the owner out of a condition message.
+
+```
+status.owner.namespace   krateo-system
+status.owner.name        widget-a
+```
+
+Set only on a **follower**: another definition targets the same Kind and version, generated its CRD
+and runs the controller that reconciles this definition's instances. **Absent** on the owner itself
+and on a definition with no follower relation, and **cleared** when a follower becomes the owner (for
+example, when the owner is deleted). Recorded each time the definition is observed, from the same
+election that names the owner in `ValuesSchemaAuthored`, `Available` and `Ready` messages.
+
 **`ControllerActive`** (every local definition, #393) says whether anything is reconciling this
 Kind right now, so a gate branches on a condition rather than matching a reason string. Its
 reasons are shared verbatim with oasgen-provider (plumbing's `conditions` package). Messages carry

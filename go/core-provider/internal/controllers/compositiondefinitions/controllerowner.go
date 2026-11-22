@@ -105,6 +105,17 @@ func electControllerOwner(self *compositiondefinitionsv1alpha1.CompositionDefini
 	return nil
 }
 
+// ownerReference is status.owner for the elected owner (core-provider#616): the owner's namespace and
+// name on a follower, nil when this definition owns its Kind x version (owner == nil, including a
+// remote definition, which runs its own controller). A nil result is what clears the field when a
+// follower becomes the owner.
+func ownerReference(owner *compositiondefinitionsv1alpha1.CompositionDefinition) *compositiondefinitionsv1alpha1.DefinitionReference {
+	if owner == nil {
+		return nil
+	}
+	return &compositiondefinitionsv1alpha1.DefinitionReference{Namespace: owner.Namespace, Name: owner.Name}
+}
+
 // controllerOwner returns the definition that runs the shared controller for gvk when that is not
 // cr; nil means cr owns it (or is remote, and has its own).
 func (e *external) controllerOwner(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvk schema.GroupVersionKind) (*compositiondefinitionsv1alpha1.CompositionDefinition, error) {
