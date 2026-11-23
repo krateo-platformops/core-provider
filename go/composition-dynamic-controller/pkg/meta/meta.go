@@ -63,6 +63,19 @@ const (
 	// While present, Ready reads False/HooksMayNotHaveRun. Cleared by a human who has verified the
 	// hooks' effects, or by the next successful helm upgrade, which runs them.
 	AnnotationKeyHooksUnverified = "krateo.io/hooks-unverified"
+	// AnnotationKeyInterruptedInstallRecovery is the kill switch for core-provider#629's automatic
+	// reinstall of an interrupted FRESH install. Set on the CompositionDefinition (it applies to all its
+	// compositions) or on one composition, with the value InterruptedInstallRecoveryManual, it keeps the
+	// #563 human gate (Ready=False/HooksMayNotHaveRun) for a chart whose install hooks are not safe to run
+	// twice. ANY value keeps the gate: an unrecognised value is read as manual, never as permission.
+	AnnotationKeyInterruptedInstallRecovery = "krateo.io/interrupted-install-recovery"
+	// InterruptedInstallRecoveryManual is AnnotationKeyInterruptedInstallRecovery's documented value.
+	InterruptedInstallRecoveryManual = "manual"
+	// AnnotationKeyInterruptedInstallReinstalls counts the automatic reinstalls of an interrupted fresh
+	// install (core-provider#629), so a release interrupted again and again falls back to the human gate
+	// after a few attempts instead of looping. Written before each attempt; removed once the release
+	// reaches a deployed revision.
+	AnnotationKeyInterruptedInstallReinstalls = "krateo.io/interrupted-install-reinstalls"
 	// TeardownWithRelease is AnnotationKeyTeardown's one recognised value.
 	TeardownWithRelease = "with-release"
 

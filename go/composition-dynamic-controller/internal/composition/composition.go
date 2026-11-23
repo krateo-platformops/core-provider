@@ -605,10 +605,24 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// so no window would do); a history that cannot be read or trusted stops the recovery.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
-		if mg, rel, err = h.recoverStuckOperation(ctx, mg, hc, rel, releaseName, updateOpts, log); err != nil {
+		var uninstalled bool
+		gate := reinstallGate{
+			policyAllows: decision.May(managementpolicy.Create) && decision.May(managementpolicy.Delete),
+			dyn:          dyn,
+		}
+		if pkg != nil && pkg.CompositionDefinitionInfo != nil && pkg.CompositionDefinitionInfo.Annotations != nil {
+			gate.cdAnnotationsKnown, gate.cdAnnotations = true, pkg.CompositionDefinitionInfo.Annotations
+		}
+		if mg, rel, uninstalled, err = h.recoverStuckOperation(ctx, mg, hc, rel, releaseName, gate, updateOpts, log); err != nil {
 			return controller.ExternalObservation{}, err
 		}
+		if uninstalled {
+			// #629: the interrupted fresh install is gone; report it absent so the runtime's Create
+			// installs it again with all its hooks.
+			return controller.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
+		}
 	}
+	mg = clearInterruptedInstallReinstalls(ctx, mg, rel, updateOpts, log)
 
 	tracer := tracer.NewTracer(ctx, meta.IsVerbose(mg))
 	cfg := rest.CopyConfig(h.kubeconfig)

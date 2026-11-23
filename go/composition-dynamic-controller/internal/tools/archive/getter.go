@@ -23,6 +23,9 @@ type CompositionDefinitionInfo struct {
 	Namespace string
 	Name      string
 	GVR       schema.GroupVersionResource
+	// Annotations are the CompositionDefinition's own annotations, as read by Get. Nil when the
+	// definition object was not read (the label-only shortcut), so a reader must treat nil as unknown.
+	Annotations map[string]string
 }
 
 type Auth struct {
@@ -297,9 +300,10 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 		Auth:                  authOrNil(withCredentials, username, password),
 		InsecureSkipTLSverify: insecureSkipTLSverify,
 		CompositionDefinitionInfo: &CompositionDefinitionInfo{
-			Name:      compositionDefinition.GetName(),
-			Namespace: compositionDefinition.GetNamespace(),
-			GVR:       compositionDefinitionGVR,
+			Name:        compositionDefinition.GetName(),
+			Namespace:   compositionDefinition.GetNamespace(),
+			GVR:         compositionDefinitionGVR,
+			Annotations: annotationsOf(compositionDefinition),
 		},
 	}, nil
 }
@@ -582,4 +586,14 @@ func readChart(m map[string]any, source string) (resolvedChart, error) {
 		return c, fmt.Errorf("%s.insecureSkipVerifyTLS: %w", source, err)
 	}
 	return c, nil
+}
+
+// annotationsOf returns u's annotations, as an empty (non-nil) map when it has none: nil in
+// CompositionDefinitionInfo.Annotations means "the definition was not read", which a reader treats
+// as unknown, so a definition with no annotations must not look unread.
+func annotationsOf(u *unstructured.Unstructured) map[string]string {
+	if a := u.GetAnnotations(); a != nil {
+		return a
+	}
+	return map[string]string{}
 }

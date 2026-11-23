@@ -151,7 +151,7 @@ var (
 	PendingHelmOperation = ready(ReasonPendingHelmOperation, metav1.ConditionFalse, WriterCDC,
 		"Observe: a release is pending within its grace period, so this reconcile stands down", Clearance{Timer, "until the pending operation settles; otherwise rolled back once pending longer than {pendingOperationGrace} (at once when the pod that started it is gone); the message says how long it has been pending"})
 	HooksMayNotHaveRun = ready(ReasonHooksMayNotHaveRun, metav1.ConditionFalse, WriterCDC,
-		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it (a first install) was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps",
+		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps. An interrupted FIRST install that was never deployed is instead uninstalled without hooks and installed again (#629), so this reason means that reinstall was not allowed: krateo.io/interrupted-install-recovery is set, the attempts reached their cap, the management policy withholds create or delete, or the release was live once",
 		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm upgrade runs the hooks and removes it"})
 	ZeroEvidence = ready(condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"})

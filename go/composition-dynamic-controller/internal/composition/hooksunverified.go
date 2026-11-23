@@ -68,24 +68,31 @@ func upgradeRanHooks(res *helmconfig.ReconcileResult, err error) bool {
 // a composition failed that a successful upgrade had healed. A merge patch has no precondition and
 // touches no other key.
 func patchHooksUnverified(ctx context.Context, mg *unstructured.Unstructured, value *string, opts tools.UpdateOptions) (*unstructured.Unstructured, error) {
+	return patchAnnotation(ctx, mg, compositionMeta.AnnotationKeyHooksUnverified, value, opts)
+}
+
+// patchAnnotation sets one annotation key to *value, or removes it when value is nil, with a JSON
+// merge patch of that key alone (no resourceVersion precondition, no other key touched). See
+// patchHooksUnverified for why a merge patch and not tools.Update.
+func patchAnnotation(ctx context.Context, mg *unstructured.Unstructured, key string, value *string, opts tools.UpdateOptions) (*unstructured.Unstructured, error) {
 	if opts.Pluralizer == nil || opts.DynamicClient == nil {
-		return mg, fmt.Errorf("patching %s: no pluralizer or dynamic client", compositionMeta.AnnotationKeyHooksUnverified)
+		return mg, fmt.Errorf("patching %s: no pluralizer or dynamic client", key)
 	}
 	gvr, err := opts.Pluralizer.GVKtoGVR(mg.GroupVersionKind())
 	if err != nil {
-		return mg, fmt.Errorf("patching %s: %w", compositionMeta.AnnotationKeyHooksUnverified, err)
+		return mg, fmt.Errorf("patching %s: %w", key, err)
 	}
 	var v any // nil removes the key in a merge patch
 	if value != nil {
 		v = *value
 	}
-	body, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{compositionMeta.AnnotationKeyHooksUnverified: v}}})
+	body, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{key: v}}})
 	if err != nil {
 		return mg, err
 	}
 	out, err := opts.DynamicClient.Resource(gvr).Namespace(mg.GetNamespace()).Patch(ctx, mg.GetName(), types.MergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
-		return mg, fmt.Errorf("patching %s: %w", compositionMeta.AnnotationKeyHooksUnverified, err)
+		return mg, fmt.Errorf("patching %s: %w", key, err)
 	}
 	return out, nil
 }
@@ -123,15 +130,35 @@ func (h *handler) clearHooksUnverifiedAfter(ctx context.Context, mg *unstructure
 // recoveryTarget over the stored history: the last deployed revision, else the pending revision
 // itself with krateo.io/hooks-unverified written FIRST. Every read or write it cannot complete
 // returns an error before the rollback, never a guessed target.
+//
+// #629: a release that was never deployed is not rolled back to itself when gate allows; it is
+// uninstalled without hooks so the runtime's Create installs it again (reinstallInterruptedFreshInstall).
+// uninstalled then reports that the release is gone and Observe must report it absent.
 func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Unstructured, hc helmconfig.Client, rel *helmconfig.Release,
-	releaseName string, updateOpts tools.UpdateOptions, log logging.Logger) (*unstructured.Unstructured, *helmconfig.Release, error) {
+	releaseName string, gate reinstallGate, updateOpts tools.UpdateOptions, log logging.Logger) (_ *unstructured.Unstructured, _ *helmconfig.Release, uninstalled bool, _ error) {
 	history, err := hc.History(ctx, releaseName, &helmconfig.HistoryConfig{})
 	if err != nil {
-		return mg, nil, fmt.Errorf("not rolling back release %s: reading its history to choose the target: %w", releaseName, err)
+		return mg, nil, false, fmt.Errorf("not rolling back release %s: reading its history to choose the target: %w", releaseName, err)
 	}
 	plan, err := recoveryTarget(rel, history)
 	if err != nil {
-		return mg, nil, fmt.Errorf("not rolling back release %s: %w", releaseName, err)
+		return mg, nil, false, fmt.Errorf("not rolling back release %s: %w", releaseName, err)
+	}
+	if plan.hooksUnverified {
+		verdict, attempts, why := freshReinstallVerdict(mg, gate, rel, history)
+		switch verdict {
+		case reinstallAllowed:
+			if mg, err = h.reinstallInterruptedFreshInstall(ctx, mg, hc, rel, releaseName, attempts, gate, updateOpts, log); err != nil {
+				return mg, nil, false, err
+			}
+			return mg, nil, true, nil
+		case reinstallCapped:
+			h.eventRecorder.Event(mg, event.Warning(reasonInterruptedInstallReinstallCapped, "Observe", fmt.Errorf(
+				"not reinstalling the interrupted install of revision %d again: %s; its hooks are marked unverified for a human", rel.Revision, why)))
+			log.Info("Not reinstalling an interrupted fresh install again; falling back to the manual gate", "why", why)
+		default:
+			log.Debug("Interrupted install not reinstalled automatically", "why", why)
+		}
 	}
 	log.Info("Recovering a stuck helm operation", "status", string(rel.Status), "revision", rel.Revision,
 		"target", plan.revision, "hooksUnverified", plan.hooksUnverified, "why", plan.why)
@@ -143,14 +170,14 @@ func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Un
 		if _, marked := hooksUnverifiedSince(mg); !marked {
 			now := time.Now().UTC().Format(time.RFC3339)
 			if mg, err = patchHooksUnverified(ctx, mg, &now, updateOpts); err != nil {
-				return mg, nil, fmt.Errorf("not rolling back release %s: marking its hooks unverified first: %w", releaseName, err)
+				return mg, nil, false, fmt.Errorf("not rolling back release %s: marking its hooks unverified first: %w", releaseName, err)
 			}
 		}
 		h.eventRecorder.Event(mg, event.Warning(reasonHooksUnverified, "Observe", errors.New(plan.why)))
 	}
 	priorRecord := priorHelmOperationRecord(mg)
 	if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
-		return mg, nil, err
+		return mg, nil, false, err
 	}
 	rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
 		op, err := hc.Rollback(ctx, releaseName, rollbackConfig(plan.revision))
@@ -160,7 +187,7 @@ func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Un
 	markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
 	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log)
 	if err != nil {
-		return mg, nil, fmt.Errorf("rolling back release: %w", err)
+		return mg, nil, false, fmt.Errorf("rolling back release: %w", err)
 	}
-	return mg, rel, nil
+	return mg, rel, false, nil
 }
