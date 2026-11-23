@@ -914,11 +914,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// add a return free to put it in the wrong place again.
 		selfHealed = true
 	}
-	if failed.plan == planInstallAgain {
-		// #636: the release was just installed. Update records its inventory, which nothing has recorded
-		// because no install had succeeded.
-		selfHealed = true
-	}
+	// #636: a release just installed again needs the Update that records its inventory too, and needs no
+	// flag for it: no install had succeeded, so none is recorded, and the #273 check below reports drift.
 
 	// #261: a child recorded in status.managed but ABSENT from the cluster is drift by definition —
 	// either the record is stale or the child needs recreating, and both are Update's job. Observe

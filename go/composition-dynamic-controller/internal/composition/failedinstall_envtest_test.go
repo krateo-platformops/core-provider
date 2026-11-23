@@ -1111,12 +1111,13 @@ func TestEnvtest_636_FailedFirstInstall(t *testing.T) {
 		if err := a.e.kube.BatchV1().Jobs(a.ns).Delete(e.ctx, "hook-1", metav1.DeleteOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.h.Create(e.ctx, a.get()); err == nil {
-			t.Fatal("control: hook-2 still cannot run")
+		// This install succeeds, so nothing else of this pass rewrites or removes the mark.
+		a.edit(a.fixSpec)
+		if err := a.h.Create(e.ctx, a.get()); err != nil || a.history() != "1:deployed" {
+			t.Fatalf("control: err=%v history %s", err, a.history())
 		}
-		// The earlier mark named revision 3; what is there now is this install's own.
-		if n, _ := readNeverDeployedMark(a.get(), a.relName()); n != 1 || a.history() != "1:failed" {
-			t.Errorf("mark names revision %d, history %s; want 1, this install's own failure", n, a.history())
+		if m := a.annotation(compositionMeta.AnnotationKeyReleaseNeverDeployed); m != "" {
+			t.Errorf("the mark of the earlier release is still there: %s", m)
 		}
 	})
 }
