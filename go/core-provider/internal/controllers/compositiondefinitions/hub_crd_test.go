@@ -172,10 +172,20 @@ func TestSyncHubCompositionCRDVersions_DropsStaleAndAddsMissing(t *testing.T) {
 	}
 
 	// storedVersions must no longer reference the pruned v1-0-0 (else the apiserver would reject the
-	// spec update on a real cluster).
-	for _, sv := range got.Status.StoredVersions {
+	// spec update on a real cluster). It is read from mgmt, where the Status().Update trim lands: on a
+	// real apiserver a spec Update cannot change a CRD's status (a subresource), so the trim exists only
+	// where the status write sent it. This test keeps two separate fake stores, and the spec write is
+	// now computed from the dynamic store's own object (#633), so its copy of status is not the trim.
+	trimmed := &apiextensionsv1.CustomResourceDefinition{}
+	if err := mgmt.Get(context.Background(), client.ObjectKey{Name: hub.Name}, trimmed); err != nil {
+		t.Fatalf("reading the hub CRD from mgmt: %v", err)
+	}
+	if len(trimmed.Status.StoredVersions) == 0 {
+		t.Fatal("premise: mgmt must hold the hub CRD's storedVersions")
+	}
+	for _, sv := range trimmed.Status.StoredVersions {
 		if sv == "v1-0-0" {
-			t.Errorf("pruned version v1-0-0 still present in hub storedVersions: %v", got.Status.StoredVersions)
+			t.Errorf("pruned version v1-0-0 still present in hub storedVersions: %v", trimmed.Status.StoredVersions)
 		}
 	}
 

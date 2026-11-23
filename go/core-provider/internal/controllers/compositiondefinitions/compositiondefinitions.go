@@ -743,7 +743,12 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, cr *composition
 	if !removed {
 		return nil
 	}
-	if _, err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
+	// #633: the prune is applied to the CRD as the apiserver holds it on this attempt, not to the
+	// (possibly cached) copy read above, so another writer's change made in between survives.
+	if err := crdclient.ApplyProjected(ctx, e.dynamic, crd, func(current *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+		crdutils.RemoveStaleVersions(current, pruneSet)
+		return current, nil
+	}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
@@ -1528,6 +1533,38 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 	// migration ensures no data remains persisted"), which would wedge this sync on every
 	// reconcile rather than corrupt anything — but wedged is not a state worth shipping, and the
 	// hub is where mirrored Compositions are stored at vacuum.
+	// #633: the mirror is computed from the hub CRD as the apiserver holds it on this attempt, not from
+	// the (possibly cached) copy read above, so another writer's change made in between survives.
+	retainedVacuum := false
+	if err := crdclient.ApplyProjected(ctx, e.mgmtDynamic, hubCRD, func(current *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+		var out *apiextensionsv1.CustomResourceDefinition
+		out, retainedVacuum = mirrorSpokeVersions(current, spokeCRD)
+		return out, nil
+	}); err != nil {
+		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
+	}
+	if retainedVacuum {
+		e.log.Info("Retained hub vacuum storage version absent from the spoke", "gvr", gr.String())
+	}
+	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
+	return nil
+}
+
+// mirrorSpokeVersions is syncHubCompositionCRDVersions's spec change as a pure function of the hub CRD
+// it replaces (#633: it runs on every write attempt, over the object that attempt re-read). It returns
+// hub with spec.versions mirrored from the spoke's finalized set (schemas, served/storage flags,
+// printer columns) -- dropping the versions the spoke pruned and adding any the hub lacked -- and
+// whether the hub's "vacuum" was retained because the spoke has none.
+//
+// "vacuum" is carried over from the HUB when the spoke has none. A spoke CRD on its first version has
+// no vacuum at all -- GenerateCRD emits a single storage version and AppendVersion only introduces
+// vacuum on the second -- so a wholesale copy would drop the hub's vacuum. Measured against kind
+// v1.36.4, the apiserver then REJECTS the update outright ("vacuum was previously a storage version,
+// and must remain in spec.versions until a storage migration ensures no data remains persisted"),
+// which would wedge this sync on every reconcile rather than corrupt anything; and the hub is where
+// mirrored Compositions are stored at vacuum.
+func mirrorSpokeVersions(hub, spoke *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, bool) {
+	hubCRD := hub.DeepCopy()
 	var hubVacuum *apiextensionsv1.CustomResourceDefinitionVersion
 	for i := range hubCRD.Spec.Versions {
 		if hubCRD.Spec.Versions[i].Name == "vacuum" {
@@ -1535,41 +1572,33 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 			break
 		}
 	}
-	hubCRD.Spec.Versions = make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(spokeCRD.Spec.Versions)+1)
+	hubCRD.Spec.Versions = make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(spoke.Spec.Versions)+1)
 	spokeHasVacuum := false
-	for i := range spokeCRD.Spec.Versions {
-		if spokeCRD.Spec.Versions[i].Name == "vacuum" {
+	for i := range spoke.Spec.Versions {
+		if spoke.Spec.Versions[i].Name == "vacuum" {
 			spokeHasVacuum = true
 		}
-		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *spokeCRD.Spec.Versions[i].DeepCopy())
+		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *spoke.Spec.Versions[i].DeepCopy())
 	}
+	retained := false
 	if !spokeHasVacuum && hubVacuum != nil {
-		// Exactly one storage version is allowed, and the retained vacuum must be it — otherwise
-		// the single spoke version arrives as storage=true and the apiserver sees two.
+		// Exactly one storage version is allowed, and the retained vacuum must be it -- otherwise the
+		// single spoke version arrives as storage=true and the apiserver sees two.
 		for i := range hubCRD.Spec.Versions {
 			hubCRD.Spec.Versions[i].Storage = false
 		}
 		hubVacuum.Served = false
 		hubVacuum.Storage = true
 		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *hubVacuum)
-		e.log.Info("Retained hub vacuum storage version absent from the spoke", "gvr", gr.String())
+		retained = true
 	}
 	// Keep None conversion and the composition-version printer column explicit (idempotent): the spoke
 	// versions already carry both, but this guards a spoke CRD that predates either.
-	if spokeCRD.Spec.Conversion != nil {
-		hubCRD.Spec.Conversion = spokeCRD.Spec.Conversion.DeepCopy()
+	if spoke.Spec.Conversion != nil {
+		hubCRD.Spec.Conversion = spoke.Spec.Conversion.DeepCopy()
 	}
 	crdutils.AddCompositionVersionColumn(hubCRD)
-
-	// A preceding Status().Update (or the direct client used for remote targets) can leave the CRD's
-	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
-	// crdclient.Get.
-	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-	if _, err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
-		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
-	}
-	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
-	return nil
+	return hubCRD, retained
 }
 
 func (e *external) Create(ctx context.Context, mg resource.Managed) error {
