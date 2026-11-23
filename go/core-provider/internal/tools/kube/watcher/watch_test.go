@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -79,22 +80,24 @@ func TestWatcher_ImmediateReady_E2E(t *testing.T) {
 			t.Fatalf("failed to create dynamic client: %v", err)
 		}
 
-		readyObj := makeDeploymentUnstructuredObj(name, ns, true)
-		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, readyObj, metav1.CreateOptions{})
+		// replicas 0: the Deployment controller reports Available=True (MinimumReplicasAvailable) with no
+		// pod and no image pull, so "already ready when the watch starts" no longer waits on a registry.
+		// A Create cannot set status itself (status is a subresource), which is why the old version
+		// slept 20s for a real nginx rollout. Wait for the controller's condition, bounded, then watch.
+		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, makeDeployment(name, ns, 0, neverPulledImage), metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("failed to create deployment: %v", err)
 		}
-
-		time.Sleep(20 * time.Second)
+		defer func() { _ = dyn.Resource(gvr).Namespace(ns).Delete(context.Background(), name, metav1.DeleteOptions{}) }()
+		if err := waitForAvailable(ctx, dyn, gvr, ns, name, 30*time.Second); err != nil {
+			t.Fatalf("premise: a replicas-0 Deployment is reported Available by its controller: %v", err)
+		}
 
 		w := NewWatcher(dyn, gvr, 5*time.Second, isAvailableChecker)
 
 		if err := w.WatchResource(ctx, ns, name); err != nil {
 			t.Fatalf("expected ready, got error: %v", err)
 		}
-
-		// cleanup
-		_ = dyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
 
 		return ctx
 	}).Feature()
@@ -118,35 +121,70 @@ func TestWatcher_BecomesReadyAfterModify_E2E(t *testing.T) {
 			t.Fatalf("failed to create dynamic client: %v", err)
 		}
 
-		initial := makeDeploymentUnstructuredObj(name, ns, false)
-		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, initial, metav1.CreateOptions{})
+		// An image that can never be pulled: the Deployment controller can only ever report it
+		// Available=False, so the ONLY way to Available=True is this test's own write (#631: the old
+		// version wrote status with a main-resource Update, which the apiserver drops, and passed only
+		// when kind pulled nginx:latest and rolled it out within the 10s timeout).
+		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, makeDeployment(name, ns, 1, neverPulledImage), metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("failed to create initial deploy: %v", err)
 		}
+		defer func() { _ = dyn.Resource(gvr).Namespace(ns).Delete(context.Background(), name, metav1.DeleteOptions{}) }()
 
 		w := NewWatcher(dyn, gvr, 10*time.Second, isAvailableChecker)
 
-		// after a short delay, update the object to set Available=True
+		// After a short delay, write Available=True through the STATUS subresource. Its error comes back
+		// on writeErr: t.Fatalf from another goroutine is not allowed.
+		writeErr := make(chan error, 1)
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			updated := makeDeploymentUnstructuredObj(name, ns, true)
-			// try to preserve resourceVersion by fetching current, then set fields
-			cur, err := dyn.Resource(gvr).Namespace(ns).Get(context.Background(), name, metav1.GetOptions{})
-			if err == nil {
-				updated.SetResourceVersion(cur.GetResourceVersion())
-			}
-			_, _ = dyn.Resource(gvr).Namespace(ns).Update(context.Background(), updated, metav1.UpdateOptions{})
+			writeErr <- setAvailableViaStatus(context.Background(), dyn, gvr, ns, name)
 		}()
 
 		if err := w.WatchResource(ctx, ns, name); err != nil {
 			t.Fatalf("expected eventual ready, got error: %v", err)
 		}
-
-		// cleanup
-		_ = dyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		select {
+		case err := <-writeErr:
+			if err != nil {
+				t.Fatalf("the status write failed: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the status write never returned")
+		}
 
 		return ctx
 	}).Feature()
+
+	testenv.Test(t, f)
+}
+
+// TestWatcher_NotReadyWithoutTheStatusWrite_E2E is BecomesReadyAfterModify's CONTROL (#631): the same
+// never-pulled Deployment and the same 10s watcher, with no status write. It must time out, which
+// proves that nothing but the test's own write makes the other test pass (no rollout, no controller).
+func TestWatcher_NotReadyWithoutTheStatusWrite_E2E(t *testing.T) {
+	f := features.New("Watcher Not Ready Without The Status Write - e2e").
+		Assess("TimesOutWithoutTheWrite", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+			ns := namespace
+			name := "never-written-e2e"
+
+			dyn, err := dynamic.NewForConfig(cfg.Client().RESTConfig())
+			if err != nil {
+				t.Fatalf("failed to create dynamic client: %v", err)
+			}
+			_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, makeDeployment(name, ns, 1, neverPulledImage), metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("failed to create deploy: %v", err)
+			}
+			defer func() { _ = dyn.Resource(gvr).Namespace(ns).Delete(context.Background(), name, metav1.DeleteOptions{}) }()
+
+			w := NewWatcher(dyn, gvr, 10*time.Second, isAvailableChecker)
+			if err := w.WatchResource(ctx, ns, name); err == nil {
+				t.Fatalf("control: without the status write the Deployment must never be Available, but the watcher reported ready")
+			}
+			return ctx
+		}).Feature()
 
 	testenv.Test(t, f)
 }
@@ -195,8 +233,8 @@ func TestWatcher_DeletedDuringWatch_E2E(t *testing.T) {
 			t.Fatalf("failed to create dynamic client: %v", err)
 		}
 
-		initial := makeDeploymentUnstructuredObj(name, ns, false)
-		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, initial, metav1.CreateOptions{})
+		// A never-pulled image: a real rollout cannot make it Available before the delete lands.
+		_, err = dyn.Resource(gvr).Namespace(ns).Create(ctx, makeDeployment(name, ns, 1, neverPulledImage), metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("failed to create initial deploy: %v", err)
 		}
@@ -219,14 +257,14 @@ func TestWatcher_DeletedDuringWatch_E2E(t *testing.T) {
 	testenv.Test(t, f)
 }
 
-func makeDeploymentUnstructuredObj(name, namespace string, available bool) *unstructured.Unstructured {
-	conds := []interface{}{}
-	if available {
-		conds = append(conds, map[string]interface{}{
-			"type":   "Available",
-			"status": "True",
-		})
-	}
+// neverPulledImage is an image no node can pull (.invalid is reserved, RFC 2606), so a Deployment
+// that runs it is never Available by its controller's own account.
+const neverPulledImage = "registry.invalid/krateo/never-pulled:0"
+
+// makeDeployment builds a Deployment with no status: a Create or main-resource Update cannot set
+// status (it is a subresource), so status is written only by the controller or by
+// setAvailableViaStatus.
+func makeDeployment(name, namespace string, replicas int64, image string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "apps/v1",
@@ -236,7 +274,7 @@ func makeDeploymentUnstructuredObj(name, namespace string, available bool) *unst
 				"namespace": namespace,
 			},
 			"spec": map[string]interface{}{
-				"replicas": int64(1),
+				"replicas": replicas,
 				"selector": map[string]interface{}{
 					"matchLabels": map[string]interface{}{
 						"app": name,
@@ -251,18 +289,53 @@ func makeDeploymentUnstructuredObj(name, namespace string, available bool) *unst
 					"spec": map[string]interface{}{
 						"containers": []interface{}{
 							map[string]interface{}{
-								"name":  "nginx",
-								"image": "nginx:latest",
+								"name":  "app",
+								"image": image,
 							},
 						},
 					},
 				},
 			},
-			"status": map[string]interface{}{
-				"conditions": conds,
-			},
 		},
 	}
+}
+
+// setAvailableViaStatus writes Available=True through the status subresource, re-reading and retrying
+// on a conflict (the Deployment controller writes the same status concurrently). Any other error is
+// returned, never swallowed.
+func setAvailableViaStatus(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, ns, name string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur, err := dyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		conds := []interface{}{map[string]interface{}{
+			"type":   "Available",
+			"status": "True",
+			"reason": "SetByWatcherTest",
+		}}
+		if err := unstructured.SetNestedSlice(cur.Object, conds, "status", "conditions"); err != nil {
+			return err
+		}
+		_, err = dyn.Resource(gvr).Namespace(ns).UpdateStatus(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// waitForAvailable polls until the Deployment reports Available=True, or fails after limit.
+func waitForAvailable(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, ns, name string, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		cur, err := dyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			var d appsv1.Deployment
+			if runtime.DefaultUnstructuredConverter.FromUnstructured(cur.Object, &d) == nil && isAvailableChecker(&d) {
+				return nil
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("%s/%s not Available within %s", ns, name, limit)
 }
 
 func isAvailableChecker(u *appsv1.Deployment) bool {
