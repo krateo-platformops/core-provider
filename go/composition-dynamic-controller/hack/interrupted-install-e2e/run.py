@@ -15,7 +15,8 @@ Arms that decide the result (any failure exits 1):
 
 Arms that are measured: force-delete, lease-stolen, graceful-delete. Which state each leaves is the
 question, so only a kill that leaves pending-install exercises #629 and is held to sigkill's checks.
-Any other state is reported NOT REPRODUCED, never as a pass.
+Any other state is reported NOT REPRODUCED, never as a pass. failing-hook kills nothing: an install hook
+that exits 1 on a first install, and what Ready says afterwards.
 """
 import argparse, datetime, json, subprocess, sys, threading, time
 
@@ -69,7 +70,7 @@ def log(m):
 class Arm:
     """One composition, and the timeline of its helm release Secrets (labels only, never their data)."""
 
-    def __init__(self, name, gvr_version, annotations=None, hook_seconds=HOOK_SECONDS):
+    def __init__(self, name, gvr_version, annotations=None, hook_seconds=HOOK_SECONDS, install_exit=0):
         self.name, self.rel, self.timeline, self.stop = name, f"rel-{name}", [], threading.Event()
         self.errors = 0
         self.manifest = {
@@ -77,7 +78,7 @@ class Arm:
             "metadata": {"name": name, "namespace": NS, "annotations": annotations or {},
                          "labels": {"krateo.io/release-name": self.rel,
                                     "krateo.io/composition-version": gvr_version}},
-            "spec": {"rev": 1, "hookSeconds": hook_seconds}}
+            "spec": {"rev": 1, "hookSeconds": hook_seconds, "installHookExit": install_exit}}
 
     def create(self):
         sh("kubectl", "apply", "-f", "-", inp=json.dumps(self.manifest))
@@ -276,6 +277,27 @@ def fresh_install_arm(how, node, version, strict):
     return a
 
 
+def failing_hook_arm(version):
+    """No kill: the first install hook fails by itself. Measured: what Ready says afterwards."""
+    log("=== failing-hook: fresh install whose first post-install hook exits 1; nothing is killed")
+    a = Arm("failing-hook", version, hook_seconds=2, install_exit=1).create()
+    end, readys = time.time() + 150, []
+    while time.time() < end:
+        r = a.ready()
+        if not readys or readys[-1] != r:
+            readys.append(r)
+        time.sleep(1)
+    a.show_timeline()
+    states = [sorted({s[1] for s in snap}) for _, snap in a.timeline]
+    print(f"      Ready over time: {readys}; hook 2 exists: {a.job('install-2') is not None}")
+    fails = []
+    check(fails, any("failed" in st for st in states), "control: the first install was seen failed")
+    check(fails, a.predelete() is None, "no pre-delete hook ran")
+    check(fails, not any(r[0] == "True" for r in readys) or a.complete("install-2"), "never Ready=True with hook 2 not run")
+    a.stop.set()
+    results.append(("failing-hook", "FAIL" if fails else "PASS", "; ".join(fails), False))
+
+
 def kill_switch_arm(node, version):
     log("=== kill-switch: composition annotated manual, SIGKILL mid post-install hook")
     pod = fresh_controller()
@@ -426,6 +448,10 @@ def main():
                 fresh_install_arm(how, o.node, v, strict=False)
             except Exception as e:
                 results.append((how, "ERROR", repr(e), False))
+        try:
+            failing_hook_arm(v)
+        except Exception as e:
+            results.append(("failing-hook", "ERROR", repr(e), False))
     except Exception as e:
         results.append(("run", "ERROR", repr(e), True))
     log(f"=== results, core-provider {o.version}")
