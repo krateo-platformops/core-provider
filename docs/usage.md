@@ -158,6 +158,20 @@ value that does not parse acts as `observe` only. Measured on envtest (`TestEnvt
 - `krateo.io/deletion-policy: orphan` keeps the release on delete, whatever the management policy
   allows; so does a deletion-policy value that is neither `delete` nor `orphan`.
 
+## An install interrupted before it ever deployed
+
+If a composition controller loses its lease or its pod during a **first install** (for example during an unrequested GKE control-plane resize), the release is left `pending-install` and the post-install hooks that had not run yet never would. Since #629 the controller recovers this itself: when the release history holds **no revision that was ever deployed** (every other revision failed), it
+
+1. uninstalls the half-finished release **without hooks**, so no pre-delete hook (a database drop, for example) runs;
+2. deletes the hook Jobs that release recorded, so the new install's hook Jobs cannot collide with the old ones whatever the chart's `helm.sh/hook-delete-policy`;
+3. installs it again, running every install hook, and emits a Normal `InterruptedInstallReinstalled` Event.
+
+A release that was deployed at any point is never uninstalled by this path. It keeps #563's recovery: a rollback to its last deployed revision, or `Ready=False/HooksMayNotHaveRun` with `krateo.io/hooks-unverified` when there is none to return to.
+
+The automatic reinstall is attempted at most **3** times per composition (`krateo.io/interrupted-install-reinstalls` counts them and is removed once the release deploys). After that it falls back to `HooksMayNotHaveRun` with a Warning `InterruptedInstallReinstallCapped` Event, because the cause is not transient.
+
+**To keep the manual gate instead**, for a chart whose install hooks are not safe to run twice, set `krateo.io/interrupted-install-recovery: manual` on the CompositionDefinition (it applies to all its compositions) or on one composition. Any value of that annotation keeps the gate: an unrecognised value is never read as permission. The management policy must also allow both `create` and `delete` for the reinstall to run.
+
 ## What a definition's chart creates: `status.contents`
 
 A CompositionDefinition's status says what its chart renders **at the chart's default values**
