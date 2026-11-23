@@ -201,11 +201,23 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 			case !withCredentials && errors.Is(err, errDefinitionStatusUnset):
 				// Locate, which a composition's Delete uses (#419). The labels name this definition
 				// exactly (name, namespace, GVR); with no status there is nothing to check them
-				// against. A definition with no status never became Available, so no version
-				// migration can be in flight for isVersionMigrationHandover to protect. Failing here
-				// instead deadlocked: the definition's Delete waits for its compositions, and the
-				// composition's Delete needed this status, which a definition deleted before its
-				// first status write never gets. Get (Create/Update) still requires it.
+				// against, and the check is all status is used for here. What Delete decides from
+				// this definition does not read its status: isVersionMigrationHandover compares
+				// against DefinitionVersion, its spec.chart.version (read below), and the RBAC
+				// fallback needs only its identity. So trusting the labels is safe in BOTH
+				// directions whether or not the definition was ever Available.
+				//
+				// Do not justify this with "a definition with no status never became Available":
+				// that is false. A definition recreated (its CRD reinstalled, or restored from a
+				// backup that drops status) has no status while its compositions and releases
+				// exist, and a remote spoke's shadow copy is created before its status is written
+				// (remoteseed.go). If a migration is in flight then, the definition's spec already
+				// names the new version, so the handover is still detected.
+				//
+				// Failing here instead deadlocked: the definition's Delete waits for its
+				// compositions, and the composition's Delete needed this status, which a definition
+				// deleted before its first status write never gets. Get (Create/Update) still
+				// requires it.
 				g.logger.Debug("Composition definition has no status yet; trusting the composition's labels to locate it for teardown",
 					"compositionDefinitionName", cdInfo.Name, "compositionDefinitionNamespace", cdInfo.Namespace)
 				break

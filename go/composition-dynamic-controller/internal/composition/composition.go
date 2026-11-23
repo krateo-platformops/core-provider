@@ -1567,17 +1567,23 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// and keeps the leak from reappearing if caching is ever enabled on this path.
 	defer hc.Close()
 
-	// Locate, not Get (#402): Delete never fetches the chart, so it must not need the chart's
-	// credentials. With Get, a composition whose passwordRef Secret was gone (a namespace teardown
-	// that removes it first, a rotation) could never finish deleting. The definition is still read:
-	// pkg.DefinitionVersion decides isVersionMigrationHandover below, and guessing it would uninstall a release
-	// a version migration still shares.
-	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
-	if err != nil {
-		return fmt.Errorf("getting package info: %w", err)
-	}
-
-	// Check if the release exists before uninstalling
+	// The release FIRST, the definition only when there is something to tear down (#419).
+	//
+	// The definition is needed for exactly two things here: the migration-handover decision
+	// (pkg.DefinitionVersion, read from its spec.chart.version) and the definition's identity for
+	// the RBAC fallback. Both matter only while there is a release or a recorded remnant of one.
+	// Locating it first made a composition with NOTHING installed undeletable whenever its
+	// definition could not be located: a definition deleted before core-provider's first status
+	// write never lets the cdc's Create run (Get requires status), so the composition never gets
+	// the definition-ref labels either, and Locate's label-less search skips every definition with
+	// no status as soon as there is more than one in the cluster ("too many definitions"). The
+	// definition waits for its compositions, the composition waited for the definition: the #313 /
+	// #419 namespace-deletion deadlock, which the label-trusting branch in Locate (#417) closed
+	// only for a composition that had been labelled.
+	//
+	// Not a relaxation of the teardown rule: where something IS installed, a definition that cannot
+	// be located is still an error and the finalizer stays (locateForTeardown), because the
+	// handover decision cannot be made without it and guessing either way is unsafe.
 	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
 	if err != nil {
 		return fmt.Errorf("finding helm release: %w", err)
@@ -1591,12 +1597,21 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			return perr
 		}
 		if len(pending) > 0 {
+			pkg, err := h.locateForTeardown(log, mg)
+			if err != nil {
+				return err
+			}
 			log.Info("Release already uninstalled; finishing its teardown", "hookJobsToDelete", len(pending))
 			return h.finishTeardown(ctx, mg, dyn, pkg, updateOpts, log)
 		}
-		log.Debug("Release not found, nothing to uninstall.", "package", pkg.URL)
+		log.Debug("Release not found, nothing to uninstall.")
 		h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("Release not found, nothing to uninstall: %s", mg.GetName())))
 		return nil
+	}
+
+	pkg, err := h.locateForTeardown(log, mg)
+	if err != nil {
+		return err
 	}
 
 	// GVK version-migration handover. When a composition's chart version is bumped, its CR's
@@ -1762,6 +1777,21 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 
 	return h.finishTeardown(ctx, mg, dyn, pkg, updateOpts, log)
+}
+
+// locateForTeardown is Delete's read of the composition's definition: Locate, not Get (#402),
+// because Delete never fetches the chart and so must not need the chart's credentials (with Get, a
+// composition whose passwordRef Secret was gone could never finish deleting). The definition is
+// still read, and a failure to read it is returned, never defaulted: pkg.DefinitionVersion decides
+// isVersionMigrationHandover, and guessing it would either uninstall a release a version migration
+// still shares or orphan one. Delete calls it only once it knows there is something to tear down
+// (#419).
+func (h *handler) locateForTeardown(log logging.Logger, mg *unstructured.Unstructured) (*archive.Info, error) {
+	pkg, err := h.packageInfoGetter.WithLogger(log).Locate(mg)
+	if err != nil {
+		return nil, fmt.Errorf("getting package info: %w", err)
+	}
+	return pkg, nil
 }
 
 // finishTeardown is everything after the release is gone: the release's recorded hook Jobs (#576),
