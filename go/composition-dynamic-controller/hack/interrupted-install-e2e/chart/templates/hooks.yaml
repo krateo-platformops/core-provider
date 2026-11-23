@@ -6,6 +6,7 @@ metadata:
   name: {{ .Release.Name }}-install
   annotations:
     helm.sh/hook: post-install
+    helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: hook-failed
 spec:
   backoffLimit: 0
@@ -17,6 +18,27 @@ spec:
         - name: hook
           image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
           command: ["sleep", {{ .Values.hookSeconds | quote }}]
+---
+# Runs after the Job above, so a controller killed while that one runs never reaches it. Job 1 finishes
+# by itself in the cluster; only this one shows whether the hooks that had not run yet ever ran.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-install-2
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: hook-failed
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: hook
+          image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+          command: ["sleep", "1"]
 ---
 apiVersion: batch/v1
 kind: Job

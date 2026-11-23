@@ -233,6 +233,8 @@ def fresh_install_arm(how, node, version, strict):
     a = Arm(how, version).create()
     a.wait_hook_running("install")
     job1, app1, sec1 = uid(a.job("install")), uid(a.app()), a.secrets()
+    if a.job("install-2") is not None:
+        raise RuntimeError(f"{how}: the second hook already exists at the kill, so nothing is left un-run")
     print(f"      at the kill: {sec1}; install Job {job1[:8]}, not complete: {not a.complete('install')}")
     if len(sec1) != 1 or sec1[0][1] != "pending-install" or a.complete("install"):
         raise RuntimeError(f"{how}: not mid-install at the kill: {sec1}")
@@ -241,7 +243,7 @@ def fresh_install_arm(how, node, version, strict):
     print(f"      killed: {proof_of_death(how, pod)}")
     try:
         wait(f"{how}: to settle", lambda: a.ready()[1] == "HooksMayNotHaveRun" or (
-            a.ready()[0] == "True" and (a.complete("install") or time.time() - t_kill > 200)), 420)
+            a.ready()[0] == "True" and (a.complete("install-2") or time.time() - t_kill > 200)), 420)
     except TimeoutError as e:
         print(f"      {e}; Ready={a.ready()}")
     first = [s for _, snap in a.timeline for s in snap if s[2] == sec1[0][2]]
@@ -253,11 +255,13 @@ def fresh_install_arm(how, node, version, strict):
     fails = []
     # Safety, whatever state the kill left: no teardown hook, and never Ready with hooks that did not run.
     check(fails, a.predelete() is None, "no pre-delete hook ran")
-    check(fails, not (a.ready()[0] == "True" and not a.complete("install")), "not Ready=True with the install hook never completed")
+    check(fails, not (a.ready()[0] == "True" and not (a.complete("install") and a.complete("install-2"))),
+          f"not Ready=True with an install hook that never completed (hook 1 complete: {a.complete('install')}, "
+          f"hook 2 exists: {a.job('install-2') is not None}, complete: {a.complete('install-2')})")
     if reproduced:
         check(fails, ev == 1, f"exactly one InterruptedInstallReinstalled event (got {ev})")
         check(fails, job2 is not None and job2 != job1, "the install hook Job is a new object")
-        check(fails, a.complete("install"), "the install hook ran to completion")
+        check(fails, a.complete("install") and a.complete("install-2"), "both install hooks ran to completion")
         check(fails, uid(a.app()) not in (None, app1), "the app object was reinstalled")
         check(fails, len(fin) == 1 and fin[0][0] == "1" and fin[0][1] == "deployed" and fin[0][2] != sec1[0][2], "one revision, deployed, a new release")
         check(fails, a.ready()[0] == "True", "Ready=True")
@@ -299,7 +303,7 @@ def kill_switch_arm(node, version):
 def once_deployed_arm(node, version):
     log("=== once-deployed CONTROL: deployed release, SIGKILL mid post-upgrade hook")
     a = Arm("once-deployed", version, hook_seconds=1).create()
-    wait("the first install", lambda: a.ready()[0] == "True" and a.complete("install"), 240)
+    wait("the first install", lambda: a.ready()[0] == "True" and a.complete("install-2"), 240)
     app1, sec1 = uid(a.app()), a.secrets()
     pod = fresh_controller()
     sh("kubectl", "patch", "hookprobes.composition.krateo.io", "once-deployed", "-n", NS, "--type", "merge",
@@ -318,7 +322,12 @@ def once_deployed_arm(node, version):
     a.show_timeline()
     fails = []
     check(fails, uid(a.app()) == app1, "the app object is the SAME object: the release was never uninstalled")
-    check(fails, all(any(s[0] == "1" for s in snap) for _, snap in a.timeline), "revision 1 was present in every reading")
+    # Not "revision 1 is always there": helm prunes it at max history (HELM_MAX_HISTORY, default 3) once
+    # the recovery's rollback and upgrade exist. What an uninstall would do is empty the history.
+    seen = [{s[1] for s in snap} for _, snap in a.timeline]
+    live = seen[next(i for i, st in enumerate(seen) if "deployed" in st):]
+    check(fails, all(st & {"deployed", "superseded"} for st in live) and not any("uninstalling" in st for st in seen),
+          f"a once-deployed revision was present in all {len(live)} readings since the first deploy, none uninstalling")
     check(fails, a.predelete() is None, "no pre-delete hook ran")
     check(fails, a.events("InterruptedInstallReinstalled") == 0, "no reinstall event")
     check(fails, (a.app()["data"] or {}).get("rev") == "2", "the upgrade was applied")
