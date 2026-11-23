@@ -2,3 +2,5 @@
 rev: 1
 # hookSeconds is how long each lifecycle hook runs: the window the controller is killed in.
 hookSeconds: 1
+# installHookExit is the first post-install hook's exit code: 1 makes the first install fail on its own.
+installHookExit: 0
