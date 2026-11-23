@@ -1,0 +1,7 @@
+# Its UID is the witness that the release was, or was not, uninstalled.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-app
+data:
+  rev: {{ .Values.rev | quote }}

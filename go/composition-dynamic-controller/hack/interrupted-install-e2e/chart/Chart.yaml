@@ -1,0 +1,5 @@
+apiVersion: v2
+name: hookprobe
+description: Probe chart for the interrupted-install exercise (core-provider#629). Not published.
+version: 0.1.0
+appVersion: "0.1.0"

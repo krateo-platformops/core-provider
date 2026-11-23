@@ -1,0 +1,48 @@
+# post-install ONLY, and hook-delete-policy without before-hook-creation: a leftover Job collides with
+# the reinstall's, so the recovery's deletion of the recorded hook Jobs is load-bearing here.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-install
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-delete-policy: hook-failed
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: hook
+          image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+          command: ["sleep", {{ .Values.hookSeconds | quote }}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-upgrade
+  annotations:
+    helm.sh/hook: post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: hook
+          image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+          command: ["sleep", {{ .Values.hookSeconds | quote }}]
+---
+# Stands for a destructive teardown hook (an openstack chart's pre-delete drops its database). A hook
+# object outlives the uninstall, so its existence says a pre-delete hook ran.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-predelete
+  annotations:
+    helm.sh/hook: pre-delete
+data:
+  ran: "yes"

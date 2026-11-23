@@ -1,0 +1,4 @@
+# rev changes the app ConfigMap, which is how the exercise starts an upgrade.
+rev: 1
+# hookSeconds is how long each lifecycle hook runs: the window the controller is killed in.
+hookSeconds: 1
