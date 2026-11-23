@@ -1,0 +1,12 @@
+{{- if .Values.enabled }}
+# Stands for a GatewayClass: cluster-scoped, of a kind ANOTHER release owns.
+apiVersion: probe.example.com/v1
+kind: Gadget
+metadata:
+  name: {{ .Release.Name }}
+  {{- if .Values.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec: {controller: probe}
+{{- end }}

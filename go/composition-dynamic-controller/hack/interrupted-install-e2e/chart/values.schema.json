@@ -3,6 +3,7 @@
   "type": "object",
   "properties": {
     "rev": {"type": "integer", "default": 1},
-    "hookSeconds": {"type": "integer", "default": 1}
+    "hookSeconds": {"type": "integer", "default": 1},
+    "installHookExit": {"type": "integer", "default": 0}
   }
 }

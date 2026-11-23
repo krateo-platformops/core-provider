@@ -15,7 +15,8 @@ Arms that decide the result (any failure exits 1):
 
 Arms that are measured: force-delete, lease-stolen, graceful-delete. Which state each leaves is the
 question, so only a kill that leaves pending-install exercises #629 and is held to sigkill's checks.
-Any other state is reported NOT REPRODUCED, never as a pass.
+Any other state is reported NOT REPRODUCED, never as a pass. failing-hook kills nothing: an install hook
+that exits 1 on a first install, and what Ready says afterwards.
 """
 import argparse, datetime, json, subprocess, sys, threading, time
 
@@ -69,7 +70,7 @@ def log(m):
 class Arm:
     """One composition, and the timeline of its helm release Secrets (labels only, never their data)."""
 
-    def __init__(self, name, gvr_version, annotations=None, hook_seconds=HOOK_SECONDS):
+    def __init__(self, name, gvr_version, annotations=None, hook_seconds=HOOK_SECONDS, install_exit=0):
         self.name, self.rel, self.timeline, self.stop = name, f"rel-{name}", [], threading.Event()
         self.errors = 0
         self.manifest = {
@@ -77,7 +78,7 @@ class Arm:
             "metadata": {"name": name, "namespace": NS, "annotations": annotations or {},
                          "labels": {"krateo.io/release-name": self.rel,
                                     "krateo.io/composition-version": gvr_version}},
-            "spec": {"rev": 1, "hookSeconds": hook_seconds}}
+            "spec": {"rev": 1, "hookSeconds": hook_seconds, "installHookExit": install_exit}}
 
     def create(self):
         sh("kubectl", "apply", "-f", "-", inp=json.dumps(self.manifest))
@@ -276,6 +277,27 @@ def fresh_install_arm(how, node, version, strict):
     return a
 
 
+def failing_hook_arm(version):
+    """No kill: the first install hook fails by itself. Measured: what Ready says afterwards."""
+    log("=== failing-hook: fresh install whose first post-install hook exits 1; nothing is killed")
+    a = Arm("failing-hook", version, hook_seconds=2, install_exit=1).create()
+    end, readys = time.time() + 150, []
+    while time.time() < end:
+        r = a.ready()
+        if not readys or readys[-1] != r:
+            readys.append(r)
+        time.sleep(1)
+    a.show_timeline()
+    states = [sorted({s[1] for s in snap}) for _, snap in a.timeline]
+    print(f"      Ready over time: {readys}; hook 2 exists: {a.job('install-2') is not None}")
+    fails = []
+    check(fails, any("failed" in st for st in states), "control: the first install was seen failed")
+    check(fails, a.predelete() is None, "no pre-delete hook ran")
+    check(fails, not any(r[0] == "True" for r in readys) or a.complete("install-2"), "never Ready=True with hook 2 not run")
+    a.stop.set()
+    results.append(("failing-hook", "FAIL" if fails else "PASS", "; ".join(fails), False))
+
+
 def kill_switch_arm(node, version):
     log("=== kill-switch: composition annotated manual, SIGKILL mid post-install hook")
     pod = fresh_controller()
@@ -350,8 +372,7 @@ def witness_arm(a):
     results.append(("witness", "FAIL" if fails else "PASS", "; ".join(fails), True))
 
 
-def setup(version, chart_dir):
-    import base64, os, tempfile
+def install_core_provider(version):
     for c, rel, extra in (("core-provider-crds", "core-provider-crds", []),
                           ("core-provider", "core-provider", [
                               # A CI runner has 4 CPUs; the chart asks 1 CPU per chart-inspector replica.
@@ -361,13 +382,20 @@ def setup(version, chart_dir):
         log(f"installing {c} {version}")
         sh("helm", "upgrade", "--install", rel, f"oci://ghcr.io/krateo-platformops/charts/{c}", "--version", version,
            "-n", CP_NS, "--create-namespace", "--wait", "--timeout", "8m", *extra)
-    d = tempfile.mkdtemp()
-    sh("helm", "package", chart_dir, "-d", d)
-    tgz = base64.b64encode(open(os.path.join(d, "hookprobe-0.1.0.tgz"), "rb").read()).decode()
+
+
+def serve_charts(*chart_dirs):
+    """Package the charts (all version 0.1.0) and serve them in the cluster. Returns name -> URL."""
+    import base64, os, tempfile
+    d, data = tempfile.mkdtemp(), {}
+    for c in chart_dirs:
+        sh("helm", "package", c, "-d", d)
+    for t in sorted(os.listdir(d)):
+        data[t] = base64.b64encode(open(os.path.join(d, t), "rb").read()).decode()
     labels = {"app": "charts"}
     objs = [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS}},
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "charts", "namespace": NS}, "binaryData": {"hookprobe-0.1.0.tgz": tgz}},
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "charts", "namespace": NS}, "binaryData": data},
         {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "charts", "namespace": NS}, "spec": {"selector": labels, "ports": [{"port": 8080}]}},
         {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "charts", "namespace": NS},
          "spec": {"selector": {"matchLabels": labels}, "template": {"metadata": {"labels": labels}, "spec": {
@@ -377,21 +405,36 @@ def setup(version, chart_dir):
              "volumes": [{"name": "c", "configMap": {"name": "charts"}}]}}}}]
     sh("kubectl", "apply", "-f", "-", inp=json.dumps({"apiVersion": "v1", "kind": "List", "items": objs}))
     sh("kubectl", "rollout", "status", "-n", NS, "deployment/charts", "--timeout=180s")
+    return {t[:-len("-0.1.0.tgz")]: f"http://charts.{NS}.svc.cluster.local:8080/{t}" for t in data}
+
+
+def define(name, url):
+    """Create a CompositionDefinition, wait for it, and return the served CRD version."""
     sh("kubectl", "apply", "-f", "-", inp=json.dumps({
-        "apiVersion": "core.krateo.io/v1alpha1", "kind": "CompositionDefinition", "metadata": {"name": "hookprobe", "namespace": NS},
-        "spec": {"chart": {"url": f"http://charts.{NS}.svc.cluster.local:8080/hookprobe-0.1.0.tgz", "version": "0.1.0"}}}))
+        "apiVersion": "core.krateo.io/v1alpha1", "kind": "CompositionDefinition", "metadata": {"name": name, "namespace": NS},
+        "spec": {"chart": {"url": url, "version": "0.1.0"}}}))
 
     def cd_ready():
-        cd = kget("compositiondefinitions.core.krateo.io", "hookprobe")
+        cd = kget("compositiondefinitions.core.krateo.io", name)
         st = cd.get("status") or {}
         return st if any(c["type"] == "Ready" and c["status"] == "True" for c in st.get("conditions") or []) else None
     st = wait("the CompositionDefinition to be Ready", cd_ready, 300)
     log(f"CompositionDefinition Ready: {st['apiVersion']} {st['kind']}")
+    return st["apiVersion"].split("/")[1]
+
+
+def check_images(version):
     imgs = {c["image"] for p in kget("pods", ns=CP_NS) for c in p["spec"]["containers"]}
     log("images under test: " + ", ".join(sorted(imgs)))
     if not all(i.endswith(":" + version) for i in imgs):
         raise RuntimeError(f"not only {version} is running: {imgs}")
-    return st["apiVersion"].split("/")[1]
+
+
+def setup(version, chart_dir):
+    install_core_provider(version)
+    v = define("hookprobe", serve_charts(chart_dir)["hookprobe"])
+    check_images(version)
+    return v
 
 
 def diagnostics():
@@ -426,6 +469,10 @@ def main():
                 fresh_install_arm(how, o.node, v, strict=False)
             except Exception as e:
                 results.append((how, "ERROR", repr(e), False))
+        try:
+            failing_hook_arm(v)
+        except Exception as e:
+            results.append(("failing-hook", "ERROR", repr(e), False))
     except Exception as e:
         results.append(("run", "ERROR", repr(e), True))
     log(f"=== results, core-provider {o.version}")

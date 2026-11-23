@@ -1,0 +1,8 @@
+# Always rendered, so the release is never empty.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-anchor
+data:
+  enabled: {{ .Values.enabled | quote }}
+  keep: {{ .Values.keep | quote }}
