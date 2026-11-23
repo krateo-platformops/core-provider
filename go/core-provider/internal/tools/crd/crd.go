@@ -14,7 +14,6 @@ import (
 
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
-	"github.com/krateo-platformops/core-provider/internal/tools/kube"
 	"github.com/krateo-platformops/core-provider/internal/tools/kube/watcher"
 	"github.com/krateo-platformops/core-provider/internal/tools/retry"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -281,7 +280,12 @@ func ApplyOrUpdateCRDDropping(ctx context.Context,
 
 	if crd == nil {
 		log.Debug("Creating CRD", "gvr", gvr.String())
-		_, err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), newcrd, kube.ApplyOptions{})
+		// A CRD that appears between the read above and this write (another reconcile, another
+		// replica) is not overwritten wholesale: the update path projects newcrd onto it (#633).
+		err = ApplyProjected(ctx, dyn, newcrd, func(current *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+			out, _, err := ProjectWrite(current, newcrd, nil)
+			return out, err
+		})
 		if err != nil {
 			return gvr, fmt.Errorf("error applying CRD: %w", err)
 		}
@@ -329,7 +333,14 @@ func ApplyOrUpdateCRDDropping(ctx context.Context,
 		return gvr, nil
 	}
 
-	_, err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
+	// #633: the write is ProjectWrite over the CRD as the apiserver holds it on this attempt, not over
+	// the (possibly cached) copy read above, so a change another writer made in between survives. The
+	// decision to write at all (mutated) is the copy's; re-projecting an already-current CRD sends an
+	// Update the apiserver persists nothing for.
+	err = ApplyProjected(ctx, dyn, crd, func(current *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+		out, _, err := ProjectWrite(current, newcrd, drop)
+		return out, err
+	})
 	if err != nil {
 		return gvr, fmt.Errorf("error applying CRD update: %w", err)
 	}
