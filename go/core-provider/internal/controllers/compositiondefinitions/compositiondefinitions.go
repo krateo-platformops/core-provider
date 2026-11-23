@@ -102,9 +102,9 @@ var (
 	AuthnURL = envOr("CORE_PROVIDER_AUTHN_URL", "")
 
 	// SelfSAName / SelfSANamespace / SelfGroup identify core-provider's OWN ServiceAccount for its
-	// apiRefRBAC authn allowlist mapping. It is provisioned at runtime (the first time a
-	// composition declares an apiRef) rather than declaratively at bootstrap, where the authn CRD
-	// does not yet exist. The chart sets these when apiRefRBAC is enabled; empty SelfSAName
+	// apiRefRBAC authn allowlist mapping. It is ensured at runtime, on every reconcile of a definition
+	// with an apiRef (ensureSelfAuthnMapping), rather than declaratively at bootstrap, where the authn
+	// CRD does not yet exist. The chart sets these when apiRefRBAC is enabled; empty SelfSAName
 	// disables self-provisioning.
 	SelfSAName      = envOr("CORE_PROVIDER_APIREF_SELF_SA_NAME", "")
 	SelfSANamespace = envOr("CORE_PROVIDER_APIREF_SELF_SA_NAMESPACE", "")
@@ -1225,8 +1225,17 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf("error seeding remote target: %w", err)
 	}
 
+	// core-provider's own authn mapping, with a REAL write, before the dry run below: the dry run needs
+	// the token the mapping authorizes and persists nothing, so a mapping only Deploy wrote could never
+	// come to exist here (#642). Not a write to the definition's external resource, like the remote seed
+	// above; a definition whose policy or a pause forbids acting writes nothing.
+	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, observeMayWriteSelfMapping(cr))
 	authnSupport, aerr := e.authnSupport(ctx, cr)
+	if aerr == nil {
+		aerr = selfMapping.err
+	}
 	if aerr != nil {
+		recordAuthnMappingApplied(cr, mappingRead{err: aerr}, selfMapping)
 		return reconciler.ExternalObservation{}, aerr
 	}
 	opts := deploy.DeployOptions{
@@ -1256,18 +1265,18 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
 		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
-		SelfSAName:             SelfSAName,
-		SelfSANamespace:        SelfSANamespace,
-		SelfGroup:              SelfGroup,
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
-	recordAuthnMappingApplied(cr, authnSupport)
+	controllerMapping := recordLiveAuthnMappings(ctx, cr, opts, selfMapping)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error deploying dynamic controller in dry-run mode: %w", err)
+	}
+	if controllerMapping.err != nil {
+		return reconciler.ExternalObservation{}, controllerMapping.err
 	}
 
 	if cr.Status.Digest != dig {
@@ -1286,6 +1295,17 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if cr.Status.Digest != dig {
 		log.Debug("Deployed resources digest changed", "status", cr.Status.Digest, "deployed", dig)
 		markUpdatePending(cr, "the deployed controller resources drifted")
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
+	// The digest covers what is RENDERED for the controller's authn mapping, not the live object (#251,
+	// #405), so a mapping deleted or re-pointed behind it is seen only here (#642). Update writes it.
+	if controllerMapping.state == deploy.MappingMissing {
+		log.Debug("The controller's authn mapping is missing", "gvr", gvr.String())
+		markUpdatePending(cr, "the controller's authn mapping is missing")
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1668,6 +1688,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// core-provider's own authn mapping, which Deploy needs and does not write (#642). Before the
+	// relocation below, so a mapping that cannot be ensured stops nothing.
+	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, true)
+	if selfMapping.err != nil {
+		recordAuthnMappingApplied(cr, mappingRead{err: selfMapping.err}, selfMapping)
+		return selfMapping.err
+	}
+
 	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
 	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
 		return err
@@ -1703,16 +1731,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
 		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
-		SelfSAName:             SelfSAName,
-		SelfSANamespace:        SelfSANamespace,
-		SelfGroup:              SelfGroup,
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
-	recordAuthnMappingApplied(cr, authnSupport)
+	recordLiveAuthnMappings(ctx, cr, opts, selfMapping)
 	if err != nil {
 		return err
 	}
@@ -2075,6 +2100,14 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		return gvr, err
 	}
 
+	// core-provider's own authn mapping, which Deploy needs and does not write (#642). Before the
+	// relocation below, so a mapping that cannot be ensured stops nothing.
+	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, true)
+	if selfMapping.err != nil {
+		recordAuthnMappingApplied(cr, mappingRead{err: selfMapping.err}, selfMapping)
+		return gvr, selfMapping.err
+	}
+
 	// #313: move this version's controller out of the definition's namespace first, stop-before-start.
 	if err := e.relocateLegacyController(ctx, cr, gvr, log); err != nil {
 		return gvr, err
@@ -2110,16 +2143,13 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
 		ControllerAuthnURL:     controllerAuthnURL(e.remote, e.targetAuthnURL, AuthnURL, AuthnNamespace),
-		SelfSAName:             SelfSAName,
-		SelfSANamespace:        SelfSANamespace,
-		SelfGroup:              SelfGroup,
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
-	recordAuthnMappingApplied(cr, authnSupport)
+	recordLiveAuthnMappings(ctx, cr, opts, selfMapping)
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}

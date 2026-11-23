@@ -114,8 +114,8 @@ type DeployOptions struct {
 	DiscoveryClient discovery.CachedDiscoveryInterface
 	KubeClient      client.Client
 	DynClient       dynamic.Interface
-	// HubDynClient is the management cluster's dynamic client. core-provider's OWN authn mapping goes
-	// there, where core-provider and its authn run, even when DynClient is a remote target's (#251).
+	// HubDynClient is the management cluster's dynamic client. The definition's published schema
+	// ConfigMap goes there (schemaconfigmap.go), even when DynClient is a remote target's (#251).
 	// Nil means the same cluster as DynClient (a local definition).
 	HubDynClient dynamic.Interface
 	Namespace    string
@@ -166,14 +166,6 @@ type DeployOptions struct {
 	// a set-but-empty value as "", not as its default, so an empty value would leave it without an
 	// authn to call. The caller always resolves a default.
 	ControllerAuthnURL string
-	// SelfSAName / SelfSANamespace / SelfGroup identify core-provider's OWN ServiceAccount for its
-	// apiRefRBAC authn allowlist mapping — provisioned lazily (ensureSelfAuthnMapping) the first
-	// time a composition declares an apiRef, so core-provider can authenticate to snowplow /rbac.
-	// Set from CORE_PROVIDER_APIREF_SELF_SA_NAME / _NAMESPACE and CORE_PROVIDER_APIREF_GROUP. Empty
-	// SelfSAName disables self-provisioning (apiRefRBAC off).
-	SelfSAName      string
-	SelfSANamespace string
-	SelfGroup       string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 	// Controller carries this CompositionDefinition's per-Kind CDC tuning (spec.controller). Nil, or
@@ -530,7 +522,10 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	err = applyAuthnMappings(ctx, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
+	// The controller's authn mapping, on the cluster it runs in (DynClient: a remote target's for a
+	// remote definition, #251), so it can exchange its projected token for a service JWT. core-provider's
+	// OWN mapping is not written here but ensured by the caller, before Deploy (EnsureSelfAuthnMapping).
+	err = applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -1265,27 +1260,3 @@ func controllerObjectName(controllerNamespace string, gvr schema.GroupVersionRes
 // keepShared reports whether Undeploy must leave the objects shared with another placement or
 // definition. Relocating implies it: a moving controller keeps every shared object.
 func (o UndeployOptions) keepShared() bool { return o.KeepShared || o.Relocating }
-
-// hubDynClient is where core-provider's own authn mapping is written: the management cluster (#251).
-// A local definition's DynClient is the management cluster already.
-func hubDynClient(opts DeployOptions) dynamic.Interface {
-	if opts.HubDynClient != nil {
-		return opts.HubDynClient
-	}
-	return opts.DynClient
-}
-
-// applyAuthnMappings writes the two authn mappings a definition with an apiRef needs, each where it
-// belongs (#251):
-//   - the controller's, on the cluster the controller runs in (DynClient: a remote target's for a
-//     remote definition), so it can exchange its projected token for a service JWT. Skipped, not
-//     failed, when that cluster has no authn (AuthnSupport.NotInstalled);
-//   - core-provider's OWN, on the management cluster (hubDynClient), where core-provider and its
-//     authn run, before /rbac is called with core-provider's projected token. Provisioned lazily,
-//     once authn is up, rather than at bootstrap, where the authn CRD does not yet exist.
-func applyAuthnMappings(ctx context.Context, opts DeployOptions, saName, saNamespace string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
-	if err := applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, saName, saNamespace, hsh, applyOpts); err != nil {
-		return err
-	}
-	return ensureSelfAuthnMapping(ctx, hubDynClient(opts), opts, applyOpts)
-}

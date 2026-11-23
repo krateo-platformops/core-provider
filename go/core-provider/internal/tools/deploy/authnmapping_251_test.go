@@ -39,8 +39,6 @@ func authnOpts(target, hub *dynamicfake.FakeDynamicClient, support AuthnSupport)
 		ApiRefName:          "status-sources",
 		AuthnNamespace:      "krateo-system",
 		AuthnSupport:        support,
-		SelfSAName:          "core-provider",
-		SelfSANamespace:     "krateo-system",
 		DynClient:           target,
 	}
 	if hub != nil {
@@ -50,50 +48,33 @@ func authnOpts(target, hub *dynamicfake.FakeDynamicClient, support AuthnSupport)
 }
 
 // #251 items 1 and 2, Diego 2026-11-14. The controller's mapping goes where the controller runs (the
-// target), core-provider's OWN goes where core-provider and its authn run (the hub), and a target
-// without authn skips the controller's mapping instead of failing the deploy.
-func TestApplyAuthnMappings_EachMappingWhereItBelongs(t *testing.T) {
+// target); a target without authn skips it instead of failing the deploy. Deploy writes nothing on the
+// hub: core-provider's OWN mapping is EnsureSelfAuthnMapping's (#642).
+func TestApplyAuthnServiceAccountMapping_WhereTheControllerRuns(t *testing.T) {
 	ctx := context.Background()
-	const composition, self = "cdc-apps-fireworksapps-v1-0-0", "core-provider"
-
-	t.Run("remote target with authn: the controller's on the target, core-provider's on the hub", func(t *testing.T) {
-		target, hub := authnFake(), authnFake()
-		hsh := hasher.NewFNVObjectHash()
-		if err := applyAuthnMappings(ctx, authnOpts(target, hub, AuthnSupport{}), "fireworksapps-v1-0-0", "apps", &hsh, kubecli.ApplyOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		if got := mappingNames(t, target); !got[composition] || got[self] {
-			t.Errorf("target mappings = %v, want only %s", got, composition)
-		}
-		if got := mappingNames(t, hub); !got[self] || got[composition] {
-			t.Errorf("hub mappings = %v, want only %s", got, self)
-		}
-	})
-
-	t.Run("remote target WITHOUT authn: nothing written there, no error, the hub still gets core-provider's", func(t *testing.T) {
-		target, hub := authnFake(), authnFake()
-		hsh := hasher.NewFNVObjectHash()
-		if err := applyAuthnMappings(ctx, authnOpts(target, hub, AuthnSupport{NotInstalled: true}), "fireworksapps-v1-0-0", "apps", &hsh, kubecli.ApplyOptions{}); err != nil {
-			t.Fatalf("a target without authn failed the deploy: %v", err)
-		}
-		if got := mappingNames(t, target); len(got) != 0 {
-			t.Errorf("target mappings = %v, want none (no authn there)", got)
-		}
-		if got := mappingNames(t, hub); !got[self] {
-			t.Errorf("hub mappings = %v, want %s", got, self)
-		}
-	})
-
-	t.Run("local definition (no hub client): both on the one cluster", func(t *testing.T) {
-		local := authnFake()
-		hsh := hasher.NewFNVObjectHash()
-		if err := applyAuthnMappings(ctx, authnOpts(local, nil, AuthnSupport{}), "fireworksapps-v1-0-0", "apps", &hsh, kubecli.ApplyOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		if got := mappingNames(t, local); !got[composition] || !got[self] {
-			t.Errorf("local mappings = %v, want both", got)
-		}
-	})
+	const composition = "cdc-apps-fireworksapps-v1-0-0"
+	for name, tc := range map[string]struct {
+		support AuthnSupport
+		want    bool
+	}{
+		"target with authn":                             {AuthnSupport{}, true},
+		"target WITHOUT authn: nothing there, no error": {AuthnSupport{NotInstalled: true}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			target, hub := authnFake(), authnFake()
+			opts := authnOpts(target, hub, tc.support)
+			hsh := hasher.NewFNVObjectHash()
+			if err := applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, "fireworksapps-v1-0-0", "apps", &hsh, kubecli.ApplyOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if got := mappingNames(t, target); got[composition] != tc.want || len(got) > 1 {
+				t.Errorf("target mappings = %v, want %s present = %v", got, composition, tc.want)
+			}
+			if got := mappingNames(t, hub); len(got) != 0 {
+				t.Errorf("hub mappings = %v, want none", got)
+			}
+		})
+	}
 }
 
 // The digest: authn arriving on a target later must change it (so the next Update writes the mapping),
