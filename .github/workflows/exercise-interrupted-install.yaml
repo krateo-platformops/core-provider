@@ -1,0 +1,46 @@
+name: exercise-interrupted-install
+
+# core-provider#629 uninstalls a release on its own decision. Unit and envtest cover the decision, but
+# neither kills a controller mid-hook nor runs under the RBAC core-provider generates. This installs
+# the RELEASED charts on a disposable kind cluster and kills the real controller. Decided by Diego
+# (2026-11-23): exercise it before a cluster runs it.
+#
+# Not a per-PR gate on the cdc: it tests published artifacts, which a PR does not change. Run it by hand
+# for a release (workflow_dispatch), and it runs itself when the exercise changes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released core-provider version to exercise"
+        required: true
+  pull_request:
+    paths:
+      - "go/composition-dynamic-controller/hack/interrupted-install-e2e/**"
+      - ".github/workflows/exercise-interrupted-install.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  exercise:
+    name: exercise (kind, released charts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Create the kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          # The CLI and the node image go together (integration.yaml says why). The charts need >= 1.36.
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4
+          cluster_name: exercise
+      - name: Exercise
+        env:
+          VERSION: ${{ inputs.version || '2.13.128' }}
+        run: |
+          set -euo pipefail
+          helm version --short
+          python3 -I go/composition-dynamic-controller/hack/interrupted-install-e2e/run.py \
+            --version "$VERSION" --node exercise-control-plane \
+            --chart go/composition-dynamic-controller/hack/interrupted-install-e2e/chart

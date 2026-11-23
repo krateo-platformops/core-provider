@@ -1,0 +1,8 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "rev": {"type": "integer", "default": 1},
+    "hookSeconds": {"type": "integer", "default": 1}
+  }
+}
