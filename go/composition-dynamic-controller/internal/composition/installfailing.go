@@ -117,9 +117,11 @@ func recordInstallFailure(ctx context.Context, mg *unstructured.Unstructured, ca
 }
 
 // clearInstallFailures forgets the failed attempts, in memory: the next status write persists it. Called
-// where a revision of the release is known to be deployed.
+// where a revision of the release is known to be deployed. So is the revision the last retry was of: the
+// count it belongs to stays (installRecovery is never reset), but a later release starts at revision 1.
 func clearInstallFailures(mg *unstructured.Unstructured) {
 	unstructured.RemoveNestedField(mg.Object, "status", "installFailures")
+	unstructured.RemoveNestedField(mg.Object, "status", "installRecovery", "revision")
 }
 
 // boundedError is err's text, at most maxLastErrorBytes of it, cut at a character.

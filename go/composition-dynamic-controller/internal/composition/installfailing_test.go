@@ -81,9 +81,11 @@ func TestInstallFailing(t *testing.T) {
 			t.Fatalf("attempt %d: %v", n, err)
 		}
 	}
+	revision := 0
 	retry := func(reason string) {
 		t.Helper()
-		mg, err := recordInstallRecovery(ctx, storedPortal(t, dyn), reason, now, opts, log)
+		revision++ // every attempt that starts writes one
+		mg, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision, reason, now, opts, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +110,7 @@ func TestInstallFailing(t *testing.T) {
 	}
 
 	// Recording the next retry moves the count and the message that names it in one write.
-	if _, err := recordInstallRecovery(ctx, storedPortal(t, dyn), "Failed: x", now, opts, log); err != nil {
+	if _, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision+1, "Failed: x", now, opts, log); err != nil {
 		t.Fatal(err)
 	}
 	check("the 4th retry is recorded", conditionreason.ReasonInstallFailing, 3, 4, "hook failed, attempt 3", "a retry is starting")

@@ -169,11 +169,15 @@
         },
         "count": {
           "type": "integer",
-          "description": "How many retries were started over the composition's life."
+          "description": "How many failed or interrupted attempts were retried over the composition's life. A retry a pass recorded and could not start counts once, however many passes repeat it."
         },
         "reason": {
           "type": "string",
           "description": "Why the last retry ran: begins with Interrupted or Failed, and names the revision."
+        },
+        "revision": {
+          "type": "integer",
+          "description": "The helm revision the last retry was of. Removed once a revision is deployed."
         }
       }
     }

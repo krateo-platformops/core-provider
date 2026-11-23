@@ -320,6 +320,8 @@ spec:
                     type: integer
                   reason:
                     type: string
+                  revision:
+                    type: integer
               helmOperation:
                 type: object
                 description: 'The in-flight helm operation (#461), written before every helm write that can leave the release pending-* and removed when it returns, so the next controller can tell an operation in flight from one whose starter died.'

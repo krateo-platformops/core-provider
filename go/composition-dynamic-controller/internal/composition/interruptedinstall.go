@@ -29,7 +29,7 @@ import (
 // The fix: the interrupted revision is recorded as FAILED (retrier.SettleInterruptedInstall), and the
 // retry of a failed first install (failedinstall.go) installs it again with every install hook. Only when
 //   - the release was never deployed: POSITIVE proof (neverDeployed), never the absence of a deployed
-//     revision. Uninstalling or re-installing over a release that was live would touch real state, and
+//     revision. Installing again over a release that was live would touch real state, and
 //     whatever a hook of it drops (openstack-helm's job_db_drop drops the component's database where it
 //     is enabled; it is off by default, manifests.job_db_drop: false);
 //   - this controller started the interrupted install (recordedInstall): the release name on a
@@ -169,7 +169,7 @@ func (h *handler) settleInterruptedInstall(ctx context.Context, mg *unstructured
 		if mg, err = patchAnnotation(ctx, mg, compositionMeta.AnnotationKeyInterruptedInstallReinstalls, &next, updateOpts); err != nil {
 			return fail("counting the attempt first", err)
 		}
-		if mg, err = recordInstallRecovery(ctx, mg, fmt.Sprintf(
+		if mg, err = recordInstallRecovery(ctx, mg, rel.Revision, fmt.Sprintf(
 			"Interrupted: the install of revision %d was interrupted before the release was ever deployed", rel.Revision), time.Now(), updateOpts, log); err != nil {
 			return fail("recording it first", err)
 		}

@@ -13,8 +13,8 @@ import (
 )
 
 // core-provider#636: the one proof that no revision of a release was ever deployed, used by both
-// recoveries that act on it: #629 (an interrupted install is UNINSTALLED and installed again,
-// freshreinstall.go) and #636 (a failed install is installed again with Replace, failedinstall.go).
+// recoveries that act on it: an interrupted install is settled as failed (#629, interruptedinstall.go),
+// and a failed one is installed again over what it created (#636, failedinstall.go). Neither uninstalls.
 //
 // POSITIVE evidence only. "No deployed revision in the history" is not evidence: helm keeps
 // helmMaxHistory revisions and never prunes the last DEPLOYED one, but a failed rollback marks the

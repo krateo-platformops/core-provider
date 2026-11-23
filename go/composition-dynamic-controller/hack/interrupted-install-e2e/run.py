@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Exercise core-provider#629 (interrupted fresh install -> automatic reinstall) on a real cluster.
+"""Exercise core-provider#629/#636 (a first install that is interrupted or fails is retried as an install)
+on a real cluster.
 
-Installs the RELEASED core-provider charts, then kills the real composition controller pod while a
-chart's lifecycle hook Job is running. Needs a disposable cluster on kind: the SIGKILL arms reach the
-node through `docker exec`. Standard library only.
+Installs the published core-provider charts, optionally with a commit's own images, and kills the real
+composition controller pod while a chart's lifecycle hook Job is running. Needs a disposable cluster on
+kind: the SIGKILL arms reach the node through `docker exec`. Standard library only.
 
-  KUBECONFIG=... run.py --version 2.13.128 --node <kind node container>
+  KUBECONFIG=... run.py --version 2.13.128 --node <kind node container> --chart <dir> [--image-tag ci-abc]
 
-Arms that decide the result (any failure exits 1):
-  sigkill       fresh install, controller SIGKILLed mid post-install hook: reinstalled, hooks run again.
-  kill-switch   same, composition annotated manual: kept, HooksMayNotHaveRun, nothing uninstalled.
-  once-deployed CONTROL: a deployed release, upgrade interrupted the same way: never uninstalled.
-  witness       CONTROL: deleting a composition DOES run the pre-delete hook, so its absence means something.
+Every arm decides the result; any failure exits 1.
+  sigkill, force-delete, lease-stolen   first install, controller killed mid post-install hook, which must
+                                        leave pending-install: settled as failed and installed again, the
+                                        objects kept, every install hook run, nothing uninstalled.
+  graceful-delete                       the same kill with a drain, which must leave failed: installed again.
+  failing-hook                          nothing killed, hook 1 exits 1: never Ready=True, InstallFailing from
+                                        the 3rd failure, and it recovers once the hook passes.
+  kill-switch                           composition annotated manual: kept, HooksMayNotHaveRun.
+  once-deployed                         CONTROL: a deployed release whose upgrade is interrupted keeps its
+                                        objects and is never installed again.
+  witness                               CONTROL: deleting a composition DOES run the pre-delete hook, so its
+                                        absence elsewhere means something.
 
-Arms that are measured: force-delete, lease-stolen, graceful-delete. Which state each leaves is the
-question, so only a kill that leaves pending-install exercises #629 and is held to sigkill's checks.
-Any other state is reported NOT REPRODUCED, never as a pass. failing-hook kills nothing: an install hook
-that exits 1 on a first install, and what Ready says afterwards.
+A version before #636 fails these arms: that is the control for the exercise itself.
 """
 import argparse, datetime, json, subprocess, sys, threading, time
 
@@ -24,6 +29,8 @@ NS, CP_NS = "exercise", "krateo-system"
 SWITCH = "krateo.io/interrupted-install-recovery"
 COUNTER = "krateo.io/interrupted-install-reinstalls"
 UNVERIFIED = "krateo.io/hooks-unverified"
+NEVER = "krateo.io/release-never-deployed"
+RETRIED = {"Interrupted": "InterruptedInstallRetried", "Failed": "FailedInstallRetried"}
 HOOK_SECONDS = 45
 results = []  # (arm, verdict, detail)
 
@@ -126,6 +133,12 @@ class Arm:
                 return c["status"], c["reason"]
         return None, None
 
+    def status(self, k):
+        return ((self.comp() or {}).get("status") or {}).get(k)
+
+    def message(self):
+        return next((c["message"] for c in self.status("conditions") or [] if c["type"] == "Ready"), "")
+
     def ann(self, k):
         return (self.comp()["metadata"].get("annotations") or {}).get(k)
 
@@ -227,9 +240,49 @@ def check(fails, cond, msg):
         fails.append(msg)
 
 
-def fresh_install_arm(how, node, version, strict):
-    """Kill the controller mid post-install hook. strict: the arm must reproduce pending-install."""
-    log(f"=== {how}: fresh install, controller killed mid post-install hook")
+def watch_ready(a, done, timeout):
+    """Ready's values in order, and whether it was ever True before both install hooks were complete. The
+    hooks are read AFTER Ready, so a True with a hook incomplete is a real violation, never a race."""
+    seen, early, end = [], False, time.time() + timeout
+    while time.time() < end:
+        r = a.ready()
+        both = a.complete("install") and a.complete("install-2")
+        early |= r[0] == "True" and not both
+        if not seen or seen[-1] != r:
+            seen.append(r)
+        if done(r, both):
+            break
+        time.sleep(0.7)
+    return seen, early
+
+
+def retried_checks(fails, a, cause, sec1, job1, app1):
+    """What an automatic retry must leave, whatever ended the first attempt. cause: Interrupted or Failed."""
+    other = "Failed" if cause == "Interrupted" else "Interrupted"
+    fin, statuses = a.secrets(), {s[1] for _, snap in a.timeline for s in snap}
+    rec = a.status("installRecovery") or {}
+    print(f"      now {fin}; Ready={a.ready()}; installRecovery={rec}; statuses seen {sorted(statuses)}")
+    check(fails, not statuses & {"pending-upgrade", "uninstalling", "pending-rollback"}, "never upgraded, rolled back or uninstalled")
+    check(fails, [(s[0], s[1]) for s in fin] == [("1", "failed"), ("2", "deployed")] and fin[0][2] == sec1[0][2],
+          "revision 1 is the same record, failed, and revision 2 is deployed")
+    check(fails, uid(a.app()) == app1, "the app object is the SAME object: nothing was uninstalled")
+    check(fails, uid(a.job("install")) not in (None, job1), "the install hook Job is a new object")
+    check(fails, a.complete("install") and a.complete("install-2"), "both install hooks ran to completion")
+    check(fails, a.job("upgrade") is None, "no upgrade hook ran")
+    check(fails, a.predelete() is None, "no pre-delete hook ran")
+    check(fails, a.ready()[0] == "True", "Ready=True")
+    n = a.events(RETRIED[cause])
+    check(fails, n == 1, f"exactly one {RETRIED[cause]} event (got {n})")
+    check(fails, a.events(RETRIED[other]) == 0, f"no {RETRIED[other]} event")
+    check(fails, rec.get("kind") == "Retried" and rec.get("count") == 1 and str(rec.get("reason", "")).startswith(cause + ":"),
+          f"status.installRecovery says Retried, 1, {cause}: (got {rec})")
+    check(fails, "revision" not in rec and not a.status("installFailures"), "the per-attempt records are gone")
+    check(fails, all(a.ann(k) is None for k in (UNVERIFIED, COUNTER, NEVER)), "no mark is left on the composition")
+
+
+def fresh_install_arm(how, node, version, cause):
+    """Kill the controller mid post-install hook. cause: what the kill must have left, or the arm is void."""
+    log(f"=== {how}: first install, controller killed mid post-install hook")
     pod = fresh_controller()
     a = Arm(how, version).create()
     a.wait_hook_running("install")
@@ -239,63 +292,58 @@ def fresh_install_arm(how, node, version, strict):
     print(f"      at the kill: {sec1}; install Job {job1[:8]}, not complete: {not a.complete('install')}")
     if len(sec1) != 1 or sec1[0][1] != "pending-install" or a.complete("install"):
         raise RuntimeError(f"{how}: not mid-install at the kill: {sec1}")
-    t_kill = time.time()
     kill(how, node, pod)
     print(f"      killed: {proof_of_death(how, pod)}")
-    try:
-        wait(f"{how}: to settle", lambda: a.ready()[1] == "HooksMayNotHaveRun" or (
-            a.ready()[0] == "True" and (a.complete("install-2") or time.time() - t_kill > 200)), 420)
-    except TimeoutError as e:
-        print(f"      {e}; Ready={a.ready()}")
-    first = [s for _, snap in a.timeline for s in snap if s[2] == sec1[0][2]]
-    states = [s[1] for s in first]
-    reproduced = "failed" not in states and "deployed" not in states
+    seen, early = watch_ready(a, lambda r, both: r[0] == "True" and both, 420)
     a.show_timeline()
-    ev, fin, job2 = a.events("InterruptedInstallReinstalled"), a.secrets(), uid(a.job("install"))
-    print(f"      first attempt's states: {states}; reinstall events {ev}; Ready={a.ready()}; now {fin}")
+    print(f"      Ready over time: {seen}")
     fails = []
-    # Safety, whatever state the kill left: no teardown hook, and never Ready with hooks that did not run.
-    check(fails, a.predelete() is None, "no pre-delete hook ran")
-    check(fails, not (a.ready()[0] == "True" and not (a.complete("install") and a.complete("install-2"))),
-          f"not Ready=True with an install hook that never completed (hook 1 complete: {a.complete('install')}, "
-          f"hook 2 exists: {a.job('install-2') is not None}, complete: {a.complete('install-2')})")
-    if reproduced:
-        check(fails, ev == 1, f"exactly one InterruptedInstallReinstalled event (got {ev})")
-        check(fails, job2 is not None and job2 != job1, "the install hook Job is a new object")
-        check(fails, a.complete("install") and a.complete("install-2"), "both install hooks ran to completion")
-        check(fails, uid(a.app()) not in (None, app1), "the app object was reinstalled")
-        check(fails, len(fin) == 1 and fin[0][0] == "1" and fin[0][1] == "deployed" and fin[0][2] != sec1[0][2], "one revision, deployed, a new release")
-        check(fails, a.ready()[0] == "True", "Ready=True")
-        check(fails, a.ann(UNVERIFIED) is None, "no hooks-unverified mark")
-        check(fails, a.ann(COUNTER) is None, "the attempt counter is cleared")
+    check(fails, not early, "never Ready=True before both install hooks completed")
+    retried_checks(fails, a, cause, sec1, job1, app1)
     a.stop.set()
-    verdict = "FAIL" if fails else ("PASS" if reproduced else "NOT REPRODUCED")
-    if strict and not reproduced:
-        verdict = "FAIL"
-        fails.append("the kill did not leave pending-install, so #629 was not exercised")
-    results.append((how, verdict, "; ".join(fails) or f"first attempt's states {states}", strict))
-    return a
+    results.append((how, "FAIL" if fails else "PASS", "; ".join(fails), True))
 
 
 def failing_hook_arm(version):
-    """No kill: the first install hook fails by itself. Measured: what Ready says afterwards."""
-    log("=== failing-hook: fresh install whose first post-install hook exits 1; nothing is killed")
+    log("=== failing-hook: first install whose first post-install hook exits 1; nothing is killed")
     a = Arm("failing-hook", version, hook_seconds=2, install_exit=1).create()
-    end, readys = time.time() + 150, []
-    while time.time() < end:
-        r = a.ready()
-        if not readys or readys[-1] != r:
-            readys.append(r)
-        time.sleep(1)
+    wait("the app object", a.app, 120)
+    app1 = uid(a.app())
+    seen, early = watch_ready(a, lambda r, both: r[1] == "InstallFailing", 420)
+    msg, failures = a.message(), a.status("installFailures") or {}
+    # Stay on it: the reason must not flap while retries run.
+    more, early2 = watch_ready(a, lambda r, both: False, 75)
     a.show_timeline()
-    states = [sorted({s[1] for s in snap}) for _, snap in a.timeline]
-    print(f"      Ready over time: {readys}; hook 2 exists: {a.job('install-2') is not None}")
+    print(f"      Ready over time: {seen} then {more}\n      at the first InstallFailing: {failures}; {msg[:300]}")
     fails = []
-    check(fails, any("failed" in st for st in states), "control: the first install was seen failed")
+    allowed = {("False", "HelmOperationInProgress"), ("False", "Creating"), ("False", "InstallFailing"), (None, None)}
+    check(fails, seen[-1] == ("False", "InstallFailing"), "Ready reached False/InstallFailing")
+    check(fails, set(seen) | set(more) <= allowed, "Ready never said anything else")
+    check(fails, set(more) == {("False", "InstallFailing")}, "no flap away from InstallFailing while it retries")
+    check(fails, not early and not early2, "never Ready=True")
+    check(fails, failures.get("count") == 3, f"InstallFailing came with the 3rd failure (got {failures.get('count')})")
+    check(fails, f"the first install has failed {failures.get('count')} times (" in msg and "automatic retries so far); last error:" in msg,
+          "the message names the failures, the retries and the error")
+    check(fails, a.job("install-2") is None, "hook 2 was never reached")
+    check(fails, a.job("upgrade") is None, "no upgrade hook ran")
+    check(fails, max(len(s) for _, s in a.timeline) <= 3, "at most 3 revisions are kept")
+    check(fails, not {s[1] for _, snap in a.timeline for s in snap} & {"pending-upgrade", "uninstalling"}, "never upgraded or uninstalled")
+    n = a.status("installRecovery") or {}
+    check(fails, n.get("kind") == "Retried" and n.get("count", 0) >= 2 and str(n.get("reason", "")).startswith("Failed:"), f"installRecovery {n}")
+    log("    the hook is fixed")
+    sh("kubectl", "patch", "hookprobes.composition.krateo.io", "failing-hook", "-n", NS, "--type", "merge",
+       "-p", json.dumps({"spec": {"installHookExit": 0}}))
+    seen, early = watch_ready(a, lambda r, both: r[0] == "True" and both, 300)
+    print(f"      Ready over time: {seen}; now {a.secrets()}")
+    check(fails, not early, "never Ready=True before both install hooks completed")
+    check(fails, seen[-1][0] == "True" and a.complete("install") and a.complete("install-2"), "both hooks ran and Ready=True")
+    check(fails, uid(a.app()) == app1, "the app object is the SAME object throughout")
+    check(fails, a.job("upgrade") is None, "still no upgrade hook")
+    check(fails, not a.status("installFailures") and (a.status("installRecovery") or {}).get("count", 0) >= 3, "the failures are forgotten, the retries are not")
+    check(fails, all(a.ann(k) is None for k in (UNVERIFIED, NEVER)), "no mark is left on the composition")
     check(fails, a.predelete() is None, "no pre-delete hook ran")
-    check(fails, not any(r[0] == "True" for r in readys) or a.complete("install-2"), "never Ready=True with hook 2 not run")
     a.stop.set()
-    results.append(("failing-hook", "FAIL" if fails else "PASS", "; ".join(fails), False))
+    results.append(("failing-hook", "FAIL" if fails else "PASS", "; ".join(fails), True))
 
 
 def kill_switch_arm(node, version):
@@ -314,7 +362,7 @@ def kill_switch_arm(node, version):
     fails = []
     check(fails, a.ready() == ("False", "HooksMayNotHaveRun"), f"Ready=False/HooksMayNotHaveRun (got {a.ready()})")
     check(fails, a.ann(UNVERIFIED) is not None, "hooks-unverified is set")
-    check(fails, a.events("InterruptedInstallReinstalled") == 0, "no reinstall event")
+    check(fails, not any(a.events(r) for r in RETRIED.values()), "no retry event")
     check(fails, uid(a.app()) == app1, "the app object is the same object: not uninstalled")
     check(fails, uid(a.job("install")) == job1, "the hook Job is the same object")
     check(fails, a.predelete() is None, "no pre-delete hook ran")
@@ -338,7 +386,8 @@ def once_deployed_arm(node, version):
     kill("sigkill", node, pod)
     print(f"      killed: {proof_of_death('sigkill', pod)}")
     try:
-        wait("recovery", lambda: uid(a.job("upgrade")) not in (None, job1) and a.complete("upgrade") and a.ready()[0] == "True", 360)
+        wait("recovery", lambda: uid(a.job("upgrade")) not in (None, job1) and a.complete("upgrade") and a.ready()[0] == "True"
+             and a.secrets()[-1][1] == "deployed", 360)
     except TimeoutError as e:
         print(f"      {e}; Ready={a.ready()}")
     a.show_timeline()
@@ -351,10 +400,12 @@ def once_deployed_arm(node, version):
     check(fails, all(st & {"deployed", "superseded"} for st in live) and not any("uninstalling" in st for st in seen),
           f"a once-deployed revision was present in all {len(live)} readings since the first deploy, none uninstalling")
     check(fails, a.predelete() is None, "no pre-delete hook ran")
-    check(fails, a.events("InterruptedInstallReinstalled") == 0, "no reinstall event")
+    check(fails, not any(a.events(r) for r in RETRIED.values()), "no retry event")
     check(fails, (a.app()["data"] or {}).get("rev") == "2", "the upgrade was applied")
     check(fails, uid(a.job("upgrade")) != job1 and a.complete("upgrade"), "the upgrade hook ran again, to completion")
     check(fails, a.ready()[0] == "True", f"Ready=True (got {a.ready()})")
+    check(fails, a.secrets()[-1][1] == "deployed", f"the latest revision is deployed (got {a.secrets()[-1]})")
+    check(fails, a.status("installRecovery") is None, "no installRecovery: it is for first installs")
     a.stop.set()
     results.append(("once-deployed", "FAIL" if fails else "PASS", "; ".join(fails), True))
     return a
@@ -372,13 +423,15 @@ def witness_arm(a):
     results.append(("witness", "FAIL" if fails else "PASS", "; ".join(fails), True))
 
 
-def install_core_provider(version):
+def install_core_provider(version, image_tag=None):
+    """image_tag: core-provider and the composition controller run this tag (loaded on the node) instead."""
     for c, rel, extra in (("core-provider-crds", "core-provider-crds", []),
                           ("core-provider", "core-provider", [
                               # A CI runner has 4 CPUs; the chart asks 1 CPU per chart-inspector replica.
                               "--set", "chartInspector.replicaCount=1", "--set", "chartInspector.resources.requests.cpu=100m",
                               "--set", "resources.requests.cpu=100m",
-                              "--set-string", "cdc.env.COMPOSITION_CONTROLLER_DEBUG=true"])):
+                              "--set-string", "cdc.env.COMPOSITION_CONTROLLER_DEBUG=true"]
+                           + (["--set", f"image.tag={image_tag},cdc.image.tag={image_tag}"] if image_tag else []))):
         log(f"installing {c} {version}")
         sh("helm", "upgrade", "--install", rel, f"oci://ghcr.io/krateo-platformops/charts/{c}", "--version", version,
            "-n", CP_NS, "--create-namespace", "--wait", "--timeout", "8m", *extra)
@@ -423,17 +476,19 @@ def define(name, url):
     return st["apiVersion"].split("/")[1]
 
 
-def check_images(version):
+def check_images(version, image_tag=None):
     imgs = {c["image"] for p in kget("pods", ns=CP_NS) for c in p["spec"]["containers"]}
     log("images under test: " + ", ".join(sorted(imgs)))
-    if not all(i.endswith(":" + version) for i in imgs):
-        raise RuntimeError(f"not only {version} is running: {imgs}")
+    want = {f"ghcr.io/krateo-platformops/{n}:{t}" for n, t in (("core-provider", image_tag or version),
+            ("composition-dynamic-controller", image_tag or version), ("chart-inspector", version))}
+    if imgs != want:
+        raise RuntimeError(f"running {imgs}, want {want}")
 
 
-def setup(version, chart_dir):
-    install_core_provider(version)
+def setup(version, chart_dir, image_tag):
+    install_core_provider(version, image_tag)
     v = define("hookprobe", serve_charts(chart_dir)["hookprobe"])
-    check_images(version)
+    check_images(version, image_tag)
     return v
 
 
@@ -457,38 +512,40 @@ def main():
     ap.add_argument("--version", required=True)
     ap.add_argument("--node", required=True, help="the kind node's container name")
     ap.add_argument("--chart", required=True)
+    ap.add_argument("--image-tag", default=None)
     o = ap.parse_args()
-    required = ["sigkill", "kill-switch", "once-deployed", "witness"]
-    try:
-        v = setup(o.version, o.chart)
-        fresh_install_arm("sigkill", o.node, v, strict=True)
-        kill_switch_arm(o.node, v)
-        witness_arm(once_deployed_arm(o.node, v))
-        for how in ("force-delete", "lease-stolen", "graceful-delete"):
-            try:
-                fresh_install_arm(how, o.node, v, strict=False)
-            except Exception as e:
-                results.append((how, "ERROR", repr(e), False))
+    required = ["sigkill", "kill-switch", "once-deployed", "witness", "force-delete", "lease-stolen", "graceful-delete", "failing-hook"]
+
+    def arm(name, fn):
         try:
-            failing_hook_arm(v)
+            return fn()
         except Exception as e:
-            results.append(("failing-hook", "ERROR", repr(e), False))
+            results.append((name, "ERROR", repr(e), True))
+    try:
+        v = setup(o.version, o.chart, o.image_tag)
     except Exception as e:
-        results.append(("run", "ERROR", repr(e), True))
-    log(f"=== results, core-provider {o.version}")
+        results.append(("setup", "ERROR", repr(e), True))
+    else:
+        arm("sigkill", lambda: fresh_install_arm("sigkill", o.node, v, "Interrupted"))
+        arm("kill-switch", lambda: kill_switch_arm(o.node, v))
+        once = arm("once-deployed", lambda: once_deployed_arm(o.node, v))
+        if once:
+            arm("witness", lambda: witness_arm(once))
+        arm("force-delete", lambda: fresh_install_arm("force-delete", o.node, v, "Interrupted"))
+        arm("lease-stolen", lambda: fresh_install_arm("lease-stolen", o.node, v, "Interrupted"))
+        arm("graceful-delete", lambda: fresh_install_arm("graceful-delete", o.node, v, "Failed"))
+        arm("failing-hook", lambda: failing_hook_arm(v))
+    log(f"=== results, core-provider {o.image_tag or o.version}")
     for arm, verdict, detail, dec in results:
-        print(f"  {verdict:15} {arm:16} {'deciding' if dec else 'measured'}  {detail}")
+        print(f"  {verdict:15} {arm:16} {'deciding' if dec else ''}  {detail}")
     ran = {r[0] for r in results}
     missing = [r for r in required if r not in ran]  # the denominator: an arm that never ran is a failure
     if missing:
         print(f"  deciding arms that did not run: {missing}")
     bad = missing or [r for r in results if r[3] and r[1] != "PASS"]
-    odd = [r for r in results if not r[3] and r[1] in ("FAIL", "ERROR")]
-    if bad or odd:
+    if bad:
         diagnostics()
-    for r in odd:
-        print(f"::warning::measured arm {r[0]}: {r[1]}: {r[2]}")
-    print("#629 exercise", "FAILED" if bad else "passed", "for core-provider", o.version)
+    print("first-install exercise", "FAILED" if bad else "passed", "for core-provider", o.image_tag or o.version)
     sys.exit(1 if bad else 0)
 
 

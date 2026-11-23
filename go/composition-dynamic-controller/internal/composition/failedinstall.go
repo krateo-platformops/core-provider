@@ -327,7 +327,7 @@ func releaseState(rel *helmconfig.Release) string {
 func (h *handler) beforeInstallAgain(ctx context.Context, mg *unstructured.Unstructured, fi failedInstall, releaseName string,
 	gate failedInstallGate, updateOpts tools.UpdateOptions, log logging.Logger, phase event.Action) (_ *unstructured.Unstructured, prior map[string]interface{}, started time.Time, err error) {
 	if !fi.interrupted {
-		if mg, err = recordInstallRecovery(ctx, mg, fmt.Sprintf(
+		if mg, err = recordInstallRecovery(ctx, mg, fi.revision, fmt.Sprintf(
 			"Failed: the first install failed (revision %d) before the release was ever deployed", fi.revision), time.Now(), updateOpts, log); err != nil {
 			return mg, nil, started, fmt.Errorf("not installing release %s again: %w", releaseName, err)
 		}

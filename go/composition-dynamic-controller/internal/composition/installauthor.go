@@ -14,9 +14,9 @@ import (
 
 // core-provider#636: never deployed is not enough to act on a release. The krateo.io/release-name label
 // is write-once, and adoption can settle on a release that carries no composition labels
-// (pickAdoptableRelease), so a composition can point at a release a HUMAN installed. Uninstalling it, or
-// installing over it, is not this controller's to do: the recoveries also need proof that this
-// controller started the install.
+// (pickAdoptableRelease), so a composition can point at a release a HUMAN installed. Ending that
+// install, or installing over it, is not this controller's to do: the recoveries also need proof that
+// this controller started it.
 
 // recordedInstall says whether status.helmOperation is THIS revision's install: phase install, recorded
 // within orphanWindow before the revision was written (orphanedOperation's own test, without its
