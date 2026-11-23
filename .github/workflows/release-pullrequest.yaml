@@ -31,7 +31,7 @@ jobs:
     # the shared `go` context (its Dockerfile does `COPY . .` then `WORKDIR /src/chart-inspector`),
     # so its dockerfile path is explicit. permissions match authn's build job — the reusable
     # requests packages:write, so the caller must grant it or the run fails at startup.
-    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
     permissions:
       contents: read
       packages: write
@@ -52,7 +52,7 @@ jobs:
     # cluster / pull from Docker Hub (e2e-framework) and are unsuitable for a fast per-PR check —
     # they belong in a dedicated integration workflow. (There are no `unit`-tagged files, so the old
     # `-tags=unit,integration` only added the heavy integration build; dropping it runs all unit tests.)
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
     with:
       module: go/core-provider
       fmt_check: true
@@ -70,7 +70,7 @@ jobs:
     secrets: inherit
 
   checks-composition-dynamic-controller:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
     with:
       module: go/composition-dynamic-controller
       fmt_check: true
@@ -87,7 +87,7 @@ jobs:
     secrets: inherit
 
   checks-chart-inspector:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
     with:
       module: go/chart-inspector
       fmt_check: true
@@ -474,4 +474,4 @@ jobs:
   lint-docs:
     # THE canonical documentation-conformance check (the Krateo Documentation Standard):
     # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.
-    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
