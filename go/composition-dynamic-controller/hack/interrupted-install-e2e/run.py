@@ -372,8 +372,7 @@ def witness_arm(a):
     results.append(("witness", "FAIL" if fails else "PASS", "; ".join(fails), True))
 
 
-def setup(version, chart_dir):
-    import base64, os, tempfile
+def install_core_provider(version):
     for c, rel, extra in (("core-provider-crds", "core-provider-crds", []),
                           ("core-provider", "core-provider", [
                               # A CI runner has 4 CPUs; the chart asks 1 CPU per chart-inspector replica.
@@ -383,13 +382,20 @@ def setup(version, chart_dir):
         log(f"installing {c} {version}")
         sh("helm", "upgrade", "--install", rel, f"oci://ghcr.io/krateo-platformops/charts/{c}", "--version", version,
            "-n", CP_NS, "--create-namespace", "--wait", "--timeout", "8m", *extra)
-    d = tempfile.mkdtemp()
-    sh("helm", "package", chart_dir, "-d", d)
-    tgz = base64.b64encode(open(os.path.join(d, "hookprobe-0.1.0.tgz"), "rb").read()).decode()
+
+
+def serve_charts(*chart_dirs):
+    """Package the charts (all version 0.1.0) and serve them in the cluster. Returns name -> URL."""
+    import base64, os, tempfile
+    d, data = tempfile.mkdtemp(), {}
+    for c in chart_dirs:
+        sh("helm", "package", c, "-d", d)
+    for t in sorted(os.listdir(d)):
+        data[t] = base64.b64encode(open(os.path.join(d, t), "rb").read()).decode()
     labels = {"app": "charts"}
     objs = [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS}},
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "charts", "namespace": NS}, "binaryData": {"hookprobe-0.1.0.tgz": tgz}},
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "charts", "namespace": NS}, "binaryData": data},
         {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "charts", "namespace": NS}, "spec": {"selector": labels, "ports": [{"port": 8080}]}},
         {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "charts", "namespace": NS},
          "spec": {"selector": {"matchLabels": labels}, "template": {"metadata": {"labels": labels}, "spec": {
@@ -399,21 +405,36 @@ def setup(version, chart_dir):
              "volumes": [{"name": "c", "configMap": {"name": "charts"}}]}}}}]
     sh("kubectl", "apply", "-f", "-", inp=json.dumps({"apiVersion": "v1", "kind": "List", "items": objs}))
     sh("kubectl", "rollout", "status", "-n", NS, "deployment/charts", "--timeout=180s")
+    return {t[:-len("-0.1.0.tgz")]: f"http://charts.{NS}.svc.cluster.local:8080/{t}" for t in data}
+
+
+def define(name, url):
+    """Create a CompositionDefinition, wait for it, and return the served CRD version."""
     sh("kubectl", "apply", "-f", "-", inp=json.dumps({
-        "apiVersion": "core.krateo.io/v1alpha1", "kind": "CompositionDefinition", "metadata": {"name": "hookprobe", "namespace": NS},
-        "spec": {"chart": {"url": f"http://charts.{NS}.svc.cluster.local:8080/hookprobe-0.1.0.tgz", "version": "0.1.0"}}}))
+        "apiVersion": "core.krateo.io/v1alpha1", "kind": "CompositionDefinition", "metadata": {"name": name, "namespace": NS},
+        "spec": {"chart": {"url": url, "version": "0.1.0"}}}))
 
     def cd_ready():
-        cd = kget("compositiondefinitions.core.krateo.io", "hookprobe")
+        cd = kget("compositiondefinitions.core.krateo.io", name)
         st = cd.get("status") or {}
         return st if any(c["type"] == "Ready" and c["status"] == "True" for c in st.get("conditions") or []) else None
     st = wait("the CompositionDefinition to be Ready", cd_ready, 300)
     log(f"CompositionDefinition Ready: {st['apiVersion']} {st['kind']}")
+    return st["apiVersion"].split("/")[1]
+
+
+def check_images(version):
     imgs = {c["image"] for p in kget("pods", ns=CP_NS) for c in p["spec"]["containers"]}
     log("images under test: " + ", ".join(sorted(imgs)))
     if not all(i.endswith(":" + version) for i in imgs):
         raise RuntimeError(f"not only {version} is running: {imgs}")
-    return st["apiVersion"].split("/")[1]
+
+
+def setup(version, chart_dir):
+    install_core_provider(version)
+    v = define("hookprobe", serve_charts(chart_dir)["hookprobe"])
+    check_images(version)
+    return v
 
 
 def diagnostics():

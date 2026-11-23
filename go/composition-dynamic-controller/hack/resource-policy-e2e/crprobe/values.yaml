@@ -1,0 +1,3 @@
+# enabled renders the object; keep marks it helm.sh/resource-policy: keep.
+enabled: true
+keep: false

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: crprobe
+description: Probe chart for the resource-policy exercise. Not published.
+version: 0.1.0
+appVersion: "0.1.0"
