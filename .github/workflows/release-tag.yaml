@@ -30,7 +30,7 @@ jobs:
   # deliberately excluded here as they are there: they spin up a real kind cluster and pull from
   # Docker Hub, which is not something to put between a tag and its artifacts.
   test-core-provider:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/core-provider
       fmt_check: true
@@ -40,7 +40,7 @@ jobs:
     secrets: inherit
 
   test-composition-dynamic-controller:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/composition-dynamic-controller
       fmt_check: true
@@ -49,7 +49,7 @@ jobs:
     secrets: inherit
 
   test-chart-inspector:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/chart-inspector
       fmt_check: true
@@ -62,7 +62,7 @@ jobs:
     # the result — which is how oasgen-provider shipped past a red suite while appearing to have a
     # test gate (#92). A declared test job is not a gate; `needs:` is.
     needs: [test-core-provider, test-composition-dynamic-controller, test-chart-inspector]
-    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: read
       packages: write
@@ -79,13 +79,17 @@ jobs:
   # nothing could wait for it. It is a job here so verify-artifacts can `need` it. release-oci.yaml
   # keeps its workflow_dispatch for republishing a chart by hand.
   release-oci:
-    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: read
       packages: write
     with:
       chart_version: ""
       app_version: ""
+      # Required since release-oci 2.0.0 (2.13.125 failed at startup without it on @main). core-provider's
+      # charts are platform components installed by installer, not krateo-blueprints blueprints, pages or
+      # operators: deliberately not indexed. A tag push publishes: dry_run stays at its default, false.
+      index_channel: none
 
   # #360. A GitHub release is a public claim that a version exists, and it used to be published at
   # tag time, about 30 minutes before the images did. Pull every artifact by tag, and require each
@@ -96,7 +100,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Pull all six artifacts by tag
         run: .github/scripts/verify-release-artifacts.sh "${{ github.ref_name }}" "${{ github.sha }}"
 
@@ -104,7 +108,7 @@ jobs:
   # workflow_dispatch for regenerating notes by hand.
   release-notes:
     needs: [verify-artifacts]
-    uses: krateo-platformops/.github/.github/workflows/release-notes.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/release-notes.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: write # the release body and the CHANGELOG commit
       id-token: write # claude-code-action's GitHub App auth; the reusable cannot grant itself this

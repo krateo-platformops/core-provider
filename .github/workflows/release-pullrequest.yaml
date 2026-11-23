@@ -31,7 +31,7 @@ jobs:
     # the shared `go` context (its Dockerfile does `COPY . .` then `WORKDIR /src/chart-inspector`),
     # so its dockerfile path is explicit. permissions match authn's build job — the reusable
     # requests packages:write, so the caller must grant it or the run fails at startup.
-    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: read
       packages: write
@@ -52,7 +52,7 @@ jobs:
     # cluster / pull from Docker Hub (e2e-framework) and are unsuitable for a fast per-PR check —
     # they belong in a dedicated integration workflow. (There are no `unit`-tagged files, so the old
     # `-tags=unit,integration` only added the heavy integration build; dropping it runs all unit tests.)
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/core-provider
       fmt_check: true
@@ -70,7 +70,7 @@ jobs:
     secrets: inherit
 
   checks-composition-dynamic-controller:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/composition-dynamic-controller
       fmt_check: true
@@ -87,7 +87,7 @@ jobs:
     secrets: inherit
 
   checks-chart-inspector:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     with:
       module: go/chart-inspector
       fmt_check: true
@@ -122,8 +122,8 @@ jobs:
     name: compile every build tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: 'stable'
       - name: go vet, every module, every tag
@@ -170,8 +170,8 @@ jobs:
     name: envtest (real apiserver, cdc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: 'stable'
 
@@ -342,12 +342,12 @@ jobs:
     name: e2e (real apiserver)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: 'stable'
       - name: Create kind cluster (k8s 1.36)
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           node_image: kindest/node:v1.36.4
           cluster_name: core-provider-e2e
@@ -410,8 +410,8 @@ jobs:
     name: envtest (real apiserver, core-provider)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: 'stable'
       # The same pinned tool as the cdc job: it only downloads apiserver/etcd assets, so the pin is
@@ -447,8 +447,8 @@ jobs:
     name: envtest (real apiserver, chart-inspector)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: 'stable'
       # The same exact setup-envtest pin as envtest-cdc, for the same reasons (see there).
@@ -474,4 +474,18 @@ jobs:
   lint-docs:
     # THE canonical documentation-conformance check (the Krateo Documentation Standard):
     # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.
-    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@b62e48092fdc6c7e7dbfbbb109dfcea459f88189 # main 2026-11-21
+    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
+
+  pinned-uses:
+    # Every `uses:` here is pinned by commit (.github/scripts/check-pinned-uses.py says what it accepts).
+    # 2.13.125 was never published because release-oci.yaml was called @main and a breaking change landed
+    # there with no commit in this repo. The script's self-test plants unpinned forms and must refuse each.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Every uses is pinned by commit, with its version
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -I .github/scripts/check-pinned-uses.py .
