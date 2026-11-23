@@ -31,11 +31,12 @@ import (
 // COST. One dry-run create per instance the definition owns on the served version, after a
 // migration, and on each Observe only while some instance is refused or unchecked. Dry runs write
 // nothing to etcd.
-
-const (
-	maxInstancesInMessage = 10
-	maxFieldsPerInstance  = 5
-)
+//
+// STRUCTURED FORM (core-provider#623): status.migratedValues carries the same finding as data. One
+// builder, migratedValuesReport, produces both: it caps the check result once (the API package's
+// MigratedValuesMaxInstances and MigratedValuesMaxFields, which the CRD's maxItems also enforce) and
+// renders the message FROM those capped entries, so the message and the field cannot name different
+// instances, fields or order.
 
 // migrateAndCheck is Update's migration step: every instance this definition owns on an older
 // served version is moved onto gvk.Version, and if anything moved, the instances on that version are
@@ -97,9 +98,10 @@ func (e *external) checkMigratedValues(ctx context.Context, cr *compositiondefin
 	gvr schema.GroupVersionResource, log logging.Logger) {
 	owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
 	res, err := getters.ValidateOwnedInstances(ctx, e.dynamic, gvr, owner)
-	cond := migratedValuesCondition(res, err)
+	cond, values := migratedValuesReport(res, err)
 	prev, _ := migratedValuesValid(cr)
 	cr.SetConditions(cond)
+	cr.Status.MigratedValues = values
 	// One Event per new finding, not one per Observe while it stands.
 	if cdreason.MigratedValuesRefused.Is(cond) && (prev.Reason != cond.Reason || prev.Message != cond.Message) {
 		log.Info("Instances hold values the served version refuses (validation ratcheting let the migration through)",
@@ -110,64 +112,89 @@ func (e *external) checkMigratedValues(ctx context.Context, cr *compositiondefin
 	}
 }
 
-// migratedValuesCondition turns one validation into the condition. Refused wins over unchecked: a
-// refused instance is a fact, an unchecked one only an absence of evidence, and the message counts
-// both. A list failure is Unknown, never True.
-func migratedValuesCondition(res getters.ValidationResult, listErr error) rtv1.Condition {
+// migratedValuesReport turns one validation into the condition and its structured form. Refused wins
+// over unchecked: a refused instance is a fact, an unchecked one only an absence of evidence, and the
+// message counts both. A list failure is Unknown, never True, and has no structured form: with no
+// list there are no instances to name, and counts of zero would read as an all-clear. True clears the
+// structured form.
+func migratedValuesReport(res getters.ValidationResult, listErr error) (rtv1.Condition, *compositiondefinitionsv1alpha1.MigratedValues) {
 	if listErr != nil {
 		return cdreason.MigratedValuesUnchecked.WithMessage(fmt.Sprintf(
-			"the instances on version %s could not be listed, so none was checked: %v", res.Version, listErr))
+			"the instances on version %s could not be listed, so none was checked: %v", res.Version, listErr)), nil
 	}
-	if len(res.Refused) > 0 {
+	if len(res.Refused) == 0 && len(res.Unchecked) == 0 {
+		return cdreason.MigratedValuesAllValid.WithMessage(fmt.Sprintf(
+			"all %d instance(s) on version %s satisfy its schema", res.Checked, res.Version)), nil
+	}
+	values := migratedValues(res)
+	if values.RefusedCount > 0 {
 		msg := fmt.Sprintf("%d of %d instance(s) on version %s hold values that version refuses; a write that changes those fields is refused until they satisfy it: %s",
-			len(res.Refused), res.Checked, res.Version, refusedList(res.Refused))
-		if len(res.Unchecked) > 0 {
-			msg += fmt.Sprintf("; %d more could not be checked", len(res.Unchecked))
+			values.RefusedCount, res.Checked, res.Version, refusedList(values))
+		if values.UncheckedCount > 0 {
+			msg += fmt.Sprintf("; %d more could not be checked", values.UncheckedCount)
 		}
-		return cdreason.MigratedValuesRefused.WithMessage(msg)
+		return cdreason.MigratedValuesRefused.WithMessage(msg), values
 	}
-	if len(res.Unchecked) > 0 {
-		return cdreason.MigratedValuesUnchecked.WithMessage(fmt.Sprintf(
-			"%d of %d instance(s) on version %s could not be checked (the dry run failed for a reason that is not a spec validation error): %s",
-			len(res.Unchecked), res.Checked, res.Version, uncheckedList(res.Unchecked)))
-	}
-	return cdreason.MigratedValuesAllValid.WithMessage(fmt.Sprintf(
-		"all %d instance(s) on version %s satisfy its schema", res.Checked, res.Version))
+	return cdreason.MigratedValuesUnchecked.WithMessage(fmt.Sprintf(
+		"%d of %d instance(s) on version %s could not be checked (the dry run failed for a reason that is not a spec validation error): %s",
+		values.UncheckedCount, res.Checked, res.Version, uncheckedList(values))), values
 }
 
-func refusedList(rs []getters.RefusedInstance) string {
-	shown := rs
-	if len(shown) > maxInstancesInMessage {
-		shown = shown[:maxInstancesInMessage]
+// migratedValues caps a check result into status.migratedValues: the first instances in check order,
+// the first fields of each, and the uncapped counts beside them. It is the only place the caps apply.
+func migratedValues(res getters.ValidationResult) *compositiondefinitionsv1alpha1.MigratedValues {
+	v := &compositiondefinitionsv1alpha1.MigratedValues{
+		Version:        res.Version,
+		RefusedCount:   len(res.Refused),
+		UncheckedCount: len(res.Unchecked),
 	}
-	parts := make([]string, 0, len(shown))
-	for _, r := range shown {
+	for i, r := range res.Refused {
+		if i == compositiondefinitionsv1alpha1.MigratedValuesMaxInstances {
+			break
+		}
 		fields := r.Fields
+		if len(fields) > compositiondefinitionsv1alpha1.MigratedValuesMaxFields {
+			fields = fields[:compositiondefinitionsv1alpha1.MigratedValuesMaxFields]
+		}
+		v.Refused = append(v.Refused, compositiondefinitionsv1alpha1.MigratedValuesRefusedInstance{
+			Namespace: r.Namespace, Name: r.Name, Fields: append([]string(nil), fields...), FieldCount: len(r.Fields)})
+	}
+	for i, u := range res.Unchecked {
+		if i == compositiondefinitionsv1alpha1.MigratedValuesMaxInstances {
+			break
+		}
+		v.Unchecked = append(v.Unchecked, compositiondefinitionsv1alpha1.MigratedValuesInstance{Namespace: u.Namespace, Name: u.Name})
+	}
+	return v
+}
+
+// refusedList renders the capped refused entries for the message; ", ..." marks a cap that hid
+// something (fields of one instance, or instances).
+func refusedList(v *compositiondefinitionsv1alpha1.MigratedValues) string {
+	parts := make([]string, 0, len(v.Refused))
+	for _, r := range v.Refused {
 		more := ""
-		if len(fields) > maxFieldsPerInstance {
-			fields = fields[:maxFieldsPerInstance]
+		if r.FieldCount > len(r.Fields) {
 			more = ", ..."
 		}
-		parts = append(parts, fmt.Sprintf("%s/%s (%s%s)", r.Namespace, r.Name, strings.Join(fields, ", "), more))
+		parts = append(parts, fmt.Sprintf("%s/%s (%s%s)", r.Namespace, r.Name, strings.Join(r.Fields, ", "), more))
 	}
 	out := strings.Join(parts, ", ")
-	if len(rs) > len(shown) {
+	if v.RefusedCount > len(v.Refused) {
 		out += ", ..."
 	}
 	return out
 }
 
-func uncheckedList(us []getters.UncheckedInstance) string {
-	shown := us
-	if len(shown) > maxInstancesInMessage {
-		shown = shown[:maxInstancesInMessage]
-	}
-	parts := make([]string, 0, len(shown))
-	for _, u := range shown {
+// uncheckedList renders the capped unchecked entries for the message, without their error text so the
+// message stays stable across passes.
+func uncheckedList(v *compositiondefinitionsv1alpha1.MigratedValues) string {
+	parts := make([]string, 0, len(v.Unchecked))
+	for _, u := range v.Unchecked {
 		parts = append(parts, u.Namespace+"/"+u.Name)
 	}
 	out := strings.Join(parts, ", ")
-	if len(us) > len(shown) {
+	if v.UncheckedCount > len(v.Unchecked) {
 		out += ", ..."
 	}
 	return out

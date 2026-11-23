@@ -705,6 +705,90 @@ spec:
                       type: object
                     type: array
                 type: object
+              migratedValues:
+                description: |-
+                  MigratedValues: the instances a version migration left holding values the served version
+                  refuses, as structured data (core-provider#623). It is built from the same check, in the same
+                  call, as the MigratedValuesValid condition, so the two always agree: the instances named here are
+                  the ones its message names, in the same order. Absent while that condition is absent (no
+                  migration has moved an instance yet) and when the instance list itself could not be read (the
+                  condition is Unknown and says why); cleared when the condition becomes True.
+                properties:
+                  refused:
+                    description: |-
+                      Refused: the first refused instances, at most MigratedValuesMaxInstances, in the order the
+                      condition's message names them.
+                    items:
+                      description: |-
+                        MigratedValuesRefusedInstance is an instance the served version refuses, with the spec fields it
+                        names.
+                      properties:
+                        fieldCount:
+                          description: 'FieldCount: how many fields the apiserver
+                            refuses. Not capped: it can exceed len(fields).'
+                          minimum: 1
+                          type: integer
+                        fields:
+                          description: 'Fields: the spec field paths the apiserver
+                            refuses, sorted, at most MigratedValuesMaxFields.'
+                          items:
+                            type: string
+                          maxItems: 5
+                          minItems: 1
+                          type: array
+                        name:
+                          description: 'Name: the instance''s name.'
+                          type: string
+                        namespace:
+                          description: 'Namespace: the instance''s namespace.'
+                          type: string
+                      required:
+                      - fieldCount
+                      - fields
+                      - name
+                      - namespace
+                      type: object
+                    maxItems: 10
+                    type: array
+                  refusedCount:
+                    description: 'RefusedCount: how many instances that version refuses.
+                      Not capped: it can exceed len(refused).'
+                    minimum: 0
+                    type: integer
+                  unchecked:
+                    description: |-
+                      Unchecked: the first instances that could not be judged, at most MigratedValuesMaxInstances, in
+                      the order the condition's message names them.
+                    items:
+                      description: MigratedValuesInstance names a composition instance.
+                      properties:
+                        name:
+                          description: 'Name: the instance''s name.'
+                          type: string
+                        namespace:
+                          description: 'Namespace: the instance''s namespace.'
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      type: object
+                    maxItems: 10
+                    type: array
+                  uncheckedCount:
+                    description: |-
+                      UncheckedCount: how many instances could not be judged (the dry run failed for a reason that is
+                      not a spec validation error). Not capped: it can exceed len(unchecked).
+                    minimum: 0
+                    type: integer
+                  version:
+                    description: 'Version: the served version the instances were checked
+                      against.'
+                    type: string
+                required:
+                - refusedCount
+                - uncheckedCount
+                - version
+                type: object
               owner:
                 description: |-
                   Owner: the definition that owns this one's Kind x version (core-provider#616). Set only on a

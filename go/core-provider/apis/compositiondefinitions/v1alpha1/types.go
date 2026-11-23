@@ -541,6 +541,69 @@ type DefinitionReference struct {
 	Name string `json:"name"`
 }
 
+// MigratedValuesMaxInstances bounds MigratedValues.Refused and MigratedValues.Unchecked, and the
+// instances the MigratedValuesValid message names. The CRD's maxItems on both lists must equal it.
+const MigratedValuesMaxInstances = 10
+
+// MigratedValuesMaxFields bounds MigratedValuesRefusedInstance.Fields, and the fields the
+// MigratedValuesValid message names per instance. The CRD's maxItems on Fields must equal it.
+const MigratedValuesMaxFields = 5
+
+// MigratedValues is the structured form of the MigratedValuesValid condition (core-provider#623).
+type MigratedValues struct {
+	// Version: the served version the instances were checked against.
+	Version string `json:"version"`
+
+	// RefusedCount: how many instances that version refuses. Not capped: it can exceed len(refused).
+	// +kubebuilder:validation:Minimum=0
+	RefusedCount int `json:"refusedCount"`
+
+	// UncheckedCount: how many instances could not be judged (the dry run failed for a reason that is
+	// not a spec validation error). Not capped: it can exceed len(unchecked).
+	// +kubebuilder:validation:Minimum=0
+	UncheckedCount int `json:"uncheckedCount"`
+
+	// Refused: the first refused instances, at most MigratedValuesMaxInstances, in the order the
+	// condition's message names them.
+	// +kubebuilder:validation:MaxItems=10
+	// +optional
+	Refused []MigratedValuesRefusedInstance `json:"refused,omitempty"`
+
+	// Unchecked: the first instances that could not be judged, at most MigratedValuesMaxInstances, in
+	// the order the condition's message names them.
+	// +kubebuilder:validation:MaxItems=10
+	// +optional
+	Unchecked []MigratedValuesInstance `json:"unchecked,omitempty"`
+}
+
+// MigratedValuesInstance names a composition instance.
+type MigratedValuesInstance struct {
+	// Namespace: the instance's namespace.
+	Namespace string `json:"namespace"`
+
+	// Name: the instance's name.
+	Name string `json:"name"`
+}
+
+// MigratedValuesRefusedInstance is an instance the served version refuses, with the spec fields it
+// names.
+type MigratedValuesRefusedInstance struct {
+	// Namespace: the instance's namespace.
+	Namespace string `json:"namespace"`
+
+	// Name: the instance's name.
+	Name string `json:"name"`
+
+	// Fields: the spec field paths the apiserver refuses, sorted, at most MigratedValuesMaxFields.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=5
+	Fields []string `json:"fields"`
+
+	// FieldCount: how many fields the apiserver refuses. Not capped: it can exceed len(fields).
+	// +kubebuilder:validation:Minimum=1
+	FieldCount int `json:"fieldCount"`
+}
+
 // CompositionDefinitionStatus is the status of a CompositionDefinition.
 type CompositionDefinitionStatus struct {
 	rtv1.ConditionedStatus `json:",inline"`
@@ -563,6 +626,15 @@ type CompositionDefinitionStatus struct {
 	// last recorded until its next successful observation.
 	// +optional
 	Owner *DefinitionReference `json:"owner,omitempty"`
+
+	// MigratedValues: the instances a version migration left holding values the served version
+	// refuses, as structured data (core-provider#623). It is built from the same check, in the same
+	// call, as the MigratedValuesValid condition, so the two always agree: the instances named here are
+	// the ones its message names, in the same order. Absent while that condition is absent (no
+	// migration has moved an instance yet) and when the instance list itself could not be read (the
+	// condition is Unknown and says why); cleared when the condition becomes True.
+	// +optional
+	MigratedValues *MigratedValues `json:"migratedValues,omitempty"`
 
 	// Kind: the kind of the custom resource - Last applied kind
 	Kind string `json:"kind,omitempty"`
