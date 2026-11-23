@@ -74,8 +74,8 @@ written by the managed reconciler on the same objects. The set is CLOSED.
 | ApiRefRBACComplete | `SnowplowNotConfigured` | False | core-provider | — | core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef |
 | AuthnDelegation | `Rendered` | True | core-provider | — | the authn mapping CRD serves spec.delegation and it is rendered onto the mapping |
 | AuthnDelegation | `DelegationUnsupported` | False | core-provider | — | the installed authn mapping CRD does not serve spec.delegation (authn-crds < 0.37.0), so it is not rendered rather than pruned |
-| AuthnMappingApplied | `Applied` | True | core-provider | — | the mapping CRD exists where the controller runs and the mapping is rendered there |
-| AuthnMappingApplied | `AuthnNotInstalled` | False | core-provider | — | the cluster the controller runs in has no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping is not written |
+| AuthnMappingApplied | `Applied` | True | core-provider | — | read live on this pass, both authorize: the controller's mapping, where the controller runs, and core-provider's own, on the management cluster (#642) |
+| AuthnMappingApplied | `AuthnNotInstalled` | False | core-provider | — | the cluster the controller runs in, or the management cluster (for core-provider's own mapping, #642), serves no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping that belongs there is not written; the message names the cluster and what waits on it, and every pass looks again |
 | ValuesSchemaAuthored | `Authored` | True | core-provider | — | the chart ships values.schema.json at its root, and the CRD is generated from it |
 | ValuesSchemaAuthored | `InferredFromValues` | False | core-provider | — | the chart ships no values.schema.json and the definition opted in (krateo.io/values-schema: infer): the schema is inferred from values.yaml, typed-open, with no authored constraints; the message gives the rules version and the untyped paths |
 | ValuesSchemaAuthored | `OwnedByAnotherDefinition` | Unknown | core-provider | — | a follower: another definition generates the CRD; the message names it |

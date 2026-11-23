@@ -150,9 +150,21 @@ unauthorized and the projection silently reads nothing
 
 The authn mapping is created/deleted by core-provider itself, so its ClusterRole
 must grant manage on `serviceaccounts.serviceaccount.authn.krateo.io` (granted by
-`helm/core-provider/templates/clusterrole.yaml`). If that RBAC (or the authn CRD)
-is missing, Deploy fails creating the mapping; on undeploy a not-found /
+`helm/core-provider/templates/clusterrole.yaml`). If that RBAC is missing, the
+reconcile fails creating the mapping. If the authn CRD is missing, nothing is written
+and the definition reads `AuthnMappingApplied=False/AuthnNotInstalled`, naming the
+cluster; the mapping is written once the CRD is there. On undeploy a not-found /
 no-CRD-match is tolerated so it never blocks composition teardown.
+
+**A definition with an `apiRef` that stays `ApiRefRBACComplete=False/Unauthorized` with
+authn answering `403 NoMapping`** is missing *core-provider's own* mapping (named after
+core-provider's ServiceAccount, in `COMPOSITION_AUTHN_NAMESPACE`, on the management
+cluster), not the controller's `cdc-*` one. Since #642 every reconcile ensures it, so a
+NoMapping that lasts means core-provider may not write it: every definition with an
+`apiRef` is paused or has updates withheld by `krateo.io/management-policy`, or the write
+is refused (the error is on `Synced`). Before #642 only Create and Update wrote it, and a
+definition first reconciled before authn was installed, or whose mapping was deleted
+later, stayed there until it was created by hand.
 
 ## `statusDataTemplate` forPaths can't shadow baseline status fields, and are validated at reconcile
 

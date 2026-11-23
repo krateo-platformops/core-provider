@@ -429,6 +429,13 @@ func tokenPath642(t *testing.T) string {
 	return token642Path
 }
 
+// in makes the bench report on t for the rest of a subtest.
+func (b *bench642) in(t *testing.T) {
+	outer := b.t
+	b.t = t
+	t.Cleanup(func() { b.t = outer })
+}
+
 // pass runs one reconcile, and returns what the runtime would do with it: an error is a requeue with
 // backoff.
 func (b *bench642) pass() (ctrl.Result, error) {
@@ -570,13 +577,17 @@ func TestEnvtest_642_CRDJustAppearedIsSeenOnTheNextPass(t *testing.T) {
 // (b), (c): a mapping deleted later is written again on the next pass: core-provider's own, the
 // controller's, and one whose spec no longer names core-provider's ServiceAccount.
 func TestEnvtest_642_DeletedMappingIsRewritten(t *testing.T) {
-	c := start642(t)
-	c.installAuthnCRD(t, true)
-	b := newBench642(t, c, c)
-	b.settle(5)
-	b.wantCond("settled", "True/Applied")
-
+	// One apiserver each: an arm that wedges must not decide the next one.
+	settled := func(t *testing.T) (*cluster642, *bench642) {
+		c := start642(t)
+		c.installAuthnCRD(t, true)
+		b := newBench642(t, c, c)
+		b.settle(5)
+		b.wantCond("settled", "True/Applied")
+		return c, b
+	}
 	t.Run("core-provider's own", func(t *testing.T) {
+		c, b := settled(t)
 		c.deleteMapping(t, self642Name)
 		if _, err := b.pass(); err != nil {
 			t.Errorf("the pass after the delete: %v", err)
@@ -588,6 +599,7 @@ func TestEnvtest_642_DeletedMappingIsRewritten(t *testing.T) {
 		b.wantCond("after", "True/Applied")
 	})
 	t.Run("core-provider's own, re-pointed", func(t *testing.T) {
+		c, b := settled(t)
 		m := c.mapping(t, self642Name)
 		_ = unstructured.SetNestedField(m.Object, "someone-else", "spec", "serviceAccountRef", "name")
 		m.SetLabels(map[string]string{"kept": "yes"})
@@ -606,6 +618,7 @@ func TestEnvtest_642_DeletedMappingIsRewritten(t *testing.T) {
 		b.wantCond("after", "True/Applied")
 	})
 	t.Run("the controller's", func(t *testing.T) {
+		c, b := settled(t)
 		c.deleteMapping(t, self642Controller)
 		if _, err := b.pass(); err != nil {
 			t.Errorf("the pass after the delete: %v", err)
@@ -616,6 +629,43 @@ func TestEnvtest_642_DeletedMappingIsRewritten(t *testing.T) {
 		b.settle(2)
 		b.wantCond("after", "True/Applied")
 	})
+}
+
+// Create and Update ensure it themselves: Observe returns before its own ensure when the CRD does not
+// exist yet (Create follows), and when the generated CRD changed (Update follows). One pass is enough in
+// both, so neither leaves it to the next Observe.
+func TestEnvtest_642_CreateAndUpdateEnsureItThemselves(t *testing.T) {
+	c := start642(t)
+	c.installAuthnCRD(t, true)
+	b := newBench642(t, c, c)
+	if _, err := b.pass(); err != nil {
+		t.Errorf("Create's pass: %v", err)
+	}
+	if c.mapping(t, self642Name) == nil {
+		t.Error("Create did not write core-provider's mapping")
+	}
+	b.settle(5)
+
+	c.deleteMapping(t, self642Name)
+	cd := b.cd()
+	cd.Spec.StatusDataTemplate = []compositiondefinitionsv1alpha1.StatusFieldMapping{{ForPath: "added", Expression: "${ .spec }"}}
+	if err := c.cl.Update(context.Background(), cd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.pass(); err != nil {
+		t.Errorf("Update's pass: %v", err)
+	}
+	if c.mapping(t, self642Name) == nil {
+		t.Error("Update did not write core-provider's mapping")
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := c.cl.Get(context.Background(), types.NamespacedName{Name: "contents.composition.krateo.io"}, crd); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(crd); !strings.Contains(string(b), `"added"`) {
+		t.Fatal("premise: Update did not run, so it proved nothing")
+	}
+	b.settle(3)
 }
 
 // authn answers NoMapping for a while after the mapping is written (its cache has not seen it). The
@@ -660,6 +710,7 @@ func TestEnvtest_642_WithheldDefinitionWritesNothing(t *testing.T) {
 		{"paused", "krateo.io/paused", "true"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			b.in(t)
 			b.annotate(map[string]string{tc.key: tc.value})
 			c.deleteMapping(t, self642Name)
 			c.take("")
@@ -689,6 +740,7 @@ func TestEnvtest_642_WithheldDefinitionWritesNothing(t *testing.T) {
 	// The runtime's pause check reads the cached copy, and Observe re-reads the definition: a pause set
 	// in between reaches Observe itself.
 	t.Run("paused, seen only by Observe's own re-read", func(t *testing.T) {
+		b.in(t)
 		stale := b.cd()
 		b.annotate(map[string]string{"krateo.io/paused": "true"})
 		c.deleteMapping(t, self642Name)
@@ -790,6 +842,7 @@ func TestEnvtest_642_UnreadableMappingIsNotMissing(t *testing.T) {
 	b.settle(5)
 	for _, name := range []string{self642Name, self642Controller} {
 		t.Run(name, func(t *testing.T) {
+			b.in(t)
 			b.wantCond("before", "True/Applied")
 			c.take("")
 			c.setFail(func(r *http.Request) *http.Response {

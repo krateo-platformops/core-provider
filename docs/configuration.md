@@ -54,8 +54,10 @@ On by default; **requires** authn's serviceaccount strategy (CRD
 | `apiRefRBAC.group` | `krateo:core-provider` | The engine's own nominal group. |
 | `apiRefRBAC.tokenAudience` / `tokenExpirationSeconds` | `authn` / `3600` | The projected-token contract. |
 
-The engine's own allowlist mapping is provisioned **at runtime** (first `apiRef`
-use), not as a chart CR — the authn CRD is installed later in a platform bootstrap.
+The engine's own allowlist mapping is provisioned **at runtime**, not as a chart CR — the
+authn CRD is installed later in a platform bootstrap. Every reconcile of a definition with
+an `apiRef` ensures it: until the CRD is there the definition reads
+`AuthnMappingApplied=False/AuthnNotInstalled`, and a mapping deleted later is written again.
 
 ## `chartInspector.*`
 
