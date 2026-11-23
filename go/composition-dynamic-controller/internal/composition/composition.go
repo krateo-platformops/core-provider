@@ -2,6 +2,7 @@ package composition
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
 	"github.com/krateo-platformops/plumbing/versionname"
@@ -100,6 +101,9 @@ const (
 	reasonHooksUnverified         event.Reason = "HooksUnverified"
 	reasonHooksUnverifiedCleared  event.Reason = "HooksUnverifiedCleared"
 	reasonHooksUnverifiedNotClear event.Reason = "HooksUnverifiedClearFailed"
+	// reasonFailedInstallRetried is the Normal Event for each time a failed first install is installed
+	// again, install hooks included (#636).
+	reasonFailedInstallRetried event.Reason = "FailedInstallRetried"
 
 	// Ready-condition reason used while a helm operation is still in flight and this reconcile is
 	// deliberately standing down rather than starting a concurrent one.
@@ -514,6 +518,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		return controller.ExternalObservation{}, failObserveOnDerivedRBAC(ctx, mg, err, time.Now(), updateOpts)
 	}
 
+	var recovered stuckRecovery
 	if isIncompleteHelmOperation(rel.Status) {
 		// A pending-* OR uninstalling status means a helm operation is in flight OR its process died
 		// mid-flight — helm labels both the same and never re-labels a crash. (StatusUninstalling is
@@ -559,6 +564,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 			pendingCond := conditionreason.PendingHelmOperation.WithMessage(fmt.Sprintf(
 				"waiting for an in-flight helm operation to settle (status %s, pending for %s)",
 				string(rel.Status), pendingFor.Truncate(time.Second)))
+			if cond, failing := installFailing(mg, pendingCond.Message); failing { // #636: not converging while it waits
+				pendingCond = cond
+			}
 			unstructuredtools.SetConditions(mg, pendingCond)
 			_, uerr := updateStatus(ctx, mg, updateOpts)
 			if err := pendingConditionWriteOutcome(uerr); err != nil {
@@ -605,24 +613,22 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// so no window would do); a history that cannot be read or trusted stops the recovery.
 		log.Debug("Composition stuck in an incomplete helm operation past the grace period; rolling back to clear it.",
 			"status", string(rel.Status), "pendingFor", pendingFor.String(), "grace", pendingOperationGrace.String())
-		var uninstalled bool
-		gate := reinstallGate{
-			policyAllows: decision.May(managementpolicy.Create) && decision.May(managementpolicy.Delete),
-			dyn:          dyn,
+		gate := interruptedGate{
+			heldByNobody:  orphan || pendingFor >= pendingOperationGrace,
+			createAllowed: decision.May(managementpolicy.Create),
+			dyn:           dyn,
 		}
-		if pkg != nil && pkg.CompositionDefinitionInfo != nil && pkg.CompositionDefinitionInfo.Annotations != nil {
-			gate.cdAnnotationsKnown, gate.cdAnnotations = true, pkg.CompositionDefinitionInfo.Annotations
-		}
-		if mg, rel, uninstalled, err = h.recoverStuckOperation(ctx, mg, hc, rel, releaseName, gate, updateOpts, log); err != nil {
+		gate.cdAnnotations, gate.cdAnnotationsKnown = definitionAnnotations(pkg)
+		if mg, recovered, err = h.recoverStuckOperation(ctx, mg, hc, rel, releaseName, gate, updateOpts, log); err != nil {
 			return controller.ExternalObservation{}, err
 		}
-		if uninstalled {
-			// #629: the interrupted fresh install is gone; report it absent so the runtime's Create
-			// installs it again with all its hooks.
-			return controller.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
-		}
+		rel = recovered.rel
 	}
-	mg = clearInterruptedInstallReinstalls(ctx, mg, rel, updateOpts, log)
+	mg = clearInterruptedInstallAttempts(ctx, mg, rel, updateOpts, log)
+	mg = clearNeverDeployedAfterDeploy(ctx, mg, rel, updateOpts, log)
+	if rel.Status == helmconfig.StatusDeployed {
+		clearInstallFailures(mg)
+	}
 
 	tracer := tracer.NewTracer(ctx, meta.IsVerbose(mg))
 	cfg := rest.CopyConfig(h.kubeconfig)
@@ -719,59 +725,86 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		}, nil
 	}
 
-	// #461: record the starter pod just before a revision is written (never on a steady reconcile).
-	var priorRecord map[string]interface{}
-	recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
-	reconcileRes, err := helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
-		return hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
-			ChartVersion:          pkg.Version,
-			ChartName:             pkg.Repo,
-			Username:              pkg.Auth.Username,
-			Password:              pkg.Auth.Password,
-			InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-			Values:                values,
-			PostRenderer:          postrenderLabels,
-			// Adopt an existing child object rather than aborting the whole release when it carries
-			// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
-			// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
-			// into the current release: invalid ownership metadata") and wedges the platform (D1,
-			// 2026-07-08); with it the release takes ownership, self-healing the conflict.
-			TakeOwnership: true,
-			// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
-			Timeout: helmOperationTimeout,
-		}, recordRevision, retiring, updateWithheld))
-	})
-	// #597: under a withheld update the reconcile wrote nothing, and two of its errors mean only that
-	// drift could not be MEASURED (a webhook denied the dry run, or the stored manifest needs a
-	// repair that would be a write). Not a reconcile failure: Ready says why (Diego, 2026-11-21).
-	withheld := ""
-	if updateWithheld && err != nil && driftUnassessable(err) {
-		withheld = unassessableMessage(mg, decision, installedChartVersion(rel), err)
-		log.Info("Updates are withheld by the management policy, and drift could not be assessed", "error", err.Error())
-		err = nil
-		if reconcileRes == nil {
-			reconcileRes = &helmconfig.ReconcileResult{WriteWithheld: true, ObjectsComplete: true}
-		}
-		if reconcileRes.Release == nil {
-			reconcileRes.Release = rel
-		}
+	actionConfig := &helmconfig.ActionConfig{
+		ChartVersion:          pkg.Version,
+		ChartName:             pkg.Repo,
+		Username:              pkg.Auth.Username,
+		Password:              pkg.Auth.Password,
+		InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+		Values:                values,
+		PostRenderer:          postrenderLabels,
+		// Adopt an existing child object rather than aborting the whole release when it carries
+		// non-Helm ownership metadata (e.g. a composition instance created/edited out-of-band).
+		// Without this, one un-adoptable child 500s the entire reconcile ("cannot be imported
+		// into the current release: invalid ownership metadata") and wedges the platform (D1,
+		// 2026-07-08); with it the release takes ownership, self-healing the conflict.
+		TakeOwnership: true,
+		// Bounds the real upgrade Reconcile runs on a detected change, hooks included (#410).
+		Timeout: helmOperationTimeout,
 	}
-	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
-	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
-		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
-			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
-		h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
-			fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
-	}
-	if reconcileRes != nil && reconcileRes.Changed {
-		markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
-	}
-	// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
-	h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
+
+	// #636: a first install that failed is installed again, not upgraded, so its install hooks run.
+	failedGate := newFailedInstallGate(mg, pkg, dyn)
+	failedGate.updateWithheld, failedGate.interrupted, failedGate.hookJobsDeleted = updateWithheld, recovered.interrupted, recovered.hookJobsDeleted
+	mg, failed, err := h.assessFailedInstall(ctx, mg, hc, rel, releaseName, failedGate, updateOpts, log, "Observe")
 	if err != nil {
-		return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, fmt.Errorf("reconciling helm chart: %w", err), updateOpts)
+		return controller.ExternalObservation{}, err
 	}
-	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Observe")
+	if failed.plan == planLeave {
+		return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+	}
+	withheld := ""
+	var reconcileRes *helmconfig.ReconcileResult
+	if failed.plan == planInstallAgain {
+		var installed *helmconfig.Release
+		mg, installed, err = h.installAgain(ctx, mg, hc, failed, releaseName, pkg.URL, actionConfig, failedGate, updateOpts, log, "Observe")
+		if errors.Is(err, errInstallWhileDeleting) {
+			log.Info("Composition was deleted while this reconcile was in flight; its failed install is left to the delete", "release", releaseName)
+			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		}
+		if err != nil {
+			return controller.ExternalObservation{}, failInstallAgain(ctx, mg, err, updateOpts)
+		}
+		reconcileRes = &helmconfig.ReconcileResult{Release: installed, ObjectsComplete: true}
+	} else {
+		// #461: record the starter pod just before a revision is written (never on a steady reconcile).
+		var priorRecord map[string]interface{}
+		recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
+		reconcileRes, err = helmPhase(log, "reconcile", releaseName, func() (*helmconfig.ReconcileResult, error) {
+			return hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(actionConfig, recordRevision, retiring, updateWithheld))
+		})
+		// #597: under a withheld update the reconcile wrote nothing, and two of its errors mean only that
+		// drift could not be MEASURED (a webhook denied the dry run, or the stored manifest needs a
+		// repair that would be a write). Not a reconcile failure: Ready says why (Diego, 2026-11-21).
+		if updateWithheld && err != nil && driftUnassessable(err) {
+			withheld = unassessableMessage(mg, decision, installedChartVersion(rel), err)
+			log.Info("Updates are withheld by the management policy, and drift could not be assessed", "error", err.Error())
+			err = nil
+			if reconcileRes == nil {
+				reconcileRes = &helmconfig.ReconcileResult{WriteWithheld: true, ObjectsComplete: true}
+			}
+			if reconcileRes.Release == nil {
+				reconcileRes.Release = rel
+			}
+		}
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+		if reconcileRes != nil && reconcileRes.DesiredStateHeld {
+			log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
+				"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
+			h.eventRecorder.Event(mg, event.Normal(reasonRetiringHeldChange, "Reconcile",
+				fmt.Sprintf("Held a desired-state change (%s): this controller is retiring and leaves it to the current version's controller: %s", reconcileRes.DesiredStateChange, retiringWhy)))
+		}
+		if reconcileRes != nil && reconcileRes.Changed {
+			markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
+		}
+		// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+		h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
+		if err != nil {
+			return controller.ExternalObservation{}, failObserveWithFinding(ctx, mg, fmt.Errorf("reconciling helm chart: %w", err), updateOpts)
+		}
+	}
+	installHooksSkipped := recovered.installHooksSkipped || failed.plan == planUpgradeUnverified
+	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, installHooksSkipped, updateOpts, log, "Observe")
 	if updateWithheld && withheld == "" {
 		withheld = updateWithheldMessage(mg, decision, reconcileRes, installedChartVersion(rel))
 		if withheld != "" {
@@ -881,6 +914,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		// add a return free to put it in the wrong place again.
 		selfHealed = true
 	}
+	if failed.plan == planInstallAgain {
+		// #636: the release was just installed. Update records its inventory, which nothing has recorded
+		// because no install had succeeded.
+		selfHealed = true
+	}
 
 	// #261: a child recorded in status.managed but ABSENT from the cluster is drift by definition —
 	// either the record is stale or the child needs recreating, and both are Update's job. Observe
@@ -894,15 +932,18 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	var absentChildren []string
 
 	err = h.setStatus(ctx, mg, &statusManagerOpts{
-		force:           false,
-		resources:       nil, // we don't need to set resources here as they are already set when a resource is created/updated
-		absentChildren:  &absentChildren,
-		previousDigest:  previousDigest,
-		digest:          digest,
-		message:         readyMessageAvailable,
-		chartURL:        pkg.URL,
-		chartVersion:    chartVersion,
-		updateWithheld:  withheld,
+		force:          false,
+		resources:      nil, // we don't need to set resources here as they are already set when a resource is created/updated
+		absentChildren: &absentChildren,
+		previousDigest: previousDigest,
+		digest:         digest,
+		message:        readyMessageAvailable,
+		chartURL:       pkg.URL,
+		chartVersion:   chartVersion,
+		updateWithheld: withheld,
+		// #636: under a withheld update nothing is written, so a failed first install stays as it is.
+		installHooksNotRun: installHooksNotRunMessage(failed),
+
 		releaseStatus:   string(rel.Status),
 		releaseRevision: rel.Revision,
 		releaseName:     rel.Name,
@@ -1142,20 +1183,44 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 		Timeout: helmOperationTimeout,
 	}
 
-	// #410: say what is about to run before it runs, so an install held by a slow or hung hook is
-	// visible on the composition. Bounded by helmOperationTimeout.
-	priorRecord := priorHelmOperationRecord(mg)
-	if mg, err = recordHelmOperation(ctx, mg, "install", time.Now(), updateOpts, log); err != nil {
-		return err
-	}
-
 	// Check if the release already exists before attempting to install, this can happen if the create event is triggered after a failed install
 	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
 	if err != nil {
 		return fmt.Errorf("finding helm release: %w", err)
 	}
+	// #636: a first install that failed is installed again, not upgraded, so its install hooks run.
+	failedGate := newFailedInstallGate(mg, pkg, dyn)
+	mg, failed, err := h.assessFailedInstall(ctx, mg, hc, rel, releaseName, failedGate, updateOpts, log, "Create")
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		// A new release counts its revisions from 1 again, which a mark left from an earlier one of the
+		// same name would vouch for. It is removed first, or nothing is installed.
+		if mg, err = clearNeverDeployedMark(ctx, mg, updateOpts); err != nil {
+			return fmt.Errorf("removing the mark of an earlier release before installing: %w", err)
+		}
+	}
+
+	// #410: say what is about to run before it runs, so an install held by a slow or hung hook is
+	// visible on the composition. Bounded by helmOperationTimeout. installAgain records its own, after
+	// it has waited for the previous attempt's hook Jobs.
+	priorRecord, started := priorHelmOperationRecord(mg), time.Now()
+	if failed.plan != planInstallAgain {
+		if mg, err = recordHelmOperation(ctx, mg, "install", started, updateOpts, log); err != nil {
+			return err
+		}
+	}
+
 	helmMetrics := metrics.NewHelmMetrics(ctx)
-	if rel != nil {
+	if failed.plan == planInstallAgain {
+		log.Debug("The release's first install failed, installing it again.")
+		helmCalled = true
+		mg, rel, err = h.installAgain(ctx, mg, hc, failed, releaseName, pkg.URL, actionConfig, failedGate, updateOpts, log, "Create")
+		if err != nil {
+			return err
+		}
+	} else if rel != nil {
 		log.Debug("Release already exists, upgrading instead of installing.")
 		helmCalled = true
 		rel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
@@ -1186,11 +1251,18 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 				return releaseOf(op), err
 			})
 		})
-		markWrote(ctx, writeHelmInstall)                                           // the install ran, which writes, whether or not it then failed
-		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+		markWrote(ctx, writeHelmInstall) // the install ran, which writes, whether or not it then failed
+		if installNameInUse(err) {
+			// Refused: another install took the name since the read above, so this call's record is false.
+			mg = settleHelmOperationRecord(ctx, mg, priorRecord, errors.Join(helmconfig.ErrOperationInProgress, err), updateOpts, log)
+		} else {
+			mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+		}
 		if err != nil {
+			_, err = afterFailedInstall(ctx, mg, hc, releaseName, started, err, updateOpts, log) // #636
 			return fmt.Errorf("installing helm chart: %w", err)
 		}
+		clearInstallFailures(mg)
 	}
 	// #461, #520: settled right after each call above, on the error returns too. A false record left
 	// there was NOT harmless: a refused upgrade's record named this live pod over the record of the
@@ -1384,33 +1456,60 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	postrenderLabels.WithTraceparent(tpCarrier[meta.AnnotationKeyTraceparent], tpCarrier[meta.AnnotationKeyTracestate])
 
 	helmMetrics := metrics.NewHelmMetrics(ctx)
+	actionConfig := &helmconfig.ActionConfig{
+		ChartVersion:          pkg.Version,
+		ChartName:             pkg.Repo,
+		Username:              pkg.Auth.Username,
+		Password:              pkg.Auth.Password,
+		InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
+		Values:                values,
+		PostRenderer:          postrenderLabels,
+		TakeOwnership:         true,
+		Timeout:               helmOperationTimeout, // #410
+	}
+	// #636: a first install that failed is installed again, not upgraded, so its install hooks run. A
+	// spec change reaches Update directly, so this site decides it too.
+	rel, err := hc.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
+	if err != nil {
+		return fmt.Errorf("finding helm release: %w", err)
+	}
+	failedGate := newFailedInstallGate(mg, pkg, dyn)
+	mg, failed, err := h.assessFailedInstall(ctx, mg, hc, rel, releaseName, failedGate, updateOpts, log, "Update")
+	if err != nil {
+		return err
+	}
+	if failed.plan == planLeave {
+		return nil
+	}
 	var reconcileRes *helmconfig.ReconcileResult
-	// #461: record the starter pod just before a revision is written, as Observe does.
-	var priorRecord map[string]interface{}
-	recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
-	upgradedRel, err := helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
-		return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
-			res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(&helmconfig.ActionConfig{
-				ChartVersion:          pkg.Version,
-				ChartName:             pkg.Repo,
-				Username:              pkg.Auth.Username,
-				Password:              pkg.Auth.Password,
-				InsecureSkipTLSverify: pkg.InsecureSkipTLSverify,
-				Values:                values,
-				PostRenderer:          postrenderLabels,
-				TakeOwnership:         true,
-				Timeout:               helmOperationTimeout, // #410
-			}, recordRevision, retiring, false)) // the runtime dispatches Update only when the policy allows it
-			// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
-			h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
-			if rerr != nil {
-				return nil, rerr
-			}
-			reconcileRes = res
-			return res.Release, nil
+	var upgradedRel *helmconfig.Release
+	if failed.plan == planInstallAgain {
+		mg, upgradedRel, err = h.installAgain(ctx, mg, hc, failed, releaseName, pkg.URL, actionConfig, failedGate, updateOpts, log, "Update")
+		if errors.Is(err, errInstallWhileDeleting) {
+			log.Info("Composition was deleted while this update was in flight; its failed install is left to the delete", "release", releaseName)
+			return nil
+		}
+		if err != nil {
+			return failInstallAgain(ctx, mg, err, updateOpts)
+		}
+	} else {
+		// #461: record the starter pod just before a revision is written, as Observe does.
+		var priorRecord map[string]interface{}
+		recordRevision := operationRecorder(&mg, &priorRecord, updateOpts, log)
+		upgradedRel, err = helmPhase(log, "upgrade", releaseName, func() (*helmconfig.Release, error) {
+			return helmMetrics.TimedUpgradeWithResult(func() (*helmconfig.Release, error) {
+				res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(actionConfig, recordRevision, retiring, false)) // the runtime dispatches Update only when the policy allows it
+				// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
+				h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
+				if rerr != nil {
+					return nil, rerr
+				}
+				reconcileRes = res
+				return res.Release, nil
+			})
 		})
-	})
-	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+		mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log) // #461, #520
+	}
 	if reconcileRes != nil && reconcileRes.DesiredStateHeld {
 		log.Info("Held a desired-state change: this controller is retiring and leaves it to the current version's controller.",
 			"change", reconcileRes.DesiredStateChange, "reason", retiringWhy)
@@ -1427,7 +1526,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Debug("Release not found after upgrade.")
 		return fmt.Errorf("release not found after upgrade")
 	}
-	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, updateOpts, log, "Update")
+	mg = h.clearHooksUnverifiedAfter(ctx, mg, reconcileRes, err, failed.plan == planUpgradeUnverified, updateOpts, log, "Update")
 	// Changed==false is the normal, desired outcome: Observe's reconcile already converged the
 	// cluster, so this one had nothing to do and wrote no revision. Logged at Info when it DID
 	// write, because that is the case worth seeing — it means Observe's convergence did not hold,
@@ -1819,7 +1918,7 @@ func (h *handler) finishTeardown(ctx context.Context, mg *unstructured.Unstructu
 		return err
 	}
 	if len(pending) > 0 {
-		remaining, derr := deleteHookJobs(ctx, dyn, pending)
+		deleted, remaining, derr := deleteHookJobs(ctx, dyn, pending)
 		setPendingHookJobs(mg, remaining)
 		if derr != nil {
 			if _, uerr := tools.Update(ctx, mg, updateOpts); uerr != nil {
@@ -1827,7 +1926,7 @@ func (h *handler) finishTeardown(ctx context.Context, mg *unstructured.Unstructu
 			}
 			return fmt.Errorf("deleting the release's hook Jobs (%d of %d remain, retried on the next pass): %w", len(remaining), len(pending), derr)
 		}
-		log.Debug("Deleted the release's hook Jobs", "count", len(pending))
+		log.Debug("Deleted the release's hook Jobs", "deleted", deleted, "recorded", len(pending))
 	}
 	helmMetrics := metrics.NewHelmMetrics(ctx)
 

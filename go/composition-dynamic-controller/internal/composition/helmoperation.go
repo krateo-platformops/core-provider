@@ -44,7 +44,14 @@ func helmOperationInProgress(phase string, started time.Time, bound time.Duratio
 // rule as the PendingHelmOperation write (pendingConditionWriteOutcome).
 func recordHelmOperation(ctx context.Context, mg *unstructured.Unstructured, phase string, started time.Time,
 	opts tools.UpdateOptions, log logging.Logger) (*unstructured.Unstructured, error) {
-	unstructuredtools.SetConditions(mg, helmOperationInProgress(phase, started, helmOperationTimeout))
+	cond := helmOperationInProgress(phase, started, helmOperationTimeout)
+	if phase == "install" {
+		// #636: a first install that keeps failing does not read converging while a retry of it runs.
+		if failing, ok := installFailing(mg, "a retry is running: "+cond.Message); ok {
+			cond = failing
+		}
+	}
+	unstructuredtools.SetConditions(mg, cond)
 	setHelmOperationRecord(mg, phase, started) // #461: who started it, in the same write
 	updated, err := updateStatus(ctx, mg, opts)
 	if err != nil {

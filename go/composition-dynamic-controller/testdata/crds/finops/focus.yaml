@@ -82,6 +82,30 @@ spec:
             type: object
           status:
             properties:
+              installFailures:
+                type: object
+                description: 'The consecutive attempts of this composition''s first install that failed (#636). Removed once a revision is deployed.'
+                properties:
+                  count:
+                    type: integer
+                  lastAt:
+                    type: string
+                    format: date-time
+                  lastError:
+                    type: string
+              installRecovery:
+                type: object
+                description: 'The last automatic recovery of this composition''s first install, and how many there were (#629, #636). Kept after success, never reset.'
+                properties:
+                  kind:
+                    type: string
+                  lastAt:
+                    type: string
+                    format: date-time
+                  count:
+                    type: integer
+                  reason:
+                    type: string
               helmOperation:
                 type: object
                 description: 'The in-flight helm operation (#461), written before every helm write that can leave the release pending-* and removed when it returns, so the next controller can tell an operation in flight from one whose starter died.'

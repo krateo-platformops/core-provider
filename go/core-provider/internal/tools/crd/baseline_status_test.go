@@ -35,6 +35,10 @@ func baselineStatusWrites() map[string]any {
 		"unevaluatedChildren": map[string]any{"noReadyCondition": int64(1), "assertedReady": int64(0), "notObserved": int64(0), "noEvidenceBelow": int64(0)},
 		// The projected fields this pass left stale (Diego, 2026-11-16).
 		"unrefreshedFields": []any{"url"},
+		// The consecutive failed attempts of a first install (#636).
+		"installFailures": map[string]any{"count": int64(3), "lastAt": "2026-11-23T21:00:00Z", "lastError": "failed post-install"},
+		// The durable record of an automatic first-install recovery (#629, #636).
+		"installRecovery": map[string]any{"kind": "Retried", "lastAt": "2026-11-23T21:00:00Z", "count": int64(2), "reason": "the first install failed (revision 1)"},
 	}
 }
 

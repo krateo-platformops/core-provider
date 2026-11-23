@@ -135,12 +135,18 @@ func TestClearHooksUnverifiedAfter(t *testing.T) {
 		name       string
 		inFake     bool
 		res        *helmconfig.ReconcileResult
+		skipped    bool // this pass skipped the install hooks
 		wantMarked bool
 		wantEvent  string
 	}{
-		{"a hooks-running upgrade clears it", true, ran, false, string(reasonHooksUnverifiedCleared)},
-		{"control: a pass that ran no hook keeps it", true, steady, true, ""},
-		{"a failed patch keeps it and says so", false, ran, true, string(reasonHooksUnverifiedNotClear)},
+		{"a hooks-running upgrade clears it", true, ran, false, false, string(reasonHooksUnverifiedCleared)},
+		{"control: a pass that ran no hook keeps it", true, steady, false, true, ""},
+		{"a failed patch keeps it and says so", false, ran, false, true, string(reasonHooksUnverifiedNotClear)},
+		// #636: the upgrade over a failed first install ran upgrade hooks, not the install hooks the mark is
+		// about, whether the merge changed something or not.
+		{"the upgrade of a never-deployed release keeps it", true, ran, true, true, ""},
+		{"the same, with nothing else to change", true, &helmconfig.ReconcileResult{RetriedFailedRelease: true, Release: ran.Release}, true, true, ""},
+		{"control: a retried failed release that was live", true, &helmconfig.ReconcileResult{RetriedFailedRelease: true, Release: ran.Release}, false, false, string(reasonHooksUnverifiedCleared)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mg := markedPortal(t, true)
@@ -150,7 +156,7 @@ func TestClearHooksUnverifiedAfter(t *testing.T) {
 			}
 			rec := events.NewFakeRecorder(10)
 			h := &handler{eventRecorder: *event.NewAPIRecorder(rec)}
-			got := h.clearHooksUnverifiedAfter(ctx, mg, tc.res, nil, srOpts(dyn), logging.NewNopLogger(), "Observe")
+			got := h.clearHooksUnverifiedAfter(ctx, mg, tc.res, nil, tc.skipped, srOpts(dyn), logging.NewNopLogger(), "Observe")
 			if _, marked := hooksUnverifiedSince(got); marked != tc.wantMarked {
 				t.Errorf("marked after = %v, want %v", marked, tc.wantMarked)
 			}

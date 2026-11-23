@@ -42,10 +42,13 @@ const (
 	ReasonInventoryNotRecorded = "InventoryNotRecorded"
 	// HelmOperationInProgress: written before an install or uninstall starts (#410).
 	ReasonHelmOperationInProgress = "HelmOperationInProgress"
+	// InstallFailing (core-provider#636, Diego 2026-11-23): a first install has failed three times or more
+	// in a row. Retried at the error backoff.
+	ReasonInstallFailing = "InstallFailing"
 	// PendingHelmOperation: an earlier helm operation's lock is still within its grace period.
 	ReasonPendingHelmOperation = "PendingHelmOperation"
-	// HooksMayNotHaveRun: krateo.io/hooks-unverified is set; an interrupted helm operation's hooks
-	// may not have run (core-provider#563).
+	// HooksMayNotHaveRun: krateo.io/hooks-unverified is set; an interrupted or failed helm operation's
+	// hooks may not have run (core-provider#563, #636).
 	ReasonHooksMayNotHaveRun = "HooksMayNotHaveRun"
 	// CreateWithheldByPolicy and UpdateWithheldByPolicy (unstructured-runtime#110 D4, core-provider#597):
 	// krateo.io/management-policy withholds the verb. The literals are plumbing managementpolicy's, the
@@ -148,11 +151,14 @@ var (
 		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error", Clearance{Indefinite, "until the failing child, or the observation, recovers"})
 	HelmOperationInProgress = ready(ReasonHelmOperationInProgress, metav1.ConditionFalse, WriterCDC,
 		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound", Clearance{Timer, "until the install or uninstall returns; each hook and each wait must finish within {helmOperationTimeout}, and the message carries the start time"})
+	InstallFailing = ready(ReasonInstallFailing, metav1.ConditionFalse, WriterCDC,
+		"recordInstallFailure, from the 3rd consecutive failed attempt of a first install (the first two are Creating); kept, with what is running in its message, while a retry is in flight (#636); the message names the failed attempts (status.installFailures.count), the automatic retries (status.installRecovery.count) and the last error. A retried interruption is not a failed attempt",
+		Clearance{Indefinite, "until an attempt succeeds; retried at the error backoff, with no cap"})
 	PendingHelmOperation = ready(ReasonPendingHelmOperation, metav1.ConditionFalse, WriterCDC,
 		"Observe: a release is pending within its grace period, so this reconcile stands down", Clearance{Timer, "until the pending operation settles; otherwise rolled back once pending longer than {pendingOperationGrace} (at once when the pod that started it is gone); the message says how long it has been pending"})
 	HooksMayNotHaveRun = ready(ReasonHooksMayNotHaveRun, metav1.ConditionFalse, WriterCDC,
-		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps. An interrupted FIRST install that was never deployed is instead uninstalled without hooks and installed again (#629), so this reason means that reinstall was not allowed: krateo.io/interrupted-install-recovery is set, the attempts reached their cap, the management policy withholds create or delete, or the release was live once",
-		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm upgrade runs the hooks and removes it"})
+		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps. A FIRST install of this controller's that was interrupted or failed, and never deployed, is instead installed again with every install hook (#629, #636), so this reason then means it was not: krateo.io/interrupted-install-recovery is set, an interrupted one reached its cap, or the management policy withholds create (it was rolled back to itself or upgraded, and the upgrade's hooks are not the install's); or the policy withholds update, so nothing is written to the release (no annotation in that case); or the release was live once or is not this controller's",
+		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm install or upgrade after the recovery runs its hooks and removes it"})
 	ZeroEvidence = ready(condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"})
 	ChildrenForbidden = ready(ReasonChildrenForbidden, metav1.ConditionUnknown, WriterCDC,
@@ -342,7 +348,7 @@ var apiAuthnPassthrough = on(TypeApiResolved, "(authn's reason)", metav1.Conditi
 func Table() []Reason {
 	return []Reason{
 		Available, AvailablePartialCoverage, ReconcileGracefullyPaused,
-		Creating, Unavailable, HelmOperationInProgress, PendingHelmOperation, HooksMayNotHaveRun,
+		Creating, Unavailable, HelmOperationInProgress, InstallFailing, PendingHelmOperation, HooksMayNotHaveRun,
 		ZeroEvidence, ChildrenForbidden, InventoryNotRecorded, CreateWithheldByPolicy, UpdateWithheldByPolicy, RecoveryWithheldByPolicy,
 		runtimeReadyPaused, runtimeCreating, runtimeObserveFailed, runtimeCreateOutcomeUnknown, runtimeDeleting,
 		SyncedGracefullyPaused, SyncedGracefulPausePending,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,8 +94,8 @@ func pendingHookJobs(mg *unstructured.Unstructured) ([]hookJobRef, error) {
 	return refs, nil
 }
 
-// setPendingHookJobs writes refs (deduplicated, sorted) to the annotation, or removes it when empty.
-func setPendingHookJobs(mg *unstructured.Unstructured, refs []hookJobRef) {
+// uniqueHookJobs is refs deduplicated and sorted.
+func uniqueHookJobs(refs []hookJobRef) []hookJobRef {
 	seen := map[hookJobRef]bool{}
 	var uniq []hookJobRef
 	for _, r := range refs {
@@ -109,6 +110,12 @@ func setPendingHookJobs(mg *unstructured.Unstructured, refs []hookJobRef) {
 		}
 		return uniq[i].Name < uniq[j].Name
 	})
+	return uniq
+}
+
+// setPendingHookJobs writes refs (deduplicated, sorted) to the annotation, or removes it when empty.
+func setPendingHookJobs(mg *unstructured.Unstructured, refs []hookJobRef) {
+	uniq := uniqueHookJobs(refs)
 	ann := mg.GetAnnotations()
 	if len(uniq) == 0 {
 		if _, ok := ann[annotationHookJobsToDelete]; ok {
@@ -126,18 +133,68 @@ func setPendingHookJobs(mg *unstructured.Unstructured, refs []hookJobRef) {
 }
 
 // deleteHookJobs deletes each Job, its pods with it (background propagation). One already gone is
-// done; any other failure keeps that Job in remaining and is returned, so the caller records what is
-// left and fails the pass rather than reading a failed delete as a deleted Job.
-func deleteHookJobs(ctx context.Context, dyn dynamic.Interface, refs []hookJobRef) (remaining []hookJobRef, err error) {
-	bg := metav1.DeletePropagationBackground
+// done, and is NOT counted in deleted, which is what this call deleted: a release records the hooks of
+// every phase, so most of a half-finished install's never existed. Any other failure keeps that Job in
+// remaining and is returned, so the caller records what is left and fails the pass rather than reading a
+// failed delete as a deleted Job.
+func deleteHookJobs(ctx context.Context, dyn dynamic.Interface, refs []hookJobRef) (deleted int, remaining []hookJobRef, err error) {
+	return deleteHookJobsWith(ctx, dyn, refs, metav1.DeletePropagationBackground)
+}
+
+func deleteHookJobsWith(ctx context.Context, dyn dynamic.Interface, refs []hookJobRef, propagation metav1.DeletionPropagation) (deleted int, remaining []hookJobRef, err error) {
 	var errs []error
 	for _, r := range refs {
-		derr := dyn.Resource(jobsGVR).Namespace(r.Namespace).Delete(ctx, r.Name, metav1.DeleteOptions{PropagationPolicy: &bg})
-		if derr == nil || apierrors.IsNotFound(derr) {
+		derr := dyn.Resource(jobsGVR).Namespace(r.Namespace).Delete(ctx, r.Name, metav1.DeleteOptions{PropagationPolicy: &propagation})
+		if derr == nil {
+			deleted++
+			continue
+		}
+		if apierrors.IsNotFound(derr) {
 			continue
 		}
 		remaining = append(remaining, r)
 		errs = append(errs, fmt.Errorf("deleting hook Job %s/%s: %w", r.Namespace, r.Name, derr))
 	}
-	return remaining, errors.Join(errs...)
+	return deleted, remaining, errors.Join(errs...)
+}
+
+// hookJobsGoneTimeout bounds how long one pass waits for deleted hook Jobs to be gone: a pod's default
+// termination grace (30s) plus its deletion. Past it the pass fails and the next one waits again.
+// hookJobsGonePoll is how often it looks. Variables so a test need not wait them out.
+var (
+	hookJobsGoneTimeout = 60 * time.Second
+	hookJobsGonePoll    = time.Second
+)
+
+// deleteHookJobsAndWait deletes each Job and waits until it is gone, its pods included (#636): FOREGROUND
+// propagation, so the apiserver keeps the Job until its pods are gone, and a Job that no longer exists
+// means nothing of the previous attempt is still running. Background propagation removes the Job at once
+// and its pods later, so its absence would not say that. Any Job that cannot be read, deleted, or seen
+// gone within timeout is an error. It returns how many it deleted.
+func deleteHookJobsAndWait(ctx context.Context, dyn dynamic.Interface, refs []hookJobRef, timeout time.Duration) (int, error) {
+	deleted, remaining, err := deleteHookJobsWith(ctx, dyn, refs, metav1.DeletePropagationForeground)
+	if err != nil {
+		return deleted, fmt.Errorf("%d hook Job(s) of the failed install could not be deleted: %w", len(remaining), err)
+	}
+	deadline := time.Now().Add(timeout)
+	for _, r := range refs {
+		for {
+			_, err := dyn.Resource(jobsGVR).Namespace(r.Namespace).Get(ctx, r.Name, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				break
+			}
+			if err != nil {
+				return deleted, fmt.Errorf("confirming hook Job %s/%s of the failed install is gone: %w", r.Namespace, r.Name, err)
+			}
+			if !time.Now().Before(deadline) {
+				return deleted, fmt.Errorf("hook Job %s/%s of the failed install, or one of its pods, still exists %s after it was deleted", r.Namespace, r.Name, timeout)
+			}
+			select {
+			case <-ctx.Done():
+				return deleted, fmt.Errorf("waiting for hook Job %s/%s of the failed install to be gone: %w", r.Namespace, r.Name, ctx.Err())
+			case <-time.After(hookJobsGonePoll):
+			}
+		}
+	}
+	return deleted, nil
 }

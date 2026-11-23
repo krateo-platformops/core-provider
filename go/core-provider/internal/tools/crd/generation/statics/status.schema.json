@@ -134,6 +134,48 @@
           "description": "The process that started the operation, distinct across container restarts in the same pod: a record naming this pod but another process belongs to a process that is gone (the container restarted), so its pending release is orphaned."
         }
       }
+    },
+    "installFailures": {
+      "type": "object",
+      "description": "The consecutive attempts of this composition's FIRST install that failed (#636), with the last error. Written when an attempt fails, read by Ready (InstallFailing from the 3rd), and removed once a revision is deployed. An interrupted attempt is not a failed one and does not count: status.installRecovery.count, which is cumulative, counts the automatic retries of both. The last error is readable here while a retry is running. NO DEFAULT: absent means none failed.",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "description": "Consecutive failed attempts."
+        },
+        "lastAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the last one failed."
+        },
+        "lastError": {
+          "type": "string",
+          "description": "Its error, at most 1 KiB."
+        }
+      }
+    },
+    "installRecovery": {
+      "type": "object",
+      "description": "The last time this composition's controller retried its interrupted or failed FIRST install by itself (#629, #636), and how many times it has in all. Written before the retry's first deletion, kept after it succeeds, and never reset: a non-zero count says the chart's install hooks may have run more than once. The attempt counter that caps the retries of an interrupted install is the annotation krateo.io/interrupted-install-reinstalls, not this. NO DEFAULT: absent means it never happened (or happened under a CRD that predates this field, which prunes it).",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Retried: the interrupted or failed install was installed again over what it had created, with every install hook. The only value today; a consumer must accept others."
+        },
+        "lastAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the last retry started."
+        },
+        "count": {
+          "type": "integer",
+          "description": "How many retries were started over the composition's life."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the last retry ran: begins with Interrupted or Failed, and names the revision."
+        }
+      }
     }
   }
 }
