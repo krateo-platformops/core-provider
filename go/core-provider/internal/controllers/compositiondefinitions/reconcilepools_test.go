@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -117,6 +119,36 @@ func TestReconcilePools_TeardownOnlyOnAKnownEmptyMembership(t *testing.T) {
 		}
 		if idx, dep := poolObjectsLeft(t, hub, ns); idx || dep {
 			t.Fatalf("pool left behind: index=%v deployment=%v", idx, dep)
+		}
+	})
+	t.Run("its pods are waited for: nothing they run with goes before them", func(t *testing.T) {
+		hub := with(t)
+		roles := hub.Resource(schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}).Namespace(ns)
+		role := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+			"metadata": map[string]any{"name": deploy.PoolNames("general").Workload, "namespace": ns}}}
+		if _, err := roles.Create(ctx, role, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "draining", Namespace: ns, Labels: map[string]string{"app.kubernetes.io/name": deploy.PoolNames("general").Workload}}}
+		sc := runtime.NewScheme()
+		_ = corev1.AddToScheme(sc)
+		kube := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(pod).Build()
+		there := make(chan bool, 1)
+		go func() {
+			time.Sleep(700 * time.Millisecond)
+			_, err := roles.Get(ctx, role.GetName(), metav1.GetOptions{})
+			there <- err == nil
+			_ = kube.Delete(ctx, pod)
+		}()
+		e := &external{mgmt: kube, mgmtDynamic: hub}
+		if err := e.reconcilePools(ctx, &leaver, map[string]bool{"general": true}); err != nil {
+			t.Fatal(err)
+		}
+		if !<-there {
+			t.Error("the pool's Role was deleted while its pod was still there")
+		}
+		if idx, _ := poolObjectsLeft(t, hub, ns); idx {
+			t.Error("the pool was not deleted once its pod was gone")
 		}
 	})
 	t.Run("the pool's ConfigMaps cannot be listed: nothing deleted, error returned", func(t *testing.T) {

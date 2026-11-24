@@ -520,7 +520,8 @@ func (i *invariant652) add(gvr schema.GroupVersionResource, deleted bool, u *uns
 //	    first (marked draining, or its Deployment deleted), here as it always was, and the next one
 //	    starts, or the instance is migrated, after. None may be in that state at the end;
 //	I3  whatever an index names can run: its env ConfigMap is there and is that pool's member, its Lease
-//	    grant is there, and the pool's Role lets its process read that ConfigMap.
+//	    grant is there, and the pool's Role lets its process read that ConfigMap;
+//	I4  a dedicated controller a pool takes over is deleted only once that pool lists it.
 func (i *invariant652) check(t *testing.T) {
 	t.Helper()
 	time.Sleep(500 * time.Millisecond) // let the watches deliver
@@ -545,11 +546,15 @@ func (i *invariant652) check(t *testing.T) {
 	}
 	get := func(resource, name string) *unstructured.Unstructured { return state[id{resource, ns652, name}] }
 	for n, ev := range evs {
+		tookOver := ""
 		k := id{ev.gvr.Resource, ev.obj.GetNamespace(), ev.obj.GetName()}
 		if ev.deleted {
 			delete(state, k)
 			if key, ok := strings.CutSuffix(k.name, "-controller"); ok && k.resource == "deployments" {
 				stopped[key] = true
+				if env := get("configmaps", key+"-configmap"); env != nil && env.GetLabels()[deploy.PoolLabel] != "" {
+					tookOver = key
+				}
 			}
 		} else {
 			state[k] = ev.obj
@@ -587,6 +592,9 @@ func (i *invariant652) check(t *testing.T) {
 					bad("I3 at %d: pool %s lists %s, whose env ConfigMap its Role does not let it read", ev.rv, pool, key)
 				}
 			}
+		}
+		if tookOver != "" && len(in[tookOver]) == 0 {
+			bad("I4 at %d: %s's Deployment was deleted before the pool taking it over listed it", ev.rv, tookOver)
 		}
 		for key, pools := range in {
 			if len(pools) > 1 {
@@ -916,6 +924,12 @@ func TestEnvtest_652_LeavingAndMoving(t *testing.T) {
 	e.leases.wantHolder(t, e.gvr(b, v1), "cdc-pool-third-0")
 	e.leases.wantHolder(t, e.gvr(c, v1), "cdc-pool-third-0")
 	// A dedicated version retired in the pass that joins a pool.
+	// Its compositions' derived RBAC follows it there, not to a per-version identity a member does not have.
+	if err := e.c.cl.Create(context.Background(), &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "one-krateo-rbac", Namespace: self642CDNS},
+		RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "one-krateo-rbac"},
+		Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: ns652, Name: e.key(d, v1)}}}); err != nil {
+		t.Fatal(err)
+	}
 	e.charts.add(t, "delta", "2.0.0", `{"type":"object"}`)
 	d.edit(func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) {
 		setPool(cd, "third")
@@ -924,7 +938,82 @@ func TestEnvtest_652_LeavingAndMoving(t *testing.T) {
 	e.settle(1, 2, d)
 	e.wantIndex("d joined with a bump", "third", e.key(d, v2), e.key(b, v1), e.key(c, v1))
 	e.leases.wantHolder(t, e.gvr(d, v2), "cdc-pool-third-0")
+	var rb rbacv1.RoleBinding
+	if err := e.c.cl.Get(context.Background(), types.NamespacedName{Namespace: self642CDNS, Name: "one-krateo-rbac"}, &rb); err != nil {
+		t.Fatal(err)
+	}
+	if got := rb.Subjects[0].Name; got != "cdc-pool-third" {
+		t.Errorf("the derived binding names %s, want the pool's ServiceAccount", got)
+	}
 	e.done()
+}
+
+// A dedicated controller deployed before the ownership Lease existed cannot hold it, so it is retired
+// BEFORE its pool lists it: the pool's member would not wait for it.
+func TestEnvtest_652_JoiningWithoutALease(t *testing.T) {
+	e := start652(t)
+	a := e.member("alpha", "")
+	e.settle(1, 2)
+	key := e.key(a, v1)
+	ctx := context.Background()
+	if _, err := e.c.cs.CoreV1().ConfigMaps(ns652).Patch(ctx, key+"-configmap", types.JSONPatchType,
+		[]byte(`[{"op":"remove","path":"/data/COMPOSITION_CONTROLLER_LEASE_NAME"}]`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	a.edit(func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) { setPool(cd, "web") })
+	e.settle(1, 2)
+	e.wantIndex("joined", "web", key)
+	time.Sleep(500 * time.Millisecond)
+	var retired, listed int64
+	e.inv.mu.Lock()
+	defer e.inv.mu.Unlock()
+	for _, ev := range e.inv.evs {
+		if ev.deleted && ev.obj.GetName() == key+"-controller" {
+			retired = ev.rv
+		}
+		if data, _, _ := unstructured.NestedStringMap(ev.obj.Object, "data"); ev.obj.GetName() == deploy.PoolNames("web").Index && data[key] != "" && listed == 0 {
+			listed = ev.rv
+		}
+	}
+	if retired == 0 || listed == 0 || listed < retired {
+		t.Errorf("the pool listed it at %d, and its Deployment was deleted at %d", listed, retired)
+	}
+}
+
+// Deleting a definition whose older version a pool still runs (Manual), and whose Lease is never released:
+// the Kind's CRD is not removed from under it, and nothing of it is revoked.
+func TestEnvtest_652_DeleteWaitsForAnOlderVersion(t *testing.T) {
+	e := start652(t)
+	a := e.member("alpha", "web", func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) {
+		cd.Spec.UpgradePolicy = compositiondefinitionsv1alpha1.UpgradePolicyManual
+	})
+	e.settle(1, 2)
+	e.leases.wantHolder(t, e.gvr(a, v1), "cdc-pool-web-0")
+	a.bump("2.0.0", `{"type":"object"}`)
+	e.settle(1, 2)
+	old, gvr := e.key(a, v1), e.gvr(a, v1)
+	e.leases.set(0, v1+"."+gvr.Resource+"."+group)
+	if err := e.c.cl.Delete(context.Background(), a.cd()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		_, _ = a.pass()
+	}
+	e.wantGrants("its Lease is held", old, true)
+	if _, err := e.c.raw.Resource(gvr).Namespace(self642CDNS).List(context.Background(), metav1.ListOptions{}); err != nil {
+		t.Errorf("the Kind is gone while a pool still runs its older version: %v", err)
+	}
+	e.leases.set(0)
+	for range 6 {
+		_, _ = a.pass()
+	}
+	if err := e.c.cl.Get(context.Background(), a.key, &compositiondefinitionsv1alpha1.CompositionDefinition{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("not deleted once the Lease was released: %v", err)
+	}
+	e.wantGrants("deleted", old, false)
+	if e.exists(&appsv1.Deployment{}, "cdc-pool-web") {
+		t.Error("the pool was left behind")
+	}
 }
 
 // A paused member is in nobody's way and nobody's pass drops it; a deleted one leaves, its controller
