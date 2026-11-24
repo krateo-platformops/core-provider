@@ -1029,7 +1029,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// Live apiRef RBAC contribution — read the ClusterRole + binding and hash, mirroring the
 	// rendered-side applyRestActionRBAC so a deleted/edited grant surfaces as drift. No snowplow
 	// call here; only Deploy queries /rbac.
-	if err = lookupRestActionRBAC(ctx, opts.KubeClient, opts, sa.Name, &hsh); err != nil {
+	if err = lookupRestActionRBAC(ctx, opts.KubeClient, opts, &hsh); err != nil {
 		return "", fmt.Errorf("error hashing apiRef RBAC: %v", err)
 	}
 
