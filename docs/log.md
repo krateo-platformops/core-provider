@@ -98,3 +98,12 @@ the upstream roadmap and set the direction for everything below.
   earlier spec. It is **not** written with every status write: a paused definition is written on every
   pass, and one waiting out a prune grace (#484) keeps `Ready=True` and `Synced=True` about the old
   version for minutes, and both would have read "processed" ([api](./api.md#observedgeneration)).
+
+## A core-provider renders only the templates it was deployed with (2026-11)
+
+- **Content-addressed template ConfigMaps** (#651): the kubelet refreshed the mounted templates in the
+  *running* pod, so during an upgrade the old engine rendered the new chart's templates. On a demo tenant
+  (acmp, 2026-11-24, 2.13.57 to 2.13.105) a full pod quota kept the new engine from starting: seven
+  controllers came up with a lease named `<no value>` and no grant for it, and held the room the only
+  process able to repair them needed. The ConfigMaps are now immutable and named by their data's digest.
+  This protects upgrades **from** any earlier version too, since nothing in the old binary takes part.

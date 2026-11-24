@@ -52,7 +52,8 @@ func schemaConfigMapNN(cdNamespace string, controllerObject types.NamespacedName
 //   - the CD list failed: nothing is known, so nothing is removed.
 //
 // It never matches by suffix: the caller removes exactly one object by its derived name, so the
-// chart's own template ConfigMap (`<release>-jsonschema-configmap`) is never a candidate.
+// chart's own template ConfigMap (`<fullname>-jsonschema-configmap-<digest>`, and
+// `<fullname>-jsonschema-configmap` from a chart before #651) is never a candidate.
 func legacySchemaConfigMapRemovable(ctx context.Context, hub dynamic.Interface, controllerNamespace, cdNamespace string, gvr schema.GroupVersionResource) (bool, string) {
 	if controllerNamespace == cdNamespace {
 		return false, "the controller namespace is the definition's namespace: the legacy location is the current ConfigMap"

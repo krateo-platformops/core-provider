@@ -1,13 +1,2 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "core-provider.fullname" . }}-cdc-configmap
-  labels:
-    {{- include "core-provider.labels" . | nindent 4 }}
-data:
-  configmap.yaml: |
-{{ tpl (.Files.Get "assets/cdc/configmap.yaml") . | indent 4 }}
-  # docs/design/cdc-pooling.md §5c: a pool's process environment, rendered by core-provider only
-  # for a pool (read from /tmp/assets/cdc-configmap/pool-configmap.yaml).
-  pool-configmap.yaml: |
-{{ tpl (.Files.Get "assets/cdc/pool-configmap.yaml") . | indent 4 }}
+{{- /* The data and the name are defined together in _assets.tpl (#651). */ -}}
+{{ include "core-provider.assetConfigMap" (dict "root" . "asset" "cdc-configmap") }}

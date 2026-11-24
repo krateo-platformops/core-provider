@@ -39,8 +39,10 @@ configmap, RBAC folder, json-schema configmap, service
 (`compositiondefinitions.go`, the `CDCtemplate*Path` vars). They are mounted into
 the pod by the chart from
 [`helm/core-provider/assets/`](../../helm/core-provider/assets) — **not** baked into
-the image. If those paths are missing or stale, `objects.CreateK8sObject` fails
-during Deploy. The **Service** in particular is only rendered when its template
+the image. The ConfigMaps behind them are immutable and named by their content, so the
+files under a running pod never change (#651; [configuration](../configuration.md)): **never
+mark those volumes `optional`**, or the kubelet blanks the files when helm deletes the
+previous name. If a path is missing, `objects.CreateK8sObject` fails during Deploy. The **Service** in particular is only rendered when its template
 file exists on disk (`os.Stat(opts.ServiceTemplatePath)` gates it). No service
 template → no CDC Service, silently. (The copies under
 `internal/controllers/compositiondefinitions/testdata/manifests/` are test fixtures

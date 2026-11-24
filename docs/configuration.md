@@ -27,6 +27,8 @@ from.
 | `leaderElection.enabled` | `true` | One reconciling replica. A rolling update overlaps the old and new pod even at `replicaCount: 1`, and without the Lease both reconcile and restart every cdc after each other (#382). Required at `replicaCount>=2`; grants Lease RBAC when on. |
 | `podDisruptionBudget` / `topologySpreadConstraints` | off / `[]` | Rendered only when meaningful (`replicaCount>1`). |
 | `terminationGracePeriodSeconds` | `45` | Must exceed the manager's ~30s graceful drain. |
+| `strategy` | `{}` | The engine Deployment's strategy. Empty: not rendered, so Kubernetes' default applies (the new pod starts beside the old one, which needs room for one more pod). `rollingUpdate: {maxSurge: 0, maxUnavailable: 1}` replaces the pod in place, which fits a full pod quota; a new pod that cannot start then leaves no engine running. |
+| `priorityClassName` | `""` | PriorityClass of the engine's pod. Empty: not rendered. The class must exist. It does not bypass a `ResourceQuota`. |
 | `env` | `CORE_PROVIDER_DEBUG: "false"` | Extra engine env, rendered into the env ConfigMap. |
 
 ## OpenTelemetry (`otel.*`) — engine AND every CDC
@@ -152,3 +154,17 @@ pod at `/tmp/assets/{cdc-deployment,cdc-configmap,cdc-rbac,json-schema-configmap
 not embedded in the binary: changing them re-digests and re-rolls **every** CDC on
 the next reconcile — treat asset edits as a fleet-wide reconcile event
 ([gotchas](./internals/gotchas.md)).
+
+Each of the five ConfigMaps (`<fullname>-cdc-deployment-`, `-cdc-configmap-`, `-rbac-configmap-`,
+`-jsonschema-configmap-`, `-service-configmap-`) is **immutable and named by the digest of its own
+data**, and the engine Deployment's volumes name it (#651). So an engine pod reads the templates it was
+deployed with for as long as it lives: during an upgrade, a rollback or a values change the old pod keeps
+its own, and the new templates take effect when the new pod takes over. Their names change with their
+content, so find one by prefix or through the Deployment's volumes, and don't reference one by name from
+outside the chart. While a roll is stuck, the old pod reports `FailedMount ... configmap "..." not found`:
+helm has deleted the previous ConfigMaps and the kubelet keeps the files the pod already has. That is
+expected, and ends with the old pod. An old pod that is deleted while the roll is stuck can't start again:
+its templates are gone, and it starts no new ones.
+
+The per-definition `<plural>-<version>-jsonschema-configmap` is a different object, written by the engine;
+its name does not change.

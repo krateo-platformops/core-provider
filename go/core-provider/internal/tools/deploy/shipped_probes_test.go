@@ -24,7 +24,7 @@ import (
 // object the cluster runs (#333 could not tell which file that was; this is the chain):
 //
 //  1. helm renders helm/core-provider/assets/cdc/deployment.yaml into the ConfigMap
-//     <fullname>-cdc-deployment (templates/cdc-deployment.yaml), which templates/deployment.yaml
+//     <fullname>-cdc-deployment-<digest> (templates/cdc-deployment.yaml), which templates/deployment.yaml
 //     mounts into core-provider at /tmp/assets/cdc-deployment.
 //  2. core-provider reads that file (compositiondefinitions.CDCtemplateDeploymentPath) and renders it
 //     per Kind+version with objects.CreateK8sObject (Deploy, below), then applies the result.
