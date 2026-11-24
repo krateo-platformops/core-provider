@@ -38,7 +38,7 @@ func withHooksUnverified(out readyOutcome, mg *unstructured.Unstructured) readyO
 	}
 	return readyOutcome{
 		reason: conditionreason.ReasonHooksMayNotHaveRun,
-		message: fmt.Sprintf("an interrupted helm operation was recovered without a deployed revision to return to, so its hooks may not have run "+
+		message: fmt.Sprintf("an interrupted or failed helm operation was recovered without a deployed revision to return to, so its hooks may not have run "+
 			"(%s=%s): verify what they do, then remove the annotation; the next successful upgrade also clears it. Children: %s: %s",
 			compositionMeta.AnnotationKeyHooksUnverified, since, out.reason, out.message),
 	}
@@ -52,7 +52,8 @@ func withHooksUnverified(out readyOutcome, mg *unstructured.Unstructured) readyO
 //   - Changed=true: an initial install (:116), an upgrade to a changed desired state (:372), or the
 //     upgrade after a drift heal (:600). Each ran helm with its hooks.
 //   - RetriedFailedRelease: the upgrade retried over a failed latest revision (:600), Changed false
-//     when nothing else differed. It ran the hooks too.
+//     when nothing else differed. It ran the UPGRADE hooks. Over a first install that failed, those are
+//     not the hooks that did not run (#636): clearHooksUnverifiedAfter does not clear for that upgrade.
 //   - DesiredStateHeld (:343) and the steady state (:573): nothing written, no hook ran.
 //
 // DesiredStateChange alone would miss the drift-heal and retry upgrades.
@@ -101,67 +102,105 @@ func patchAnnotation(ctx context.Context, mg *unstructured.Unstructured, key str
 // ran a real install or upgrade, hooks included, and it succeeded (#563). It returns the object to
 // carry on with.
 //
+// Not when this pass skipped INSTALL hooks (#636): the upgrade over a first install that failed or was
+// interrupted, or the one that follows, in the same pass, such an install's rollback to itself, because
+// the values or the chart had moved on. Both ran upgrade hooks, and the mark, set just before them, is
+// about the install hooks.
+//
 // A failed clear does not fail the pass: the upgrade succeeded, and the mark that stays is the
 // conservative direction (Ready keeps saying the hooks are unverified, a human can remove it). It is
 // said, as a Warning Event and a log line, because nothing will retry it: the next Reconcile is a
 // no-op and runs no hook.
 func (h *handler) clearHooksUnverifiedAfter(ctx context.Context, mg *unstructured.Unstructured, res *helmconfig.ReconcileResult, err error,
-	opts tools.UpdateOptions, log logging.Logger, phase event.Action) *unstructured.Unstructured {
+	installHooksSkipped bool, opts tools.UpdateOptions, log logging.Logger, phase event.Action) *unstructured.Unstructured {
+	if installHooksSkipped || !upgradeRanHooks(res, err) {
+		return mg
+	}
+	return h.clearHooksUnverified(ctx, mg, opts, log, phase, "a helm upgrade ran the release's hooks")
+}
+
+// clearHooksUnverified removes krateo.io/hooks-unverified, if it is set, because ran (what just ran the
+// hooks). See clearHooksUnverifiedAfter for why a failed removal does not fail the pass.
+func (h *handler) clearHooksUnverified(ctx context.Context, mg *unstructured.Unstructured,
+	opts tools.UpdateOptions, log logging.Logger, phase event.Action, ran string) *unstructured.Unstructured {
 	since, marked := hooksUnverifiedSince(mg)
-	if !marked || !upgradeRanHooks(res, err) {
+	if !marked {
 		return mg
 	}
 	cleared, perr := patchHooksUnverified(ctx, mg, nil, opts)
 	if perr != nil {
-		log.Info("A helm upgrade ran the hooks, but krateo.io/hooks-unverified could not be removed; it stays until removed by hand",
-			"since", since, "error", perr.Error())
+		log.Info("The release's hooks ran, but krateo.io/hooks-unverified could not be removed; it stays until removed by hand",
+			"ran", ran, "since", since, "error", perr.Error())
 		h.eventRecorder.Event(mg, event.Warning(reasonHooksUnverifiedNotClear, phase, fmt.Errorf(
-			"a helm upgrade ran the release's hooks, but %s (set %s) could not be removed, so Ready keeps saying they may not have run: %w",
-			compositionMeta.AnnotationKeyHooksUnverified, since, perr)))
+			"%s, but %s (set %s) could not be removed, so Ready keeps saying they may not have run: %w",
+			ran, compositionMeta.AnnotationKeyHooksUnverified, since, perr)))
 		return mg
 	}
 	h.eventRecorder.Event(cleared, event.Normal(reasonHooksUnverifiedCleared, phase, fmt.Sprintf(
-		"a helm upgrade ran the release's hooks, so %s (set %s) was removed", compositionMeta.AnnotationKeyHooksUnverified, since)))
+		"%s, so %s (set %s) was removed", ran, compositionMeta.AnnotationKeyHooksUnverified, since)))
 	return cleared
 }
 
-// recoverStuckOperation rolls back a release stuck in an incomplete helm operation past its grace
-// (Observe), and returns the object and the release to carry on with (#563). The target comes from
-// recoveryTarget over the stored history: the last deployed revision, else the pending revision
-// itself with krateo.io/hooks-unverified written FIRST. Every read or write it cannot complete
-// returns an error before the rollback, never a guessed target.
+// markHooksUnverified sets krateo.io/hooks-unverified, with a Warning Event saying why, unless it is set
+// already. The callers write it BEFORE what it describes, and stop on its failure.
+func (h *handler) markHooksUnverified(ctx context.Context, mg *unstructured.Unstructured, opts tools.UpdateOptions, phase event.Action, why error) (*unstructured.Unstructured, error) {
+	if _, marked := hooksUnverifiedSince(mg); marked {
+		return mg, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	out, err := patchHooksUnverified(ctx, mg, &now, opts)
+	if err != nil {
+		return mg, err
+	}
+	h.eventRecorder.Event(out, event.Warning(reasonHooksUnverified, phase, why))
+	return out, nil
+}
+
+// stuckRecovery is what recoverStuckOperation left.
+type stuckRecovery struct {
+	// rel is the release to carry on with.
+	rel *helmconfig.Release
+	// interrupted: rel is an interrupted install this pass settled as failed, to be retried as an install
+	// (or, where that is not allowed, upgraded by the failed-install plan).
+	interrupted bool
+	// hookJobsDeleted: how many hook Jobs of the attempts settling deleted.
+	hookJobsDeleted int
+	// installHooksSkipped: a proven interrupted first install was rolled back to itself, so its install
+	// hooks did not run and no upgrade of this pass runs them (#636).
+	installHooksSkipped bool
+}
+
+// recoverStuckOperation recovers a release stuck in an incomplete helm operation past its grace
+// (Observe), and returns the object and what to carry on with (#563). A rollback's target comes from
+// recoveryTarget over the stored history: the last deployed revision, else the pending revision itself
+// with krateo.io/hooks-unverified written FIRST. Every read or write it cannot complete returns an error
+// before the rollback, never a guessed target.
 //
-// #629: a release that was never deployed is not rolled back to itself when gate allows; it is
-// uninstalled without hooks so the runtime's Create installs it again (reinstallInterruptedFreshInstall).
-// uninstalled then reports that the release is gone and Observe must report it absent.
+// #629, #636: an interrupted install that is proven never deployed and this controller's is settled as
+// failed instead, to be retried as an install (settleInterruptedInstall).
 func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Unstructured, hc helmconfig.Client, rel *helmconfig.Release,
-	releaseName string, gate reinstallGate, updateOpts tools.UpdateOptions, log logging.Logger) (_ *unstructured.Unstructured, _ *helmconfig.Release, uninstalled bool, _ error) {
+	releaseName string, gate interruptedGate, updateOpts tools.UpdateOptions, log logging.Logger) (*unstructured.Unstructured, stuckRecovery, error) {
 	history, err := hc.History(ctx, releaseName, &helmconfig.HistoryConfig{})
 	if err != nil {
-		return mg, nil, false, fmt.Errorf("not rolling back release %s: reading its history to choose the target: %w", releaseName, err)
+		return mg, stuckRecovery{}, fmt.Errorf("not rolling back release %s: reading its history to choose the target: %w", releaseName, err)
 	}
 	plan, err := recoveryTarget(rel, history)
 	if err != nil {
-		return mg, nil, false, fmt.Errorf("not rolling back release %s: %w", releaseName, err)
+		return mg, stuckRecovery{}, fmt.Errorf("not rolling back release %s: %w", releaseName, err)
 	}
+	verdict, why := interruptedNotProven, "a deployed revision precedes it"
 	if plan.hooksUnverified {
-		verdict, attempts, why := freshReinstallVerdict(mg, gate, rel, history)
-		switch verdict {
-		case reinstallAllowed:
-			if mg, err = h.reinstallInterruptedFreshInstall(ctx, mg, hc, rel, releaseName, attempts, gate, updateOpts, log); err != nil {
-				return mg, nil, false, err
-			}
-			return mg, nil, true, nil
-		case reinstallCapped:
-			h.eventRecorder.Event(mg, event.Warning(reasonInterruptedInstallReinstallCapped, "Observe", fmt.Errorf(
-				"not reinstalling the interrupted install of revision %d again: %s; its hooks are marked unverified for a human", rel.Revision, why)))
-			log.Info("Not reinstalling an interrupted fresh install again; falling back to the manual gate", "why", why)
-		default:
-			log.Debug("Interrupted install not reinstalled automatically", "why", why)
-		}
+		verdict, why = interruptedInstallVerdict(mg, releaseName, gate, rel, history)
+	}
+	if capped, capWhy := interruptedCapped(mg); capped && verdict == interruptedManual && why == capWhy {
+		h.eventRecorder.Event(mg, event.Warning(reasonInterruptedInstallRetryCapped, "Observe", fmt.Errorf(
+			"not retrying the interrupted install of revision %d again: %s; its hooks are marked unverified for a human", rel.Revision, capWhy)))
+	}
+	if verdict == interruptedRetry || (verdict == interruptedManual && rel.Revision > 1) {
+		return h.settleInterruptedInstall(ctx, mg, hc, rel, history, releaseName, verdict, why, gate, updateOpts, log)
 	}
 	log.Info("Recovering a stuck helm operation", "status", string(rel.Status), "revision", rel.Revision,
-		"target", plan.revision, "hooksUnverified", plan.hooksUnverified, "why", plan.why)
+		"target", plan.revision, "hooksUnverified", plan.hooksUnverified, "why", plan.why, "notRetried", why)
 	if plan.hooksUnverified {
 		// The mark is written BEFORE the rollback it describes: a rollback that succeeded with
 		// the mark lost would leave a deployed release that no later pass can tell was ever
@@ -170,14 +209,14 @@ func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Un
 		if _, marked := hooksUnverifiedSince(mg); !marked {
 			now := time.Now().UTC().Format(time.RFC3339)
 			if mg, err = patchHooksUnverified(ctx, mg, &now, updateOpts); err != nil {
-				return mg, nil, false, fmt.Errorf("not rolling back release %s: marking its hooks unverified first: %w", releaseName, err)
+				return mg, stuckRecovery{}, fmt.Errorf("not rolling back release %s: marking its hooks unverified first: %w", releaseName, err)
 			}
 		}
 		h.eventRecorder.Event(mg, event.Warning(reasonHooksUnverified, "Observe", errors.New(plan.why)))
 	}
 	priorRecord := priorHelmOperationRecord(mg)
 	if mg, err = recordHelmOperation(ctx, mg, "rollback", time.Now(), updateOpts, log); err != nil {
-		return mg, nil, false, err
+		return mg, stuckRecovery{}, err
 	}
 	rel, err = helmPhase(log, "rollback", releaseName, func() (*helmconfig.Release, error) {
 		op, err := hc.Rollback(ctx, releaseName, rollbackConfig(plan.revision))
@@ -187,7 +226,7 @@ func (h *handler) recoverStuckOperation(ctx context.Context, mg *unstructured.Un
 	markWrote(ctx, writeRollback) // the rollback ran, which writes, whether or not it then failed
 	mg = settleHelmOperationRecord(ctx, mg, priorRecord, err, updateOpts, log)
 	if err != nil {
-		return mg, nil, false, fmt.Errorf("rolling back release: %w", err)
+		return mg, stuckRecovery{}, fmt.Errorf("rolling back release: %w", err)
 	}
-	return mg, rel, false, nil
+	return mg, stuckRecovery{rel: rel, installHooksSkipped: verdict == interruptedManual}, nil
 }

@@ -71,6 +71,11 @@ var reservedStatusFields = map[string]struct{}{
 	// tell an operation still running from one whose starter died. Reserved because the controller
 	// writes and clears it around every helm write.
 	"helmOperation": {},
+	// #636: the durable record that the controller recovered a first install by itself. Reserved because
+	// the controller owns it and nothing resets it.
+	"installRecovery": {},
+	// #636: the consecutive failed attempts of a first install, which Ready's InstallFailing is read from.
+	"installFailures": {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision

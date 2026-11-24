@@ -1132,6 +1132,14 @@ func krateoEval(obj *unstructured.Unstructured) childEval {
 			// to itself (#563): its hooks may not have run, and only a human, or a later upgrade,
 			// clears it. Without this arm it fell to the converging default, "still working on it".
 			return is(childFailed)
+		case stringField(cm, "status") == "False" && stringField(cm, "reason") == "InstallFailing":
+			// A child composition of this controller whose first install has failed three times or more
+			// (#636). Retried at the error backoff and never capped, so not permanent; FAILED anyway (Diego,
+			// 2026-11-23): read as converging, a hook that never passes held the parent at Creating for ever.
+			//
+			// NAMED by its reason only: the child's message counts attempts and quotes helm's error, so
+			// copying it would rewrite this parent's Ready on every attempt.
+			return childEval{state: childFailed, detail: "InstallFailing"}
 		case stringField(cm, "reason") == "CreateFailed",
 			stringField(cm, "reason") == "UpdateFailed":
 			// rest-dynamic-controller's reasons for a create or update that FAILED, as opposed to

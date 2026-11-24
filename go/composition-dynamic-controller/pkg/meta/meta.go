@@ -56,26 +56,34 @@ const (
 	// hooks. For a child the hooks still need, such as an ExternalSecret whose target Secret a
 	// pre-delete Job reads. Any other value is ignored.
 	AnnotationKeyTeardown = "krateo.io/teardown"
-	// AnnotationKeyHooksUnverified on a composition says the hooks of an interrupted helm operation
-	// may not have run (core-provider#563): a release stuck pending with no deployed revision before
-	// it (a first install, rev 1) was rolled back to itself, which clears the lock and keeps what the
-	// operation created, but runs only rollback hooks. The value is when it was set (RFC 3339).
+	// AnnotationKeyHooksUnverified on a composition says the hooks of an interrupted or failed helm
+	// operation may not have run (core-provider#563): a release stuck pending with no deployed revision
+	// before it (a first install, rev 1) was rolled back to itself, which clears the lock and keeps what
+	// the operation created, but runs only rollback hooks; or (#636) a first install that failed was
+	// upgraded instead of installed again, because AnnotationKeyInterruptedInstallRecovery is set or the
+	// management policy withholds create. The value is when it was set (RFC 3339).
 	// While present, Ready reads False/HooksMayNotHaveRun. Cleared by a human who has verified the
-	// hooks' effects, or by the next successful helm upgrade, which runs them.
+	// hooks' effects, or by the next successful helm upgrade, which runs its hooks; not by the upgrade
+	// it was set for.
 	AnnotationKeyHooksUnverified = "krateo.io/hooks-unverified"
-	// AnnotationKeyInterruptedInstallRecovery is the kill switch for core-provider#629's automatic
-	// reinstall of an interrupted FRESH install. Set on the CompositionDefinition (it applies to all its
-	// compositions) or on one composition, with the value InterruptedInstallRecoveryManual, it keeps the
-	// #563 human gate (Ready=False/HooksMayNotHaveRun) for a chart whose install hooks are not safe to run
-	// twice. ANY value keeps the gate: an unrecognised value is read as manual, never as permission.
+	// AnnotationKeyInterruptedInstallRecovery is the kill switch for the automatic retry of an interrupted
+	// (core-provider#629) or failed (#636) FIRST install. Set on the CompositionDefinition (it applies to all
+	// its compositions) or on one composition, with the value InterruptedInstallRecoveryManual, it keeps the
+	// human gate (Ready=False/HooksMayNotHaveRun) for a chart whose install hooks are not safe to run twice.
+	// ANY value keeps the gate: an unrecognised value is read as manual, never as permission.
 	AnnotationKeyInterruptedInstallRecovery = "krateo.io/interrupted-install-recovery"
 	// InterruptedInstallRecoveryManual is AnnotationKeyInterruptedInstallRecovery's documented value.
 	InterruptedInstallRecoveryManual = "manual"
-	// AnnotationKeyInterruptedInstallReinstalls counts the automatic reinstalls of an interrupted fresh
-	// install (core-provider#629), so a release interrupted again and again falls back to the human gate
-	// after a few attempts instead of looping. Written before each attempt; removed once the release
-	// reaches a deployed revision.
+	// AnnotationKeyInterruptedInstallReinstalls counts the automatic retries of an INTERRUPTED first install
+	// (core-provider#629; the name is from when they were reinstalls), so a release interrupted again and
+	// again falls back to the human gate after a few attempts instead of looping. Written before each
+	// attempt; removed once the release reaches a deployed revision.
 	AnnotationKeyInterruptedInstallReinstalls = "krateo.io/interrupted-install-reinstalls"
+	// AnnotationKeyReleaseNeverDeployed on a composition vouches for the revisions of its helm release
+	// up to the one it names: none was ever deployed (core-provider#636). Written by this controller while
+	// the release history proved it, before a retry that can prune that history; removed once a revision
+	// is deployed. The value is JSON (composition UID, release, revision); anything else vouches for nothing.
+	AnnotationKeyReleaseNeverDeployed = "krateo.io/release-never-deployed"
 	// TeardownWithRelease is AnnotationKeyTeardown's one recognised value.
 	TeardownWithRelease = "with-release"
 

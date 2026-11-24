@@ -151,7 +151,9 @@ func TestEnvtest_RecoveryRollsBackToTheLastDeployedSoTheHooksRun(t *testing.T) {
 			if fixed {
 				dyn := srFakeDyn(srPortal("1", "x"))
 				h := &handler{eventRecorder: *event.NewAPIRecorder(events.NewFakeRecorder(10))}
-				_, rolled, _, err = h.recoverStuckOperation(ctx, srPortal("1", "x"), hc, pending, "r", reinstallGate{}, srOpts(dyn), logging.NewNopLogger())
+				var recovered stuckRecovery
+				_, recovered, err = h.recoverStuckOperation(ctx, srPortal("1", "x"), hc, pending, "r", interruptedGate{}, srOpts(dyn), logging.NewNopLogger())
+				rolled = recovered.rel
 			} else {
 				var op *helmconfig.OperationResult
 				op, err = hc.Rollback(ctx, "r", rollbackConfig(pending.Revision))

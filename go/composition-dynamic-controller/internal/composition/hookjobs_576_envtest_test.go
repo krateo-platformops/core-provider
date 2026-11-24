@@ -139,7 +139,7 @@ func TestEnvtest_HookJobsAreRecordedLeftByHelmAndDeletedByIdentity(t *testing.T)
 	}
 
 	// (3) the recorded identity deletes it.
-	remaining, err := deleteHookJobs(ctx, dyn, refs)
+	_, remaining, err := deleteHookJobs(ctx, dyn, refs)
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("deleteHookJobs: remaining %v err %v", remaining, err)
 	}

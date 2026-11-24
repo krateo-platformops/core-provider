@@ -33,7 +33,11 @@ import (
 // WITHOUT the mark: the runtime then records what it can (and a conflict requeues quietly, as
 // before).
 func failObserveWithFinding(ctx context.Context, mg *unstructured.Unstructured, cause error, opts tools.UpdateOptions) error {
-	cond := conditionreason.Unavailable.WithMessage(cause.Error())
+	return failObserveWithCondition(ctx, mg, conditionreason.Unavailable.WithMessage(cause.Error()), cause, opts)
+}
+
+// failObserveWithCondition is failObserveWithFinding with the Ready to record.
+func failObserveWithCondition(ctx context.Context, mg *unstructured.Unstructured, cond metav1.Condition, cause error, opts tools.UpdateOptions) error {
 	if err := unstructuredtools.SetConditions(mg, cond); err != nil {
 		return fmt.Errorf("recording the failure on Ready: %w (cause: %v)", err, cause)
 	}

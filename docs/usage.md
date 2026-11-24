@@ -158,19 +158,53 @@ value that does not parse acts as `observe` only. Measured on envtest (`TestEnvt
 - `krateo.io/deletion-policy: orphan` keeps the release on delete, whatever the management policy
   allows; so does a deletion-policy value that is neither `delete` nor `orphan`.
 
-## An install interrupted before it ever deployed
+## A first install that was interrupted or failed
 
-If a composition controller loses its lease or its pod during a **first install** (for example during an unrequested GKE control-plane resize), the release is left `pending-install` and the post-install hooks that had not run yet never would. Since #629 the controller recovers this itself: when the release history holds **no revision that was ever deployed** (every other revision failed), it
+A **first install** can end without ever deploying:
 
-1. uninstalls the half-finished release **without hooks**, so no pre-delete hook (a database drop, for example) runs;
-2. deletes the hook Jobs that release recorded, so the new install's hook Jobs cannot collide with the old ones whatever the chart's `helm.sh/hook-delete-policy`;
-3. installs it again, running every install hook, and emits a Normal `InterruptedInstallReinstalled` Event.
+- *interrupted*: the composition controller loses its lease or its pod (for example during an unrequested GKE control-plane resize), and the release is left `pending-install`;
+- *failed*: a hook exits non-zero, or a graceful stop of the controller (a core-provider roll, a node drain) cancels helm.
 
-A release that was deployed at any point is never uninstalled by this path. It keeps #563's recovery: a rollback to its last deployed revision, or `Ready=False/HooksMayNotHaveRun` with `krateo.io/hooks-unverified` when there is none to return to.
+The chart's post-install hooks that had not run yet then never would: retried as an upgrade, only **upgrade** hooks run, and before #636 a composition read `Ready=True/Available` that way. The controller instead installs the release **again, as an install**, with the composition's current values and chart version:
 
-The automatic reinstall is attempted at most **3** times per composition (`krateo.io/interrupted-install-reinstalls` counts them and is removed once the release deploys). After that it falls back to `HooksMayNotHaveRun` with a Warning `InterruptedInstallReinstallCapped` Event, because the cause is not transient.
+1. an interrupted install is first recorded as failed, once nobody is running it: the pod or process that started it is gone, or it has been pending past the grace (`COMPOSITION_CONTROLLER_PENDING_GRACE`, 16m);
+2. the hook Jobs the attempts recorded are deleted, and the controller waits until they and their pods are gone (at most 60s per pass; otherwise the pass fails and the next one waits again);
+3. the release is installed over the failed revision, running every install hook. **Nothing is uninstalled**: objects and volumes the earlier attempt created are kept. An object or a field the new values no longer render is removed, as an upgrade would (`helm.sh/resource-policy: keep` is honoured, and an object that is not this release's is left alone). One limit: a retry that is itself killed while it applies the objects may leave behind a **field** it added to an object that was already there, if a later retry's values no longer render that field.
 
-**To keep the manual gate instead**, for a chart whose install hooks are not safe to run twice, set `krateo.io/interrupted-install-recovery: manual` on the CompositionDefinition (it applies to all its compositions) or on one composition. Any value of that annotation keeps the gate: an unrecognised value is never read as permission. The management policy must also allow both `create` and `delete` for the reinstall to run.
+A Normal `InterruptedInstallRetried` or `FailedInstallRetried` Event says so at each retry, and `status.installRecovery` keeps it: `kind` (`Retried`), `lastAt`, `count` (cumulative, never reset; one per revision retried, however many passes it takes to start), `reason` (`Interrupted` or `Failed`), `message` (the same for a person) and `revision` (removed once deployed). A non-zero count says the chart's install hooks may have run more than once. A composition whose CRD predates the field does not keep it; the recovery runs anyway and the controller's log says so once.
+
+While an install keeps failing it is retried at the controller's error backoff, with no cap. `Ready` is never `True`. After the first two consecutive failures it reads `False/Creating`, with helm's error, and `False/HelmOperationInProgress` while an attempt runs. From the **third** it reads `False/InstallFailing`, which a parent counts as failed, and it stays there through the retries (the message then also says one is running) until one succeeds: `the first install has failed N times (M automatic retries so far); last error: ...`. N is `status.installFailures.count` (consecutive failed attempts; removed once a revision is deployed, with `lastAt` and `lastError`, which can be read there while a retry runs), M is `status.installRecovery.count`. They differ: an interrupted attempt is retried but is not a failed one. **Interruptions** are capped at **3** per composition (`krateo.io/interrupted-install-reinstalls` counts them and is removed once the release deploys): after that the cause is not transient, and it falls back to the manual path below with a Warning `InterruptedInstallRetryCapped` Event. The release keeps the controller's usual history (`HELM_MAX_HISTORY`, 3 by default, at least 2 here).
+
+### When it applies
+
+Only to a release that is **proven** never to have been deployed, and that **this controller installed**:
+
+- *Never deployed*: the release history accounts for every revision from the first, and all failed (the latest may be the interrupted one). The mere absence of a deployed revision is not proof: helm prunes old revisions, so a release that was live once can be left with only failed ones. A retry that keeps failing pushes the first revision out of the history, so the controller keeps the proof on the composition as `krateo.io/release-never-deployed`, removed once a revision is deployed. Do not write it by hand.
+- *Installed by this controller*: `status.helmOperation` records that revision's install, or (for a failed one) the mark above, which is only written once that is known. A release installed by hand, which a composition's `krateo.io/release-name` label can point at, is never retried.
+
+Anything else keeps the behaviour from before: an upgrade for a failed release; for an interrupted one, a rollback to its last deployed revision, or to itself with `krateo.io/hooks-unverified` (`Ready=False/HooksMayNotHaveRun`) when there is none.
+
+Not retried either:
+
+- a **deleting** composition: its release is uninstalled by the delete;
+- by a controller that is **retiring** (the definition moved to another chart version): the current version's controller does it;
+- when the management policy withholds **update**: nothing is written to the release, and `Ready` reads `False/HooksMayNotHaveRun` (failed) or `False/RecoveryWithheldByPolicy` (interrupted);
+- on the **manual path**: the annotation below, the cap, or a policy that withholds **create**.
+
+### Keeping it manual
+
+For a chart whose install hooks are not safe to run twice, set `krateo.io/interrupted-install-recovery: manual` on the CompositionDefinition (it applies to all its compositions) or on one composition. Any value of that annotation counts: an unrecognised value is never read as permission, and a definition whose annotations cannot be read counts as having it set.
+
+The release is then not installed again. `krateo.io/hooks-unverified` is written first, so `Ready` reads `False/HooksMayNotHaveRun`, and:
+
+- an interrupted install at revision 1 is rolled back to itself, which keeps what it created;
+- a failed install, or an interrupted *retry* (revision 2 and above), is **upgraded** to the composition's values. That upgrade runs the chart's upgrade hooks only, and does not clear the mark. It may also delete an object whose name the first attempt rendered and the values no longer do, **even if something else owns that object now**: helm's upgrade does not check ownership.
+
+Verify what the install hooks do, then remove `krateo.io/hooks-unverified`; a later upgrade also clears it.
+
+### Downgrading
+
+Before downgrading to core-provider 2.13.128, let every first install finish: no release may have a latest revision that is `pending-install`. That version recovers an interrupted install by **uninstalling** it, and it proves less about a release's history before doing so. Earlier versions do not uninstall.
 
 ## What a definition's chart creates: `status.contents`
 

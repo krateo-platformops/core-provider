@@ -1,12 +1,12 @@
 name: exercise-interrupted-install
 
-# core-provider#629 uninstalls a release on its own decision. Unit and envtest cover the decision, but
-# neither kills a controller mid-hook nor runs under the RBAC core-provider generates. This installs
-# the RELEASED charts on a disposable kind cluster and kills the real controller. Decided by Diego
-# (2026-11-23): exercise it before a cluster runs it.
+# The automatic recovery of a first install (#629, #636) acts on a release by its own decision. Unit and
+# envtest cover the decision, but neither kills a controller mid-hook nor runs under the RBAC
+# core-provider generates. This installs core-provider on a disposable kind cluster and kills the real
+# controller. Decided by Diego (2026-11-23): exercise it before a cluster runs it.
 #
-# Not a per-PR gate on the cdc: it tests published artifacts, which a PR does not change. Run it by hand
-# for a release (workflow_dispatch), and it runs itself when the exercise changes.
+# On a pull request it runs the PR's own core-provider and composition controller, on the published
+# charts. By hand (workflow_dispatch) it runs a released version; one before #636 fails, as it should.
 on:
   workflow_dispatch:
     inputs:
@@ -16,6 +16,8 @@ on:
   pull_request:
     paths:
       - "go/composition-dynamic-controller/hack/interrupted-install-e2e/**"
+      - "go/composition-dynamic-controller/internal/composition/**"
+      - "go/composition-dynamic-controller/go.mod"
       - ".github/workflows/exercise-interrupted-install.yaml"
 
 permissions:
@@ -23,7 +25,7 @@ permissions:
 
 jobs:
   exercise:
-    name: exercise (kind, released charts)
+    name: exercise (kind)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -35,12 +37,23 @@ jobs:
           version: v0.33.0
           node_image: kindest/node:v1.36.4
           cluster_name: exercise
+      - name: Build and load this commit's images
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          tag="ci-${GITHUB_SHA::12}"
+          for m in core-provider composition-dynamic-controller; do
+            docker build -q -t "ghcr.io/krateo-platformops/$m:$tag" "go/$m"
+            kind load docker-image "ghcr.io/krateo-platformops/$m:$tag" --name exercise
+          done
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Exercise
         env:
+          # The charts' version; on a pull request only chart-inspector runs that version's image.
           VERSION: ${{ inputs.version || '2.13.128' }}
         run: |
           set -euo pipefail
           helm version --short
           python3 -I go/composition-dynamic-controller/hack/interrupted-install-e2e/run.py \
-            --version "$VERSION" --node exercise-control-plane \
+            --version "$VERSION" --node exercise-control-plane ${IMAGE_TAG:+--image-tag "$IMAGE_TAG"} \
             --chart go/composition-dynamic-controller/hack/interrupted-install-e2e/chart

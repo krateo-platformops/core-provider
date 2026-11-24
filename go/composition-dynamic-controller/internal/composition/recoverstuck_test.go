@@ -98,8 +98,10 @@ func TestRecoverStuckOperation(t *testing.T) {
 			rec := events.NewFakeRecorder(10)
 			h := &handler{eventRecorder: *event.NewAPIRecorder(rec)}
 
-			// A zero gate: these are #563's own arms, with #629's reinstall not allowed (freshreinstall_test.go covers it).
-			mg, got, _, err := h.recoverStuckOperation(context.Background(), srPortal("1", "x"), hc, tc.pending, "r", reinstallGate{}, srOpts(dyn), logging.NewNopLogger())
+			// These are #563's own arms: nothing here proves the install is this controller's, so #629's retry
+			// does not apply (interruptedinstall_test.go covers it).
+			mg, recovered, err := h.recoverStuckOperation(context.Background(), srPortal("1", "x"), hc, tc.pending, "r", interruptedGate{}, srOpts(dyn), logging.NewNopLogger())
+			got := recovered.rel
 
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("err = %v", err)

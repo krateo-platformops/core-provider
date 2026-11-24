@@ -109,7 +109,7 @@ func TestDeleteHookJobs(t *testing.T) {
 		return false, nil, nil
 	})
 
-	remaining, err := deleteHookJobs(context.Background(), dyn, []hookJobRef{
+	_, remaining, err := deleteHookJobs(context.Background(), dyn, []hookJobRef{
 		{"openstack", "nova-db-sync"}, {"openstack", "already-gone"}, {"openstack", "locked"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "locked") {

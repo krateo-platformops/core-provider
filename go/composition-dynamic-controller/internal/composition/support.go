@@ -171,6 +171,10 @@ type statusManagerOpts struct {
 	// signature at every caller to return a verdict only one of them wants.
 	absentChildren *[]string
 
+	// installHooksNotRun, when set, says the first install failed and nothing is written to the release
+	// (#636, planReport): Ready reads HooksMayNotHaveRun instead of the rollup's verdict.
+	installHooksNotRun string
+
 	// updateWithheld, when set, is what a withheld update would have applied (#597): it replaces an
 	// Available verdict with UpdateWithheldByPolicy, and is appended to any other verdict's message.
 	updateWithheld string
@@ -492,7 +496,7 @@ func (h *handler) deriveReadyFromHealth(ctx context.Context, mg *unstructured.Un
 	// readyMessageAvailable, not opts.message — same reason as the verdict above. This is the
 	// defaultMsg resolveReady falls back to for the Available arm, so a per-phase string here would
 	// reach the condition even with the verdict fixed.
-	return stampReady(mg, withUpdateWithheld(withHooksUnverified(resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), mg), opts.updateWithheld), opts.force)
+	return stampReady(mg, withUpdateWithheld(withInstallHooksNotRun(withHooksUnverified(resolveReady(readProjectedHealth(mg), readyMessageAvailable, v), mg), opts.installHooksNotRun), opts.updateWithheld), opts.force)
 }
 
 // stampReady writes the Ready condition a readyOutcome calls for.
