@@ -18,7 +18,7 @@ func renderCDCDeployment(t *testing.T, extra ...any) appsv1.Deployment {
 	dep := appsv1.Deployment{}
 	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v0-1-0", Resource: "benchapps"}
 	nn := types.NamespacedName{Namespace: "bench-ns-01", Name: "benchapps-v0-1-0-controller"}
-	values := append([]any{"serviceAccountName", "sa", "api_ref_name", ""}, extra...)
+	values := append(deploymentIdentityValues("sa", ""), extra...) // a later pair wins
 	if err := objects.CreateK8sObject(&dep, gvr, nn, "testdata/deploy.yaml", values...); err != nil {
 		t.Fatalf("render CDC deployment: %v", err)
 	}

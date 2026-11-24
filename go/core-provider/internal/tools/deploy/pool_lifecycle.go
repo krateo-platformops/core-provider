@@ -143,15 +143,7 @@ func EnsurePool(ctx context.Context, opts PoolOptions) error {
 
 	cm := corev1.ConfigMap{}
 	if err := objects.CreateK8sObject(&cm, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.EnvConfigMap},
-		opts.ConfigmapTemplatePath,
-		"pool", opts.Pool,
-		"poolConfigMap", names.EnvConfigMap,
-		"poolDeployment", names.Workload,
-		"poolIndex", names.Index,
-		"poolWorkers", opts.Sizing.Workers,
-		"composition_controller_sa_name", saNN.Name,
-		"composition_controller_sa_namespace", saNN.Namespace,
-		"authn_url", opts.AuthnURL); err != nil {
+		opts.ConfigmapTemplatePath, poolConfigMapValues(opts)...); err != nil {
 		return fmt.Errorf("pool %s: rendering its process ConfigMap: %w", opts.Pool, err)
 	}
 	if _, err := kubecli.Apply(ctx, opts.DynClient, configMapGVR, &cm, applyOpts); err != nil {
@@ -252,13 +244,7 @@ func renderPoolDeployment(opts PoolOptions, processEnv map[string]string) (appsv
 	}
 	dep := appsv1.Deployment{}
 	if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.Workload},
-		opts.DeploymentTemplatePath,
-		"pool", opts.Pool,
-		"poolDeployment", names.Workload,
-		"poolConfigMap", names.EnvConfigMap,
-		"poolServiceAccount", PoolServiceAccount(opts.Pool, opts.Namespace).Name,
-		"poolResources", string(resources),
-		"config_checksum", configChecksum(processEnv)); err != nil {
+		opts.DeploymentTemplatePath, poolDeploymentValues(opts, string(resources), processEnv)...); err != nil {
 		return appsv1.Deployment{}, fmt.Errorf("pool %s: rendering its Deployment: %w", opts.Pool, err)
 	}
 	return dep, nil

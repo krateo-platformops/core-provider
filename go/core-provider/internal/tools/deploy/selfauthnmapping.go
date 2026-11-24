@@ -69,10 +69,9 @@ func (m SelfAuthnMapping) render() (*unstructured.Unstructured, error) {
 	err := objects.CreateK8sObject(obj, schema.GroupVersionResource{},
 		types.NamespacedName{Namespace: authnNS, Name: m.SAName},
 		filepath.Join(m.RBACFolderPath, authnServiceAccountTemplate),
-		"saName", m.SAName,
-		"saNamespace", saNamespace,
-		"group", group,
-		"displayName", "core-provider (RESTAction RBAC inspector)",
+		// No principal and no delegation: core-provider's own identity carries neither.
+		authnMapping{saName: m.SAName, saNamespace: saNamespace, group: group,
+			displayName: "core-provider (RESTAction RBAC inspector)"}.values()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rendering core-provider's own authn mapping: %w", err)

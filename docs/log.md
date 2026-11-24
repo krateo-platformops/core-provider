@@ -107,3 +107,5 @@ the upstream roadmap and set the direction for everything below.
   controllers came up with a lease named `<no value>` and no grant for it, and held the room the only
   process able to repair them needed. The ConfigMaps are now immutable and named by their data's digest.
   This protects upgrades **from** any earlier version too, since nothing in the old binary takes part.
+- **A missing template key refuses the render** (#651, `missingkey=error`), on rows that already exist. A
+  scan for `<no value>` would have missed half of it: a missing key piped through `quote` renders nothing.

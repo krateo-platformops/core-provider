@@ -42,9 +42,18 @@ the pod by the chart from
 the image. The ConfigMaps behind them are immutable and named by their content, so the
 files under a running pod never change (#651; [configuration](../configuration.md)): **never
 mark those volumes `optional`**, or the kubelet blanks the files when helm deletes the
-previous name. If a path is missing, `objects.CreateK8sObject` fails during Deploy. The **Service** in particular is only rendered when its template
-file exists on disk (`os.Stat(opts.ServiceTemplatePath)` gates it). No service
-template → no CDC Service, silently. (The copies under
+previous name. If a path is missing, `objects.CreateK8sObject` fails during Deploy.
+
+A template is rendered with `missingkey=error`: a key it uses and the engine does not pass
+refuses the render, whichever branch the template takes, so a chart and an image that do not
+belong together fail on `Synced` (`ReconcileError`, naming the file and the key; `Ready` is
+`NotObserved`) instead of applying `<no value>`. Every key is passed, `""` when it does not
+apply (`internal/tools/deploy/templatevalues.go`); a new key in an asset needs a line there,
+and `TestEveryTemplateKeyIsDeclared` says so.
+
+The **Service** in particular is only rendered when its template file exists on disk
+(`serviceTemplateMounted`, i.e. `cdc.metrics.enabled`). No service template → no CDC Service,
+silently; a template that exists and cannot be read is an error. (The copies under
 `internal/controllers/compositiondefinitions/testdata/manifests/` are test fixtures
 — editing them changes tests, not the fleet.)
 

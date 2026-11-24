@@ -40,7 +40,7 @@ func CreateK8sObject(obj runtime.Object, gvr schema.GroupVersionResource, nn typ
 	template := templates.Template(string(templateF))
 	dat, err := template.Render(values)
 	if err != nil {
-		return err
+		return fmt.Errorf("rendering %s: %w", path, err)
 	}
 	s := json.NewYAMLSerializer(json.DefaultMetaFactory,
 		clientsetscheme.Scheme,

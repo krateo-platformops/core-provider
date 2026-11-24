@@ -10,8 +10,9 @@ import (
 
 // cdcDeploymentValues are the stage-2 values the per-version controller Deployment is rendered with.
 //
-// Per-Kind tuning (spec.controller) is passed only when set, so the template's chart-global defaults
-// (workers=1, resync=3m) apply for definitions that omit them.
+// Per-Kind tuning (spec.controller) is unset ("") unless the definition sets it, so the template's
+// chart-global defaults (workers=1, resync=3m) apply for definitions that omit them. Every key is always
+// passed (templatevalues.go).
 //
 // config_checksum (#391) is the checksum of the env ConfigMap the pod reads through envFrom, the only
 // ConfigMap it consumes. It is rendered into the pod template, so a change to that ConfigMap changes
@@ -19,17 +20,13 @@ import (
 // follow the apply, which was a second template write and rolled the cdc twice whenever the
 // deployment controller synced between the two.
 func cdcDeploymentValues(saName string, opts DeployOptions, envConfig map[string]string) ([]any, error) {
-	values := []any{
-		"serviceAccountName", saName,
-		"api_ref_name", opts.ApiRefName,
-		"config_checksum", configChecksum(envConfig),
-	}
+	var workers, resyncInterval, resources any = unset, unset, unset
 	if c := opts.Controller; c != nil {
 		if c.Workers != nil {
-			values = append(values, "workers", *c.Workers)
+			workers = *c.Workers
 		}
 		if c.ResyncInterval != nil {
-			values = append(values, "resyncInterval", *c.ResyncInterval)
+			resyncInterval = *c.ResyncInterval
 		}
 		if c.Resources != nil {
 			// Marshal to JSON (valid YAML) and inline it into the template as `resources: {...}`.
@@ -37,10 +34,17 @@ func cdcDeploymentValues(saName string, opts DeployOptions, envConfig map[string
 			if err != nil {
 				return nil, fmt.Errorf("marshaling spec.controller.resources: %w", err)
 			}
-			values = append(values, "resources", string(rj))
+			resources = string(rj)
 		}
 	}
-	return values, nil
+	return []any{
+		"serviceAccountName", saName,
+		"api_ref_name", opts.ApiRefName,
+		"config_checksum", configChecksum(envConfig),
+		"workers", workers,
+		"resyncInterval", resyncInterval,
+		"resources", resources,
+	}, nil
 }
 
 // configChecksum is a stable digest of a ConfigMap's data: keys in sorted order, each key and value

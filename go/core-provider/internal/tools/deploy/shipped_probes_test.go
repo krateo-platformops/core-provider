@@ -152,17 +152,13 @@ func renderControllerObjects(t *testing.T, overrides map[string]any) (appsv1.Dep
 	var dep appsv1.Deployment
 	if err := objects.CreateK8sObject(&dep, gvr, getCDCDeploymentNN(nn),
 		mountedTemplate(t, manifests, "cdc-deployment.yaml", "deployment.yaml"),
-		"serviceAccountName", "kubernetesclusters-v0-13-23", "api_ref_name", ""); err != nil {
+		deploymentIdentityValues("kubernetesclusters-v0-13-23", "")...); err != nil {
 		t.Fatalf("stage 2, Deployment: %v", err)
 	}
 	var cm corev1.ConfigMap
 	if err := objects.CreateK8sObject(&cm, gvr, getCDCConfigmapNN(nn),
 		mountedTemplate(t, manifests, "cdc-configmap.yaml", "configmap.yaml"),
-		"composition_controller_sa_name", "kubernetesclusters-v0-13-23",
-		"composition_controller_sa_namespace", "krateo-system",
-		"status_data_template", "",
-		"api_ref_name", "", "api_ref_namespace", "", "api_ref_extras", "",
-		"authn_url", shippedControllerAuthnURL); err != nil {
+		envConfigMapValues("kubernetesclusters-v0-13-23", "krateo-system", DeployOptions{ControllerAuthnURL: shippedControllerAuthnURL})...); err != nil {
 		t.Fatalf("stage 2, ConfigMap: %v", err)
 	}
 	return dep, cm
