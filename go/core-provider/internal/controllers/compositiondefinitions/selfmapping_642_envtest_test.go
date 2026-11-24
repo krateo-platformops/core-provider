@@ -840,13 +840,27 @@ func TestEnvtest_642_UnreadableMappingIsNotMissing(t *testing.T) {
 	c.installAuthnCRD(t, true)
 	b := newBench642(t, c, c)
 	b.settle(5)
-	for _, name := range []string{self642Name, self642Controller} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		arm, name string
+		// afterPut refuses only the reads that follow a PUT of the mapping: the dry run's own read and
+		// write succeed, and the read the condition is computed from fails.
+		afterPut bool
+	}{
+		{"core-provider's own", self642Name, false},
+		{"the controller's", self642Controller, false},
+		{"the controller's, after the dry run", self642Controller, true},
+	} {
+		t.Run(tc.arm, func(t *testing.T) {
 			b.in(t)
+			name, put := tc.name, false
 			b.wantCond("before", "True/Applied")
 			c.take("")
 			c.setFail(func(r *http.Request) *http.Response {
-				if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/"+name) {
+				if !strings.HasSuffix(r.URL.Path, "/"+name) {
+					return nil
+				}
+				put = put || r.Method == http.MethodPut
+				if r.Method != http.MethodGet || (tc.afterPut && !put) {
 					return nil
 				}
 				body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","message":"reads refused by the test","code":403}`
