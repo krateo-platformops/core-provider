@@ -909,6 +909,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// the OLD CRD version and only self-heals at the next full re-list (SyncPeriod) or a manual engine
 	// restart. Re-read the CR straight from the API server so the version decision always uses the
 	// current spec. Best-effort: on error we keep the cached copy rather than fail the reconcile.
+	// A field the live object no longer has does not survive in the copy: the typed client zeroes its
+	// target before decoding (TestEnvtest_644_LiveReadHoldsNoRemovedField).
 	if e.apiReader != nil {
 		fresh := cr.DeepCopy()
 		if err := e.apiReader.Get(ctx, client.ObjectKeyFromObject(cr), fresh); err != nil {
