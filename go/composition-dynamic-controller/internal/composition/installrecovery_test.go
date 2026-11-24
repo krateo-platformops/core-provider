@@ -34,7 +34,7 @@ func TestRecordInstallRecovery(t *testing.T) {
 	mg := ndPortal("")
 	var err error
 	for i := 0; i < 3; i++ {
-		if mg, err = recordInstallRecovery(ctx, mg, i+1, "because", now.Add(time.Duration(i)*time.Minute), srOpts(dyn), logging.NewNopLogger()); err != nil {
+		if mg, err = recordInstallRecovery(ctx, mg, i+1, installRecoveryFailed, "because", now.Add(time.Duration(i)*time.Minute), srOpts(dyn), logging.NewNopLogger()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -43,7 +43,7 @@ func TestRecordInstallRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _, _ := unstructured.NestedMap(stored.Object, "status", "installRecovery")
-	if got["kind"] != installRecoveryRetried || got["count"] != int64(3) || got["lastAt"] != "2026-11-23T21:02:00Z" || got["reason"] != "because" {
+	if got["kind"] != installRecoveryRetried || got["count"] != int64(3) || got["lastAt"] != "2026-11-23T21:02:00Z" || got["reason"] != installRecoveryFailed || got["message"] != "because" {
 		t.Errorf("stored record = %v", got)
 	}
 	if marker, _, _ := unstructured.NestedString(stored.Object, "status", "marker"); marker != "x" {
@@ -53,7 +53,7 @@ func TestRecordInstallRecovery(t *testing.T) {
 	// A pass that stops after recording the retry of revision 3 is repeated: nothing more was retried, so
 	// the count stands, while lastAt says when it last tried. Control: revision 4 counts.
 	for i, tc := range []struct{ revision, want int64 }{{3, 3}, {3, 3}, {4, 4}} {
-		if mg, err = recordInstallRecovery(ctx, mg, int(tc.revision), "because", now.Add(time.Duration(10+i)*time.Minute), srOpts(dyn), logging.NewNopLogger()); err != nil {
+		if mg, err = recordInstallRecovery(ctx, mg, int(tc.revision), installRecoveryFailed, "because", now.Add(time.Duration(10+i)*time.Minute), srOpts(dyn), logging.NewNopLogger()); err != nil {
 			t.Fatal(err)
 		}
 		r, _, _ := unstructured.NestedMap(storedPortal(t, dyn).Object, "status", "installRecovery")
@@ -66,7 +66,7 @@ func TestRecordInstallRecovery(t *testing.T) {
 	if n, err := installRecoveryCount(mg); n != 4 || err != nil || installRecoveryRevision(mg) != 0 {
 		t.Errorf("after a deploy: count %d (%v) revision %d, want 4 and none", n, err, installRecoveryRevision(mg))
 	}
-	if mg, err = recordInstallRecovery(ctx, mg, 4, "because", now, srOpts(dyn), logging.NewNopLogger()); err != nil {
+	if mg, err = recordInstallRecovery(ctx, mg, 4, installRecoveryFailed, "because", now, srOpts(dyn), logging.NewNopLogger()); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := installRecoveryCount(mg); n != 5 {
@@ -75,7 +75,7 @@ func TestRecordInstallRecovery(t *testing.T) {
 
 	bad := ndPortal("")
 	_ = unstructured.SetNestedField(bad.Object, "many", "status", "installRecovery", "count")
-	if _, err := recordInstallRecovery(ctx, bad, 1, "r", now, srOpts(dyn), logging.NewNopLogger()); err == nil {
+	if _, err := recordInstallRecovery(ctx, bad, 1, "r", "m", now, srOpts(dyn), logging.NewNopLogger()); err == nil {
 		t.Error("a count that cannot be read was taken for zero")
 	}
 }
@@ -95,7 +95,7 @@ func TestRecordInstallRecovery_PrunedByAnOlderCRD(t *testing.T) {
 	mg.SetUID(types.UID("pruned-" + t.Name()))
 	var err error
 	for i := 0; i < 3; i++ {
-		if mg, err = recordInstallRecovery(ctx, mg, 1, "r", time.Now(), srOpts(dyn), log); err != nil {
+		if mg, err = recordInstallRecovery(ctx, mg, 1, "r", "m", time.Now(), srOpts(dyn), log); err != nil {
 			t.Fatalf("pass %d: a pruned record failed the recovery: %v", i+1, err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestRecordInstallRecovery_PrunedByAnOlderCRD(t *testing.T) {
 	}
 	// Control: a record that persists says nothing.
 	log.lines = nil
-	if _, err := recordInstallRecovery(ctx, ndPortal(""), 1, "r", time.Now(), srOpts(frFakeDyn(ndPortal(""))), log); err != nil || len(log.lines) != 0 {
+	if _, err := recordInstallRecovery(ctx, ndPortal(""), 1, "r", "m", time.Now(), srOpts(frFakeDyn(ndPortal(""))), log); err != nil || len(log.lines) != 0 {
 		t.Errorf("control: err=%v lines=%v", err, log.lines)
 	}
 }
@@ -114,7 +114,7 @@ func TestRecordInstallRecovery_PrunedByAnOlderCRD(t *testing.T) {
 func TestInstallRecoverySurvivesLaterStatusWrites(t *testing.T) {
 	ctx := context.Background()
 	dyn := frFakeDyn(ndPortal(""))
-	mg, err := recordInstallRecovery(ctx, ndPortal(""), 1, "because", time.Now(), srOpts(dyn), logging.NewNopLogger())
+	mg, err := recordInstallRecovery(ctx, ndPortal(""), 1, installRecoveryFailed, "because", time.Now(), srOpts(dyn), logging.NewNopLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestInstallRecoverySurvivesLaterStatusWrites(t *testing.T) {
 // As TestHelmOperationKeysAreDeclaredInTheGeneratedStatusSchema: the keys the WRITER produces, against
 // the closed schema core-provider generates composition CRDs from.
 func TestInstallRecoveryKeysAreDeclaredInTheGeneratedStatusSchema(t *testing.T) {
-	mg, err := recordInstallRecovery(context.Background(), ndPortal(""), 1, "r", time.Now(), srOpts(frFakeDyn(ndPortal(""))), logging.NewNopLogger())
+	mg, err := recordInstallRecovery(context.Background(), ndPortal(""), 1, "r", "m", time.Now(), srOpts(frFakeDyn(ndPortal(""))), logging.NewNopLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -173,7 +173,11 @@
         },
         "reason": {
           "type": "string",
-          "description": "Why the last retry ran: begins with Interrupted or Failed, and names the revision."
+          "description": "What the last retry was of: Interrupted or Failed, one token."
+        },
+        "message": {
+          "type": "string",
+          "description": "The same for a person, naming the revision."
         },
         "revision": {
           "type": "integer",

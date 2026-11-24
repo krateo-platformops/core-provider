@@ -292,6 +292,8 @@ func (h *handler) installAgain(ctx context.Context, mg *unstructured.Unstructure
 	default:
 		markWrote(ctx, writeHelmInstall)
 		mg = clearNeverDeployedAfterDeploy(ctx, mg, rel, updateOpts, log)
+		// Here and not a pass later: the composition must not read Ready with the marks of a retry on it.
+		mg = clearInterruptedInstallAttempts(ctx, mg, rel, updateOpts, log)
 		// Every install hook ran, so a mark an earlier pass left (the kill switch, since removed) is over.
 		mg = h.clearHooksUnverified(ctx, mg, updateOpts, log, phase, "a helm install ran the release's hooks")
 	}
@@ -327,8 +329,8 @@ func releaseState(rel *helmconfig.Release) string {
 func (h *handler) beforeInstallAgain(ctx context.Context, mg *unstructured.Unstructured, fi failedInstall, releaseName string,
 	gate failedInstallGate, updateOpts tools.UpdateOptions, log logging.Logger, phase event.Action) (_ *unstructured.Unstructured, prior map[string]interface{}, started time.Time, err error) {
 	if !fi.interrupted {
-		if mg, err = recordInstallRecovery(ctx, mg, fi.revision, fmt.Sprintf(
-			"Failed: the first install failed (revision %d) before the release was ever deployed", fi.revision), time.Now(), updateOpts, log); err != nil {
+		if mg, err = recordInstallRecovery(ctx, mg, fi.revision, installRecoveryFailed, fmt.Sprintf(
+			"the first install failed (revision %d) before the release was ever deployed", fi.revision), time.Now(), updateOpts, log); err != nil {
 			return mg, nil, started, fmt.Errorf("not installing release %s again: %w", releaseName, err)
 		}
 	}

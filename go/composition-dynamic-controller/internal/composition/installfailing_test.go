@@ -85,7 +85,7 @@ func TestInstallFailing(t *testing.T) {
 	retry := func(reason string) {
 		t.Helper()
 		revision++ // every attempt that starts writes one
-		mg, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision, reason, now, opts, log)
+		mg, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision, reason, "m", now, opts, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,13 +96,13 @@ func TestInstallFailing(t *testing.T) {
 
 	fail(1)
 	check("1st failure", condition.ReasonCreating, 1, 0, "hook failed, attempt 1")
-	retry("Failed: x")
+	retry(installRecoveryFailed)
 	check("during the 1st retry", conditionreason.ReasonHelmOperationInProgress, 1, 1)
 	fail(2)
 	check("2nd failure", condition.ReasonCreating, 2, 1, "hook failed, attempt 2")
-	retry("Interrupted: x") // interrupted: no failure
+	retry(installRecoveryInterrupted) // interrupted: no failure
 	check("during an interrupted retry", conditionreason.ReasonHelmOperationInProgress, 2, 2)
-	retry("Failed: x")
+	retry(installRecoveryFailed)
 	fail(3)
 	check("3rd failure", conditionreason.ReasonInstallFailing, 3, 3, "hook failed, attempt 3")
 	if lastErr, _, _ := unstructured.NestedString(storedPortal(t, dyn).Object, "status", "installFailures", "lastError"); lastErr != "hook failed, attempt 3" {
@@ -110,7 +110,7 @@ func TestInstallFailing(t *testing.T) {
 	}
 
 	// Recording the next retry moves the count and the message that names it in one write.
-	if _, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision+1, "Failed: x", now, opts, log); err != nil {
+	if _, err := recordInstallRecovery(ctx, storedPortal(t, dyn), revision+1, installRecoveryFailed, "m", now, opts, log); err != nil {
 		t.Fatal(err)
 	}
 	check("the 4th retry is recorded", conditionreason.ReasonInstallFailing, 3, 4, "hook failed, attempt 3", "a retry is starting")

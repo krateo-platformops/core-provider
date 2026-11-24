@@ -169,8 +169,8 @@ func (h *handler) settleInterruptedInstall(ctx context.Context, mg *unstructured
 		if mg, err = patchAnnotation(ctx, mg, compositionMeta.AnnotationKeyInterruptedInstallReinstalls, &next, updateOpts); err != nil {
 			return fail("counting the attempt first", err)
 		}
-		if mg, err = recordInstallRecovery(ctx, mg, rel.Revision, fmt.Sprintf(
-			"Interrupted: the install of revision %d was interrupted before the release was ever deployed", rel.Revision), time.Now(), updateOpts, log); err != nil {
+		if mg, err = recordInstallRecovery(ctx, mg, rel.Revision, installRecoveryInterrupted, fmt.Sprintf(
+			"the install of revision %d was interrupted before the release was ever deployed", rel.Revision), time.Now(), updateOpts, log); err != nil {
 			return fail("recording it first", err)
 		}
 	} else if mg, err = h.markHooksUnverified(ctx, mg, updateOpts, "Observe", fmt.Errorf(

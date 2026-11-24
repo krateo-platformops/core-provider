@@ -18,14 +18,20 @@ import (
 // than once.
 //
 // installRecoveryRetried is its only kind: an interrupted (#629) or failed (#636) first install was
-// installed again over what it created. The reason begins with which one.
+// installed again over what it created.
 const installRecoveryRetried = "Retried"
+
+// The reason is one token, which one of the two it was; the sentence is the message's.
+const (
+	installRecoveryInterrupted = "Interrupted"
+	installRecoveryFailed      = "Failed"
+)
 
 // installRecoveryKeys is every key written under status.installRecovery. The composition CRD's status
 // schema is CLOSED there (core-provider statics/status.schema.json): a key missing from it is pruned by
 // the apiserver on every write. TestInstallRecoveryKeysAreDeclaredInTheGeneratedStatusSchema holds the
 // two together.
-var installRecoveryKeys = []string{"kind", "lastAt", "count", "reason", "revision"}
+var installRecoveryKeys = []string{"kind", "lastAt", "count", "reason", "message", "revision"}
 
 // installRecoveryCount reads the cumulative count. One that cannot be read is an error, never zero.
 func installRecoveryCount(mg *unstructured.Unstructured) (int64, error) {
@@ -75,7 +81,7 @@ func installRecoveryRevision(mg *unstructured.Unstructured) int64 {
 // A CRD that predates the field PRUNES it: the write succeeds and the returned object does not carry it.
 // That is not a failure (the CRD is core-provider's to roll, and may lag this controller for as long as
 // the definition does), so the recovery goes ahead and the log says so once.
-func recordInstallRecovery(ctx context.Context, mg *unstructured.Unstructured, revision int, reason string, now time.Time,
+func recordInstallRecovery(ctx context.Context, mg *unstructured.Unstructured, revision int, reason, message string, now time.Time,
 	opts tools.UpdateOptions, log logging.Logger) (*unstructured.Unstructured, error) {
 	n, err := installRecoveryCount(mg)
 	if err != nil {
@@ -85,7 +91,7 @@ func recordInstallRecovery(ctx context.Context, mg *unstructured.Unstructured, r
 		n++
 	}
 	if err := unstructured.SetNestedMap(mg.Object, map[string]any{
-		"kind": installRecoveryRetried, "lastAt": now.UTC().Format(time.RFC3339), "count": n, "reason": reason, "revision": int64(revision),
+		"kind": installRecoveryRetried, "lastAt": now.UTC().Format(time.RFC3339), "count": n, "reason": reason, "message": message, "revision": int64(revision),
 	}, "status", "installRecovery"); err != nil {
 		return mg, fmt.Errorf("setting status.installRecovery: %w", err)
 	}

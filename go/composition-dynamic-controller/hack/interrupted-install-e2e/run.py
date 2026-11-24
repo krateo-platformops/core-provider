@@ -274,8 +274,8 @@ def retried_checks(fails, a, cause, sec1, job1, app1):
     n = a.events(RETRIED[cause])
     check(fails, n == 1, f"exactly one {RETRIED[cause]} event (got {n})")
     check(fails, a.events(RETRIED[other]) == 0, f"no {RETRIED[other]} event")
-    check(fails, rec.get("kind") == "Retried" and rec.get("count") == 1 and str(rec.get("reason", "")).startswith(cause + ":"),
-          f"status.installRecovery says Retried, 1, {cause}: (got {rec})")
+    check(fails, rec.get("kind") == "Retried" and rec.get("count") == 1 and rec.get("reason") == cause and rec.get("message"),
+          f"status.installRecovery says Retried, 1, {cause} (got {rec})")
     check(fails, "revision" not in rec and not a.status("installFailures"), "the per-attempt records are gone")
     check(fails, all(a.ann(k) is None for k in (UNVERIFIED, COUNTER, NEVER)), "no mark is left on the composition")
 
@@ -329,7 +329,7 @@ def failing_hook_arm(version):
     check(fails, max(len(s) for _, s in a.timeline) <= 3, "at most 3 revisions are kept")
     check(fails, not {s[1] for _, snap in a.timeline for s in snap} & {"pending-upgrade", "uninstalling"}, "never upgraded or uninstalled")
     n = a.status("installRecovery") or {}
-    check(fails, n.get("kind") == "Retried" and n.get("count", 0) >= 2 and str(n.get("reason", "")).startswith("Failed:"), f"installRecovery {n}")
+    check(fails, n.get("kind") == "Retried" and n.get("count", 0) >= 2 and n.get("reason") == "Failed", f"installRecovery {n}")
     log("    the hook is fixed")
     sh("kubectl", "patch", "hookprobes.composition.krateo.io", "failing-hook", "-n", NS, "--type", "merge",
        "-p", json.dumps({"spec": {"installHookExit": 0}}))

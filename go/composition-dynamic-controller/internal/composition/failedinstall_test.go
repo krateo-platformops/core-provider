@@ -400,7 +400,7 @@ func TestBeforeInstallAgain(t *testing.T) {
 					if r != nil {
 						t.Errorf("recorded twice: %v", r)
 					}
-				} else if r["kind"] != installRecoveryRetried || !strings.HasPrefix(r["reason"].(string), "Failed: ") || r["count"] != int64(1) || r["lastAt"] == "" || !strings.Contains(r["reason"].(string), "revision 2") {
+				} else if r["kind"] != installRecoveryRetried || r["reason"] != installRecoveryFailed || r["count"] != int64(1) || r["lastAt"] == "" || !strings.Contains(r["message"].(string), "revision 2") {
 					t.Errorf("stored status.installRecovery = %v", r)
 				}
 			}
@@ -651,7 +651,8 @@ func TestInstallAgain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			portal := ndPortal("")
-			portal.SetAnnotations(map[string]string{compositionMeta.AnnotationKeyReleaseNeverDeployed: ndMark(ndUID, "r", 1), compositionMeta.AnnotationKeyHooksUnverified: hooksMark})
+			portal.SetAnnotations(map[string]string{compositionMeta.AnnotationKeyReleaseNeverDeployed: ndMark(ndUID, "r", 1), compositionMeta.AnnotationKeyHooksUnverified: hooksMark,
+				compositionMeta.AnnotationKeyInterruptedInstallReinstalls: "1"})
 			_ = unstructured.SetNestedStringMap(portal.Object, map[string]string{"phase": "install", "startedBy": "ns/holder"}, "status", "helmOperation")
 			dyn := frFakeDyn(portal, frJob("db-init"))
 			jobThere := func() bool {
@@ -682,6 +683,10 @@ func TestInstallAgain(t *testing.T) {
 			}
 			if jobThere() {
 				t.Error("the failed attempt's hook Job is still there")
+			}
+			// The counter goes with the other marks, in the pass that installs, not a pass after Ready says so.
+			if _, counted := storedPortal(t, dyn).GetAnnotations()[compositionMeta.AnnotationKeyInterruptedInstallReinstalls]; counted != tc.wantMarks {
+				t.Errorf("the attempt counter is there: %v, want %v", counted, tc.wantMarks)
 			}
 			stored, gerr := dyn.Resource(srGVR).Namespace("krateo-system").Get(ctx, "portal", metav1.GetOptions{})
 			if gerr != nil {

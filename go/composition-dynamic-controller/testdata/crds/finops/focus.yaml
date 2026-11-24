@@ -106,6 +106,8 @@ spec:
                     type: integer
                   reason:
                     type: string
+                  message:
+                    type: string
                   revision:
                     type: integer
               helmOperation:

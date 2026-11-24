@@ -316,7 +316,7 @@ func TestRecoverStuckOperation_InterruptedFirstInstall(t *testing.T) {
 				if (recovery != nil) != (tc.want == retried) {
 					t.Errorf("status.installRecovery = %v", recovery)
 				}
-				if tc.want == retried && (recovery["count"] != int64(1) || !strings.HasPrefix(recovery["reason"].(string), "Interrupted: ")) {
+				if tc.want == retried && (recovery["count"] != int64(1) || recovery["reason"] != installRecoveryInterrupted || !strings.Contains(recovery["message"].(string), "was interrupted before")) {
 					t.Errorf("status.installRecovery = %v", recovery)
 				}
 			case rollback:

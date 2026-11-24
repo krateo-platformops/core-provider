@@ -38,7 +38,7 @@ func baselineStatusWrites() map[string]any {
 		// The consecutive failed attempts of a first install (#636).
 		"installFailures": map[string]any{"count": int64(3), "lastAt": "2026-11-23T21:00:00Z", "lastError": "failed post-install"},
 		// The durable record of an automatic first-install recovery (#629, #636).
-		"installRecovery": map[string]any{"kind": "Retried", "lastAt": "2026-11-23T21:00:00Z", "count": int64(2), "reason": "the first install failed (revision 1)", "revision": int64(1)},
+		"installRecovery": map[string]any{"kind": "Retried", "lastAt": "2026-11-23T21:00:00Z", "count": int64(2), "reason": "Failed", "message": "the first install failed (revision 1)", "revision": int64(1)},
 	}
 }
 
