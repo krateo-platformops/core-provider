@@ -164,7 +164,9 @@ The controller is thin; the work is in these packages:
   the `ApiRefRBACComplete=False` condition, never partial RBAC), `authnmapping.go`
   (auto-provisions the `serviceaccount.authn.krateo.io/ServiceAccount` allowlist
   mapping named `cdc-<namespace>-<sa>`, hashed into the digest, removed on
-  `Undeploy`), `remoteseed.go` (`SeedRemoteTarget` — projects the embedded
+  `Undeploy`), `selfauthnmapping.go` (core-provider's own mapping, ensured by the
+  controller before every `Deploy`, dry run included, and outside the digest; #642),
+  `remoteseed.go` (`SeedRemoteTarget` — projects the embedded
   `CompositionDefinition` CRD, chart-inspector and a shadow definition onto a spoke;
   ref-counted teardown), `chartreach.go`, `controllerconfig` (per-definition
   `spec.controller` args). The status-projection config rides to the CDC through its

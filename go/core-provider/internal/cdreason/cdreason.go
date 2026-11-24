@@ -166,8 +166,9 @@ const (
 	// TypeAuthnDelegation: a declared spec.apiRef.delegation reaches the controller's authn mapping
 	// (#405). Present only while delegation is declared.
 	TypeAuthnDelegation rtv1.ConditionType = "AuthnDelegation"
-	// TypeAuthnMappingApplied: the controller's authn mapping is rendered where the controller runs
-	// (#251). Present only while the definition has a mapping (an apiRef).
+	// TypeAuthnMappingApplied: the authn mappings the definition needs are in place, the controller's
+	// where the controller runs (#251) and core-provider's own on the management cluster (#642), as read
+	// on the pass that wrote the condition. Present only while the definition has an apiRef.
 	TypeAuthnMappingApplied rtv1.ConditionType = "AuthnMappingApplied"
 	// TypeValuesSchemaAuthored: whether the CRD's spec schema is the chart's own values.schema.json or
 	// was inferred from its values.yaml files (#568 D6; inference is opt-in, krateo.io/values-schema:
@@ -219,9 +220,13 @@ var (
 		"the installed authn mapping CRD does not serve spec.delegation (authn-crds < 0.37.0), so it is not rendered rather than pruned")
 
 	AuthnMappingApplied = on(TypeAuthnMappingApplied, "Applied", metav1.ConditionTrue, WriterCoreProvider,
-		"the mapping CRD exists where the controller runs and the mapping is rendered there")
+		"read live on this pass, both authorize: the controller's mapping, where the controller runs, and core-provider's own, on the management cluster (#642)")
 	AuthnNotInstalled = on(TypeAuthnMappingApplied, "AuthnNotInstalled", metav1.ConditionFalse, WriterCoreProvider,
-		"the cluster the controller runs in has no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping is not written")
+		"the cluster the controller runs in, or the management cluster (for core-provider's own mapping, #642), serves no serviceaccounts.serviceaccount.authn.krateo.io, so the mapping that belongs there is not written; the message names the cluster and what waits on it, and every pass looks again")
+	AuthnMappingMissing = on(TypeAuthnMappingApplied, "MappingMissing", metav1.ConditionFalse, WriterCoreProvider,
+		"read live on this pass: the cluster serves the mapping kind, and the controller's mapping or core-provider's own is absent or does not authorize its ServiceAccount; the message names which. Written again by the next pass that may write; it stays only while a policy withholds update (#642)")
+	AuthnMappingNotObserved = on(TypeAuthnMappingApplied, "NotObserved", metav1.ConditionUnknown, WriterCoreProvider,
+		"a mapping could not be read on this pass, so it is not known to be there or to be missing; the message names which and the error, which is on Synced too, and the pass is retried (#642)")
 
 	ValuesSchemaAuthored = on(TypeValuesSchemaAuthored, "Authored", metav1.ConditionTrue, WriterCoreProvider,
 		"the chart ships values.schema.json at its root, and the CRD is generated from it")
@@ -281,7 +286,7 @@ func nonReady() []Reason {
 	} {
 		out = append(out, apiRefRBACFailures[c])
 	}
-	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled,
+	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled, AuthnMappingMissing, AuthnMappingNotObserved,
 		ValuesSchemaAuthored, ValuesSchemaInferred, ValuesSchemaOwnedElsewhere,
 		MigratedValuesAllValid, MigratedValuesRefused, MigratedValuesUnchecked)
 }

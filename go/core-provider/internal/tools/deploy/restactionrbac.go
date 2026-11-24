@@ -26,11 +26,16 @@ var (
 	authnInst *authn.Client
 )
 
+// AuthnTokenPath is the projected token file core-provider presents to authn; empty is
+// authn.DefaultTokenPath, the path the chart mounts. A variable so a test can exchange a token against
+// a fake authn.
+var AuthnTokenPath string
+
 // authnClientFor returns a process-wide authn client for the given URL. It is a singleton so the
 // issued JWT is cached across reconciles (the exchange is amortised), mirroring how the CDC holds a
 // long-lived authn client. The authn URL is stable (env-driven), so the first-seen URL wins.
 func authnClientFor(server string) *authn.Client {
-	authnOnce.Do(func() { authnInst = authn.New(server, "") })
+	authnOnce.Do(func() { authnInst = authn.New(server, AuthnTokenPath) })
 	return authnInst
 }
 

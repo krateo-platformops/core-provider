@@ -63,6 +63,10 @@ spec:
   displayName: "CDC (apps/fireworksapps-v1-0-0)"
 ```
 
+core-provider has one more mapping, its own, named after its ServiceAccount and always on the
+management cluster: the identity it fetches the RESTAction's read-set with. It is ensured on
+every reconcile of a definition with an `apiRef`, and `AuthnMappingApplied` reports on both.
+
 This requires core-provider to have manage rights on
 `serviceaccounts.serviceaccount.authn.krateo.io` (granted by the core-provider chart
 ClusterRole) and to know the authn namespace (`COMPOSITION_AUTHN_NAMESPACE`).

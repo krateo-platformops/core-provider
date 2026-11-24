@@ -142,55 +142,6 @@ func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface,
 	return hashAuthnServiceAccountMapping(opts, saName, hsh)
 }
 
-// ensureSelfAuthnMapping provisions core-provider's OWN authn allowlist mapping — the one that
-// authorizes core-provider's pod ServiceAccount to exchange its projected token for the service
-// JWT it presents to snowplow's JWT-gated /rbac. This is distinct from the per-CDC mapping
-// (applyAuthnServiceAccountMapping): it is core-provider's own identity, needed the first time it
-// calls /rbac.
-//
-// It is provisioned lazily here — the first time a composition declares an apiRef, by which point
-// authn is running — rather than declaratively at bootstrap, where the
-// serviceaccount.authn.krateo.io CRD does not yet exist (authn is installed later, as a
-// component). The mapping's name is core-provider's own ServiceAccount name (stable, idempotent,
-// and distinct from the "cdc-*" per-composition names). No-op when no apiRef is declared or the
-// self-identity is not configured (apiRefRBAC disabled). Deliberately NOT hashed into the deploy
-// digest: it is core-provider's singleton identity, not part of the per-composition resource set.
-func ensureSelfAuthnMapping(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, applyOpts kubecli.ApplyOptions) error {
-	if opts.ApiRefName == "" || opts.SelfSAName == "" {
-		return nil
-	}
-	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-
-	authnNS := authnNamespaceOrDefault(opts.AuthnNamespace)
-	group := opts.SelfGroup
-	if group == "" {
-		group = defaultSelfAuthnGroup
-	}
-	saNamespace := opts.SelfSANamespace
-	if saNamespace == "" {
-		saNamespace = authnNS
-	}
-
-	obj := &unstructured.Unstructured{}
-	err := objects.CreateK8sObject(obj, opts.GVR,
-		types.NamespacedName{Namespace: authnNS, Name: opts.SelfSAName},
-		filepath.Join(opts.RBACFolderPath, authnServiceAccountTemplate),
-		"saName", opts.SelfSAName,
-		"saNamespace", saNamespace,
-		"group", group,
-		"displayName", "core-provider (RESTAction RBAC inspector)",
-	)
-	if err != nil {
-		return fmt.Errorf("rendering core-provider authn ServiceAccount mapping: %w", err)
-	}
-	if _, err := applyRecorded(ctx, dyn, authnServiceAccountGVR, authnServiceAccountGVK.Kind, auditrec.ActionAuthnMappingApply, obj, applyOpts); err != nil {
-		log.Error(err, "installing core-provider authn ServiceAccount mapping", "name", obj.GetName(), "namespace", obj.GetNamespace())
-		return fmt.Errorf("installing core-provider authn ServiceAccount mapping: %w", err)
-	}
-	log.Debug("core-provider authn ServiceAccount mapping installed", "name", obj.GetName(), "namespace", obj.GetNamespace())
-	return nil
-}
-
 // deleteAuthnServiceAccountMapping removes the mapping on undeploy. Not-found is ignored.
 func deleteAuthnServiceAccountMapping(ctx context.Context, kube client.Client, authnNamespace, compositionNamespace, saName string) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())

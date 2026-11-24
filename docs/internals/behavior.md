@@ -180,6 +180,24 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
    granting the group `krateo:cdc:<resource>-<apiVersion>` (`authnmapping.go`). It
    is hashed into the digest so Deploy/Lookup agree, and removed on `Undeploy`
    (not-found / missing-CRD tolerated so teardown never blocks).
+   The digest covers what is rendered, not the live object: Observe also reads the
+   live mapping, and one that is missing, or authorizes another ServiceAccount or other
+   groups, is "update pending" (#642).
+   **core-provider's own mapping is not in this list and not written by `Deploy`**
+   (`selfauthnmapping.go`). It is what lets core-provider fetch the read-set of step 7,
+   and Observe runs `Deploy` as a dry run, which persists nothing: while `Deploy` wrote
+   it, a missing one could never come back (#642). Observe, Create and Update ensure it
+   with a real write on the management cluster before calling `Deploy`, for a definition
+   with an `apiRef`, when `CORE_PROVIDER_APIREF_SELF_SA_NAME` is set. A write is sent only
+   when the mapping is absent or its spec differs. Observe writes nothing for a definition
+   that is paused, being deleted, or whose `krateo.io/management-policy` withholds update.
+   It stays outside the digest.
+   **`AuthnMappingApplied`** is computed from what was read of the two mappings on that
+   pass: `True/Applied` when both authorize, `False/AuthnNotInstalled` when a cluster one
+   of them belongs on serves no mapping kind (the message names the cluster; nothing
+   fails because of it, and every pass looks again), `False/MappingMissing` when the kind is
+   served and one is absent or does not authorize its ServiceAccount, and
+   `Unknown/NotObserved` when one could not be read. No condition means no `apiRef`.
 7. **`apiRef` read-set RBAC** — when `apiRefRBAC` is enabled: snowplow's
    `GET /rbac` enumerates the (group,version,resource,namespace,verb) rows the
    RESTAction's in-cluster calls touch; `restactionrbac.go` turns them into a
