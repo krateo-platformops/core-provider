@@ -98,3 +98,8 @@ the upstream roadmap and set the direction for everything below.
   earlier spec. It is **not** written with every status write: a paused definition is written on every
   pass, and one waiting out a prune grace (#484) keeps `Ready=True` and `Synced=True` about the old
   version for minutes, and both would have read "processed" ([api](./api.md#observedgeneration)).
+- **`RemoteChartUnreachable` is served** (#649): a remote definition whose chart is cluster-local to the
+  management cluster read `Creating`, then `Unknown`/`NotObserved`, and never the declared reason, because
+  the remote seed left Observe with an error the runtime takes for "could not tell". It now reads
+  `Ready=False`/`RemoteChartUnreachable`, on a bump of a definition that worked before too (its status still
+  names the version it serves), until the chart moves somewhere the spoke reaches.
