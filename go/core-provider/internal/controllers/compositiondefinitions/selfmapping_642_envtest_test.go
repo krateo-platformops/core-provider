@@ -194,6 +194,8 @@ type cluster642 struct {
 	cs  kubernetes.Interface
 	// raw bypasses the recording transport: the test's own reads and writes.
 	raw *dynamic.DynamicClient
+	// cfg is what raw was built from.
+	cfg *rest.Config
 
 	mu     sync.Mutex
 	writes []string
@@ -282,6 +284,7 @@ func start642(t *testing.T) *cluster642 {
 	c.dyn = dynamic.NewForConfigOrDie(cfg)
 	c.cs = kubernetes.NewForConfigOrDie(cfg)
 	c.raw = dynamic.NewForConfigOrDie(rawCfg)
+	c.cfg = rawCfg
 	for _, ns := range []string{self642NS, self642CDNS} {
 		if err := c.cl.Create(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
 			t.Fatal(err)

@@ -88,3 +88,13 @@ the upstream roadmap and set the direction for everything below.
 - 2026-08-07: adopted the Krateo Documentation Standard (this bundle); the legacy
   `docs/{architecture,behavior,gotchas}.md` re-verified against the monorepo tree
   and moved under `docs/internals/`.
+
+## A definition says which spec its Ready is about (2026-11)
+
+- **`status.observedGeneration` on a CompositionDefinition** (#644): a definition whose spec had moved and
+  that nobody had reconciled since read entirely healthy for an hour (acmp, 2026-11-23), because the pass
+  that would have written the condition is the one that did not run. The field is the generation the
+  `Ready` beside it was determined from, so the two numbers differ for as long as `Ready` is about an
+  earlier spec. It is **not** written with every status write: a paused definition is written on every
+  pass, and one waiting out a prune grace (#484) keeps `Ready=True` and `Synced=True` about the old
+  version for minutes, and both would have read "processed" ([api](./api.md#observedgeneration)).

@@ -179,6 +179,20 @@ core-provider only shapes the schema — the `${ jq }` is evaluated by the CDC, 
 syntactically valid expression that resolves to nothing simply writes nothing under
 `.status`.
 
+## `kubectl wait` on a definition waits for its current spec
+
+`kubectl wait --for=condition=<any>` ignores a condition while `status.observedGeneration` is lower than
+`metadata.generation` (`getObservedGeneration` in kubectl's `pkg/cmd/wait/condition.go`). Since #644 a
+CompositionDefinition publishes the field, so after a spec change `kubectl wait --for=condition=Ready`
+no longer returns at once on the `Ready=True` of the version before. It applies to **every** condition,
+`Synced` included, and it waits for as long as the field is behind: a paused definition, or one whose
+update is withheld by `krateo.io/management-policy`, times out. A definition without the field (an older
+core-provider or CRD) is waited on as before.
+
+Reading the field yourself: **absent is not behind**. In jq `null < 2` is true, and a Go `int64` reads 0,
+so check that it is there first. A rollback to a core-provider that does not know it removes it on the
+first status write.
+
 ## A composition's own Helm release is absent from its `status.managed` and carries no parent label
 
 A composition's release is named after the composition itself: `CalculateReleaseName`

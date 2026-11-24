@@ -234,6 +234,20 @@ status:
   new chart is readable and its render replaces them.
 - It never affects Ready.
 
+## Is a definition's `Ready` about its current spec?
+
+Compare `status.observedGeneration` with `metadata.generation` (core-provider#644). Lower means the
+`Ready` shown is about an earlier spec, for example because core-provider has not reconciled the
+definition since its chart version was bumped. After a bump, wait for both:
+
+```
+kubectl wait compositiondefinition/<name> -n <namespace> --for=condition=Ready --timeout=600s
+kubectl get compositiondefinition/<name> -n <namespace> -o wide   # GENERATION and OBSERVED are equal
+```
+
+`kubectl wait` already ignores a condition while the field is behind. What each case means, and what the
+field does not say, is in [api.md](./api.md#observedgeneration).
+
 ## Consuming the docs at the right version
 
 Image tag == chart version == repo tag (one version line). Read this bundle at the

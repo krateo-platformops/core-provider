@@ -46,5 +46,6 @@ func (e *external) derivedNameRefusal(ctx context.Context, cr *compositiondefini
 	msg := fmt.Sprintf("the names core-provider derives for %s from the chart's name and Chart.yaml version do not fit Kubernetes' limits, so nothing is applied; shorten the chart name or version: %s",
 		gvr.String(), strings.Join(parts, "; "))
 	cr.SetConditions(cdreason.DerivedNameTooLong.WithMessage(msg))
+	e.recordObservedGeneration(cr) // #644: the names come from this spec's chart
 	return reconciler.ExternalObservation{}, reconciler.ReadyAssessed(errors.New(msg)), true
 }

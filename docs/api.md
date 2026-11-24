@@ -81,6 +81,33 @@ and on a definition with no follower relation, and **cleared** when a follower b
 example, when the owner is deleted). Recorded each time the definition is observed, from the same
 election that names the owner in `ValuesSchemaAuthored`, `Available` and `Ready` messages.
 
+<a id="observedgeneration"></a>
+**`status.observedGeneration` is the generation the `Ready` beside it was determined from (#644).** A
+`Ready` kept from an earlier spec never advances it. Compare it with `metadata.generation`:
+
+| | Meaning |
+|---|---|
+| lower than `metadata.generation` | `Ready` is about an **earlier** spec. The definition has not been reconciled since the spec changed, or the pass failed before it could determine `Ready` (`Unknown`/`NotObserved`), or it is paused, or its update is withheld by `krateo.io/management-policy`, or an update is in progress (a new version waiting out a prune grace, an `Update` that fails, controller resources just applied). It does not say which, nor that anything is broken |
+| equal, `Ready=True` | the spec is applied: `status.apiVersion` is the version its chart yields, and `Ready` is that version's controller |
+| equal, `Ready=False` | this spec was judged and is not served yet, or is refused: the reason is about **this** spec. `status.apiVersion` may still name the version before |
+| absent | **nothing**: the writer does not report it (an older core-provider, or an older `core-provider-crds` chart, which prunes it), or no pass has determined `Ready` yet. Absent is not "behind": in jq `null < 2` is true, so test for it first |
+
+```
+kubectl get compositiondefinition -A -o json | jq -r '.items[]
+  | select(.metadata.deletionTimestamp == null and .status.observedGeneration != null
+           and .status.observedGeneration < .metadata.generation)
+  | "\(.metadata.namespace)/\(.metadata.name) \(.status.observedGeneration) < \(.metadata.generation)"'
+```
+
+What it does not say. It moves only with the **spec**: an unchanged definition reads equal while
+core-provider is down, an annotation (`krateo.io/upgrade-to-version`, `krateo.io/values-schema`,
+`krateo.io/management-policy`) moves no generation, and neither does a new core-provider that has not
+reconciled the definition yet. The conditions other than `Ready` are guaranteed to be about this spec
+only beside `Ready=True`. A deletion moves `metadata.generation` by itself and the field stays where it
+was, so ignore it while `deletionTimestamp` is set. `kubectl get -o wide` shows both numbers
+(`GENERATION`, `OBSERVED`). `kubectl wait` reads it: see
+[gotchas](./internals/gotchas.md#kubectl-wait-on-a-definition-waits-for-its-current-spec).
+
 <a id="migratedvaluesvalid"></a>
 **`MigratedValuesValid` says whether every instance on the served version still satisfies that
 version's schema after a version migration (#614).** A migration rewrites only an instance's
