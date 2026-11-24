@@ -688,6 +688,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, asFollower, followerCondition(owner, gvr)); err != nil {
 		return reconciler.ExternalObservation{}, err
 	}
+	e.recordObservedGeneration(cr) // #644: status is on this spec's version (CurrentGVK == gvk above)
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }
 

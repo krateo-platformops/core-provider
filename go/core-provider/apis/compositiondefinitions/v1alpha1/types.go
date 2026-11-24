@@ -608,6 +608,16 @@ type MigratedValuesRefusedInstance struct {
 type CompositionDefinitionStatus struct {
 	rtv1.ConditionedStatus `json:",inline"`
 
+	// ObservedGeneration: the metadata.generation the Ready condition beside it was determined from
+	// (core-provider#644). Lower than metadata.generation, Ready is about an EARLIER spec: the definition
+	// has not been reconciled since the spec changed, the pass failed before it could determine Ready, it
+	// is paused or its update is withheld by policy, or an update is in progress and Ready is kept from
+	// before it. Equal to it with Ready=True, the spec is applied: status.apiVersion is the version its
+	// chart yields. ABSENT says nothing: the writer does not report it (an older core-provider), or no
+	// pass has determined Ready yet. It does not advance once the definition is being deleted.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Target: information about the cluster the controller is deployed to.
 	// +optional
 	Target *TargetStatus `json:"target,omitempty"`
@@ -741,6 +751,8 @@ type ScaleToZeroStatus struct {
 //+kubebuilder:printcolumn:name="PACKAGE URL",type="string",JSONPath=".status.packageUrl",priority=10
 //+kubebuilder:printcolumn:name="TARGET",type="string",JSONPath=".status.target.mode",priority=10
 //+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.target.connectionStatus",priority=10
+//+kubebuilder:printcolumn:name="GENERATION",type="integer",JSONPath=".metadata.generation",priority=10
+//+kubebuilder:printcolumn:name="OBSERVED",type="integer",JSONPath=".status.observedGeneration",priority=10
 
 // CompositionDefinition is a definition type with a spec and a status.
 type CompositionDefinition struct {

@@ -62,6 +62,23 @@ reads `values.schema.json`.
    what *is* deployed. If either differs from `status.digest` → not-up-to-date.
 7. Otherwise refreshes status and sets `Available`.
 
+**`status.observedGeneration`** (#644) is recorded by `recordObservedGeneration` (`observedgeneration.go`)
+at each place Observe itself **decides** `Ready`: up to date (owner and follower), not Established, the
+CRD absent, an add refused for lack of room (#494), an unreadable chart, and the three refusals
+(`ValuesSchemaMissing`, `SchemaDefaultContradiction`, `DerivedNameTooLong`). It is **not** recorded where
+`markUpdatePending` keeps an earlier `Ready`, on an error that leaves `NotObserved`, or by Create, Update
+or Delete. The value is the generation of the object Observe re-read live and took the spec from, copied
+into the status there and never read again at write time, so it is never ahead:
+
+- a spec edited mid-pass makes the status write conflict, and the whole status of that pass is dropped;
+- where the runtime replaces the object it holds with the server's copy (it adds the finalizer, and it
+  writes the create annotations on a fresh read, after Create and when it adopts an unresolved create
+  handshake) the stored, older value comes with it. This is also why a **new** definition carries the
+  field only from the first Observe after its Create.
+
+Two passes record nothing: one over a definition being deleted, and one whose clients `Connect` built
+(from the cached spec) for another `deploy.targetRef` than the live spec names.
+
 ### Create (`external.Create`)
 
 Generates the CRD, `ApplyOrUpdateCRD`, then `deploy.Deploy` (real apply), and stores

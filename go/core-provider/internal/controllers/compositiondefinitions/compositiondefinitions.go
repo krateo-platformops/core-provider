@@ -368,6 +368,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
 	ext := &external{
+		connectedTarget: targetNameOf(cr.Spec.Deploy),
+
 		audit:       c.audit,
 		mgmt:        c.kube,
 		mgmtDynamic: c.dynamic,
@@ -440,6 +442,10 @@ type external struct {
 
 	// removeDanglingRBAC: see Options.RemoveDanglingRBAC.
 	removeDanglingRBAC bool
+
+	// connectedTarget is the KubernetesTarget these clients were built for, "" for the management
+	// cluster. See recordObservedGeneration.
+	connectedTarget string
 }
 
 // setTargetStatus records where the controller is deployed and whether that cluster is
@@ -909,6 +915,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// the OLD CRD version and only self-heals at the next full re-list (SyncPeriod) or a manual engine
 	// restart. Re-read the CR straight from the API server so the version decision always uses the
 	// current spec. Best-effort: on error we keep the cached copy rather than fail the reconcile.
+	// A field the live object no longer has does not survive in the copy: the typed client zeroes its
+	// target before decoding (TestEnvtest_644_LiveReadHoldsNoRemovedField).
 	if e.apiReader != nil {
 		fresh := cr.DeepCopy()
 		if err := e.apiReader.Get(ctx, client.ObjectKeyFromObject(cr), fresh); err != nil {
@@ -980,6 +988,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		// cannot be read keeps the unreadable-chart path. Not on a definition being deleted: its
 		// teardown must not depend on its chart.
 		if !deleted && errors.Is(err, fs.ErrNotExist) {
+			e.recordObservedGeneration(cr) // #644: ValuesSchemaMissing is about this spec's chart
 			return valuesSchemaMissing(cr, cr.Spec.Chart, invalidOptIn, err)
 		}
 		return e.observeWithoutChart(ctx, cr, fmt.Errorf("getting spec schema: %w", err), log)
@@ -990,6 +999,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// for ever. Not on a definition being deleted: its teardown must not depend on its chart.
 	if !deleted {
 		if obs, err, stop := schemaContradiction(cr, specSchemaBytes, chartGVK); stop {
+			e.recordObservedGeneration(cr) // #644: SchemaDefaultContradiction is about this spec's chart
 			return obs, err
 		}
 	}
@@ -1049,6 +1059,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		// this is converging, and Unavailable on a definition means failed (cdreason, Diego 2026-11-16).
 		cr.SetConditions(cdreason.Creating.
 			WithMessage(fmt.Sprintf("crd for '%s' does not exists yet", gvr.String())))
+		e.recordObservedGeneration(cr) // #644: persisted only when no Create follows (it re-reads the status)
 		return reconciler.ExternalObservation{
 			ResourceExists:   false,
 			ResourceUpToDate: false,
@@ -1074,6 +1085,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			return reconciler.ExternalObservation{}, perr
 		}
 		servedVersionAddReady(cr, plan, gvr)
+		if plan.tooLarge != nil {
+			e.recordObservedGeneration(cr) // #644: a refused add is about this version; a pending one keeps Ready
+		}
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: false,
@@ -1420,6 +1434,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		log.Debug("CRD accepted but not yet Established", "gvr", gvr.String())
 		cr.SetConditions(cdreason.Creating.
 			WithMessage(fmt.Sprintf("crd for '%s' is accepted but not yet Established", gvr.String())))
+		e.recordObservedGeneration(cr) // #644
 		// Still up-to-date: there is nothing to DO about this, and returning false would dispatch an
 		// Update that cannot help and would run again on every resync until the apiserver catches up.
 		return reconciler.ExternalObservation{
@@ -1439,6 +1454,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, func(c rtv1.Condition) rtv1.Condition { return c }, cdreason.Available.Condition()); err != nil {
 		return reconciler.ExternalObservation{}, err
 	}
+	e.recordObservedGeneration(cr) // #644: status names this spec's version and Ready is its controller's
 
 	return reconciler.ExternalObservation{
 		ResourceExists:   true,
@@ -2246,6 +2262,7 @@ func (e *external) observeWithoutChart(ctx context.Context, cr *compositiondefin
 		// Never reconciled: no recorded GVK, therefore no generated CRD. "Does not exist" is true.
 		log.Info("Chart unreadable and no GVK on status; reporting the external resource absent so an unresolved create can recover",
 			"error", cause.Error())
+		e.recordObservedGeneration(cr) // #644: persisted only when no Create follows (it re-reads the status)
 		return reconciler.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
 	}
 
@@ -2258,6 +2275,7 @@ func (e *external) observeWithoutChart(ctx context.Context, cr *compositiondefin
 	exists := crd != nil
 	log.Info("Chart unreadable; answered from the GVK on status rather than returning an error",
 		"gvr", gvr.String(), "resourceExists", exists, "error", cause.Error())
+	e.recordObservedGeneration(cr) // #644: Unavailable is about this spec's chart
 	return reconciler.ExternalObservation{ResourceExists: exists, ResourceUpToDate: false}, nil
 }
 
