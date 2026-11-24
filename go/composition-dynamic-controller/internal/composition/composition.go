@@ -1130,7 +1130,15 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 	// Behaviour preserved deliberately: the error text differs ("applying rbac" rather than
 	// "installing rbac") and nothing matches on it -- checked, no test or consumer greps either
 	// string.
-	if _, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName); err != nil {
+	_, rbacErr := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName)
+	// #646: from here every failure returns what this computed. Read off mg now: a later annotation patch
+	// replaces mg with the stored object, which does not carry it.
+	computed := derivedRBACConditions(mg)
+	defer func(self *unstructured.Unstructured) { // self: a failed write leaves mg nil
+		err = carryOnFailedCreate(ctx, self, err, computed, updateOpts)
+	}(mg)
+	if rbacErr != nil {
+		computed, err = createFailedOnDerivedRBAC(ctx, mg, rbacErr, time.Now())
 		return err
 	}
 

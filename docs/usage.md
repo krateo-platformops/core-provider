@@ -175,6 +175,8 @@ A Normal `InterruptedInstallRetried` or `FailedInstallRetried` Event says so at 
 
 While an install keeps failing it is retried at the controller's error backoff, with no cap. `Ready` is never `True`. After the first two consecutive failures it reads `False/Creating`, with helm's error, and `False/HelmOperationInProgress` while an attempt runs. From the **third** it reads `False/InstallFailing`, which a parent counts as failed, and it stays there through the retries (the message then also says one is running) until one succeeds: `the first install has failed N times (M automatic retries so far); last error: ...`. N is `status.installFailures.count` (consecutive failed attempts; removed once a revision is deployed, with `lastAt` and `lastError`, which can be read there while a retry runs), M is `status.installRecovery.count`. They differ: an interrupted attempt is retried but is not a failed one. **Interruptions** are capped at **3** per composition (`krateo.io/interrupted-install-reinstalls` counts them and is removed once the release deploys): after that the cause is not transient, and it falls back to the manual path below with a Warning `InterruptedInstallRetryCapped` Event. The release keeps the controller's usual history (`HELM_MAX_HISTORY`, 3 by default, at least 2 here).
 
+A composition whose chart cannot be rendered, or whose derived RBAC cannot be applied, is not a failed install: nothing is counted, and it reads the same before its first install as after it, `Ready=False/Unavailable` with the error, beside `ChartRenderable` and `RBACComplete` (#646).
+
 ### When it applies
 
 Only to a release that is **proven** never to have been deployed, and that **this controller installed**:

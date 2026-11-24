@@ -2,7 +2,6 @@ package composition
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -137,18 +136,13 @@ func boundedError(err error) string {
 	return s + "..."
 }
 
-// CreateWithResult implements controller.ResultCreator, for the Ready a FAILED create ends with. The runtime
-// writes Ready=False/Creating on the re-fetched object after a failed create, so a Ready this handler wrote
-// during the call is overwritten; the one it RETURNS is applied after (unstructured-runtime v1.32.1).
+// CreateWithResult implements controller.ResultCreator, for the conditions a FAILED create ends with. The
+// runtime writes Ready=False/Creating on the object it re-fetches after a failed create, so what this handler
+// set during the call is lost; what it RETURNS is applied after (unstructured-runtime v1.32.1).
 // Requested is always true: what a create did is judged by its error alone, as for a plain Create.
 func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstructured) (controller.CreateResult, error) {
 	err := h.Create(ctx, mg)
-	res := controller.CreateResult{Requested: true}
-	var failed *installFailed
-	if errors.As(err, &failed) && failed.ready.Reason == conditionreason.ReasonInstallFailing {
-		res.Conditions = []metav1.Condition{failed.ready}
-	}
-	return res, err
+	return controller.CreateResult{Requested: true, Conditions: failedCreateConditions(err)}, err
 }
 
 var _ controller.ResultCreator = (*handler)(nil)

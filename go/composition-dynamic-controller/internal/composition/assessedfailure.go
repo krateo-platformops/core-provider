@@ -100,8 +100,13 @@ func failObserveKeepingReady(ctx context.Context, mg *unstructured.Unstructured,
 	if _, err := updateStatus(ctx, mg, opts); err != nil {
 		return fmt.Errorf("updating status after failure: %w", err)
 	}
-	return controller.ReadyAssessed(fmt.Errorf("%w (chart-inspector gave no answer; Ready is kept as last assessed until %s)",
-		cause, deadline.UTC().Format(time.RFC3339)))
+	return controller.ReadyAssessed(readyKeptUntil(cause, deadline))
+}
+
+// readyKeptUntil is cause saying that Ready was left as last assessed, and until when.
+func readyKeptUntil(cause error, deadline time.Time) error {
+	return fmt.Errorf("%w (chart-inspector gave no answer; Ready is kept as last assessed until %s)",
+		cause, deadline.UTC().Format(time.RFC3339))
 }
 
 // failObserveOnDerivedRBAC is how Observe fails when applyDerivedRBAC did. #577: chart-inspector
