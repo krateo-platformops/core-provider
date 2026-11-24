@@ -259,7 +259,7 @@ func TestCdcOTLPEndpointIsNodeLocalByDefault(t *testing.T) {
 		if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
 			types.NamespacedName{Namespace: "krateo-system", Name: "fireworksapps-v1-0-0-controller"},
 			filepath.Join(root, "cdc-deployment", filepath.Base(CDCtemplateDeploymentPath)),
-			"serviceAccountName", "fireworksapps-v1-0-0"); err != nil {
+			deploymentTemplateValues("serviceAccountName", "fireworksapps-v1-0-0")...); err != nil {
 			t.Fatal(err)
 		}
 		return dep

@@ -72,12 +72,14 @@ func TestConfigMapRendersStatusDataTemplate(t *testing.T) {
 		schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
 		types.NamespacedName{Name: "fireworksapps-v1-0-0-configmap", Namespace: "demo"},
 		"testdata/manifests/configmap.yaml",
-		"composition_controller_sa_name", "sa",
-		"composition_controller_sa_namespace", "demo",
-		"status_data_template", json,
-		"api_ref_name", "status-sources",
-		"api_ref_namespace", "demo",
-		"api_ref_extras", extras,
+		envConfigMapTemplateValues(
+			"composition_controller_sa_name", "sa",
+			"composition_controller_sa_namespace", "demo",
+			"status_data_template", json,
+			"api_ref_name", "status-sources",
+			"api_ref_namespace", "demo",
+			"api_ref_extras", extras,
+		)...,
 	)
 	if err != nil {
 		t.Fatalf("rendering configmap: %v", err)

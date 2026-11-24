@@ -37,7 +37,7 @@ func renderLeaseRBAC(gvr schema.GroupVersionResource, rbacNN types.NamespacedNam
 	}
 	binding := rbacv1.RoleBinding{}
 	if err := objects.CreateK8sObject(&binding, gvr, rbacNN, filepath.Join(rbacFolderPath, leaseRoleBindingTemplate),
-		"serviceAccount", saName, "saNamespace", saNamespace); err != nil {
+		bindingValues(saName, saNamespace)...); err != nil {
 		return rbacv1.Role{}, rbacv1.RoleBinding{}, fmt.Errorf("rendering the controller's lease RoleBinding: %w", err)
 	}
 	return role, binding, nil

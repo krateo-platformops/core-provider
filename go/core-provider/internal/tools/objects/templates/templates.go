@@ -64,8 +64,11 @@ func ControllerLeaseName(group, version, resource string) string {
 
 type Template string
 
+// Render refuses a template that uses a key the caller did not pass (#651). text/template's default
+// prints "<no value>" for one, or, through a function such as quote, nothing at all: a Lease named
+// "<no value>", an authn URL of "". A key that does not apply is passed as "", never left out.
 func (t Template) Render(values map[string]any) ([]byte, error) {
-	tpl, err := template.New("template").Funcs(sprig.FuncMap()).Parse(string(t))
+	tpl, err := template.New("template").Funcs(sprig.FuncMap()).Option("missingkey=error").Parse(string(t))
 	if err != nil {
 		return nil, err
 	}

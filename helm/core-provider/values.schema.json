@@ -1002,6 +1002,37 @@
     "terminationGracePeriodSeconds": {
       "type": "integer",
       "title": "terminationGracePeriodSeconds"
+    },
+    "strategy": {
+      "type": "object",
+      "title": "core-provider Deployment strategy",
+      "description": "apps/v1 DeploymentStrategy. Empty: not rendered, Kubernetes' default (RollingUpdate 25%/25%) applies.",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["RollingUpdate", "Recreate"]
+        },
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxSurge": {
+              "type": ["integer", "string"]
+            },
+            "maxUnavailable": {
+              "type": ["integer", "string"]
+            }
+          }
+        }
+      },
+      "default": {}
+    },
+    "priorityClassName": {
+      "type": "string",
+      "title": "PriorityClass of core-provider's pod",
+      "description": "Empty: not rendered. The class must exist. It does not bypass a ResourceQuota.",
+      "default": ""
     }
   }
 }

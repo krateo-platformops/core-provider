@@ -14,12 +14,13 @@ import (
 // about an earlier spec, whatever the reason the pass that would renew it has not: not run, failing
 // before a verdict, paused, withheld by policy, or an update in progress.
 //
-// WHERE IT IS CALLED. Only in Observe, at each place Observe itself DECIDES Ready. Never where it
-// KEEPS an earlier one (markUpdatePending, #395): during a chart bump the definition keeps Ready=True
-// about the old version, and while the add of the new version waits out a prune grace it keeps it with
-// Synced=True for minutes (#484), so recording there would be the very false "processed" this field
-// exists to rule out. Never on an error that leaves Ready=NotObserved. A place that forgets to call it
-// only leaves the field behind, which reads as "not determined yet".
+// WHERE IT IS CALLED. At each place Observe itself DECIDES Ready, and where the remote seed refuses the
+// chart (#649), which Update runs too: it decides Ready there, from the spec of the object it is recorded
+// on. Never where Observe KEEPS an earlier one (markUpdatePending, #395): during a chart bump the
+// definition keeps Ready=True about the old version, and while the add of the new version waits out a
+// prune grace it keeps it with Synced=True for minutes (#484), so recording there would be the very false
+// "processed" this field exists to rule out. Never on an error that leaves Ready=NotObserved. A place that
+// forgets to call it only leaves the field behind, which reads as "not determined yet".
 //
 // WHY THE VALUE IS COPIED HERE and not read when the status is written. The runtime writes the object
 // this pass holds, under its resourceVersion, so a spec edited mid-pass makes that write conflict and

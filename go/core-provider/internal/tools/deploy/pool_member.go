@@ -48,26 +48,6 @@ func repointBindings(sa corev1.ServiceAccount, bindings ...*[]rbacv1.Subject) {
 	}
 }
 
-// memberEnvValues are the extra values a pool member's env ConfigMap is rendered with
-// (assets/cdc/configmap.yaml): its pool, and its own workers and resync interval only when the
-// definition sets them (manager.MemberFromConfig). A dedicated controller renders none of them, so
-// its ConfigMap, and the checksum its pod carries, do not move (TestPoolMemberConfigMapKeys).
-func memberEnvValues(o DeployOptions) []any {
-	if !o.poolMember() {
-		return nil
-	}
-	values := []any{"pool", o.Pool}
-	if c := o.Controller; c != nil {
-		if c.Workers != nil {
-			values = append(values, "workers", *c.Workers)
-		}
-		if c.ResyncInterval != nil {
-			values = append(values, "resyncInterval", *c.ResyncInterval)
-		}
-	}
-	return values
-}
-
 // deployedWithLease reports whether gvr's controller was last deployed with its ownership Lease, from
 // its live env ConfigMap: one deployed before the Lease existed (step 2) does not hold it.
 func deployedWithLease(ctx context.Context, dyn dynamic.Interface, namespace string, gvr schema.GroupVersionResource) (bool, error) {

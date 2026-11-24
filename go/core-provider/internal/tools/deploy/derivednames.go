@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/objects"
@@ -59,7 +58,7 @@ func (v NameViolation) String() string {
 // DerivedNameViolations returns every name derived from gvr that would not survive the write.
 // dedicated is whether the definition runs its own controller (not a pool member). serviceTemplatePath
 // is the controller Service template; the Service is checked exactly when the write would create it
-// (the same os.Stat test the deploy path makes).
+// (the same serviceTemplateMounted test the deploy path makes).
 func DerivedNameViolations(gvr schema.GroupVersionResource, dedicated bool, serviceTemplatePath string) ([]NameViolation, error) {
 	var out []NameViolation
 	if errs := validation.IsDNS1035Label(gvr.Version); len(errs) > 0 {
@@ -76,7 +75,11 @@ func DerivedNameViolations(gvr schema.GroupVersionResource, dedicated bool, serv
 			What: "the controller Deployment's name, which is also its app.kubernetes.io/name selector label", Name: nn.Name, Problems: errs,
 		})
 	}
-	if _, err := os.Stat(serviceTemplatePath); err == nil {
+	service, err := serviceTemplateMounted(serviceTemplatePath)
+	if err != nil {
+		return nil, err
+	}
+	if service {
 		var svc corev1.Service
 		if err := objects.CreateK8sObject(&svc, gvr, nn, serviceTemplatePath); err != nil {
 			return nil, fmt.Errorf("rendering the controller Service to check its name: %w", err)

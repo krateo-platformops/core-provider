@@ -76,14 +76,13 @@ func renderAuthnServiceAccountMapping(opts DeployOptions, saName, saNamespace st
 	err := objects.CreateK8sObject(obj, opts.GVR,
 		types.NamespacedName{Namespace: authnNS, Name: name},
 		filepath.Join(opts.RBACFolderPath, authnServiceAccountTemplate),
-		"saName", saName,
-		"saNamespace", saNamespace,
-		"group", cdcGroup(saName),
-		"displayName", fmt.Sprintf("CDC (%s/%s)", saNamespace, saName),
-		"principal", principalFor(opts.AuthnSupport),
-		"delegation", delegation,
-		"delegationAllowed", allowed,
-		"delegationMaxDepth", maxDepth,
+		authnMapping{
+			saName: saName, saNamespace: saNamespace,
+			group:       cdcGroup(saName),
+			displayName: fmt.Sprintf("CDC (%s/%s)", saNamespace, saName),
+			principal:   principalFor(opts.AuthnSupport),
+			delegation:  delegation, delegationAllowed: allowed, delegationMaxDepth: maxDepth,
+		}.values()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rendering authn ServiceAccount mapping: %w", err)

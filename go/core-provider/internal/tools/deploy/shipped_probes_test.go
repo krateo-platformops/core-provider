@@ -24,7 +24,7 @@ import (
 // object the cluster runs (#333 could not tell which file that was; this is the chain):
 //
 //  1. helm renders helm/core-provider/assets/cdc/deployment.yaml into the ConfigMap
-//     <fullname>-cdc-deployment (templates/cdc-deployment.yaml), which templates/deployment.yaml
+//     <fullname>-cdc-deployment-<digest> (templates/cdc-deployment.yaml), which templates/deployment.yaml
 //     mounts into core-provider at /tmp/assets/cdc-deployment.
 //  2. core-provider reads that file (compositiondefinitions.CDCtemplateDeploymentPath) and renders it
 //     per Kind+version with objects.CreateK8sObject (Deploy, below), then applies the result.
@@ -152,17 +152,13 @@ func renderControllerObjects(t *testing.T, overrides map[string]any) (appsv1.Dep
 	var dep appsv1.Deployment
 	if err := objects.CreateK8sObject(&dep, gvr, getCDCDeploymentNN(nn),
 		mountedTemplate(t, manifests, "cdc-deployment.yaml", "deployment.yaml"),
-		"serviceAccountName", "kubernetesclusters-v0-13-23", "api_ref_name", ""); err != nil {
+		deploymentIdentityValues("kubernetesclusters-v0-13-23", "")...); err != nil {
 		t.Fatalf("stage 2, Deployment: %v", err)
 	}
 	var cm corev1.ConfigMap
 	if err := objects.CreateK8sObject(&cm, gvr, getCDCConfigmapNN(nn),
 		mountedTemplate(t, manifests, "cdc-configmap.yaml", "configmap.yaml"),
-		"composition_controller_sa_name", "kubernetesclusters-v0-13-23",
-		"composition_controller_sa_namespace", "krateo-system",
-		"status_data_template", "",
-		"api_ref_name", "", "api_ref_namespace", "", "api_ref_extras", "",
-		"authn_url", shippedControllerAuthnURL); err != nil {
+		envConfigMapValues("kubernetesclusters-v0-13-23", "krateo-system", DeployOptions{ControllerAuthnURL: shippedControllerAuthnURL})...); err != nil {
 		t.Fatalf("stage 2, ConfigMap: %v", err)
 	}
 	return dep, cm

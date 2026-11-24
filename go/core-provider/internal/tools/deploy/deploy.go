@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -218,7 +217,7 @@ func createRBACResources(gvr schema.GroupVersionResource, rbacNSName, grantNSNam
 	}
 
 	clusterrolebinding := rbacv1.ClusterRoleBinding{}
-	err = objects.CreateK8sObject(&clusterrolebinding, gvr, rbacNSName, filepath.Join(rbacFolderPath, "clusterrolebinding.yaml"), "serviceAccount", sa.Name, "saNamespace", sa.Namespace)
+	err = objects.CreateK8sObject(&clusterrolebinding, gvr, rbacNSName, filepath.Join(rbacFolderPath, "clusterrolebinding.yaml"), bindingValues(sa.Name, sa.Namespace)...)
 	if err != nil {
 		return corev1.ServiceAccount{}, rbacv1.ClusterRole{}, rbacv1.ClusterRoleBinding{}, rbacv1.Role{}, rbacv1.RoleBinding{}, err
 	}
@@ -230,7 +229,7 @@ func createRBACResources(gvr schema.GroupVersionResource, rbacNSName, grantNSNam
 	}
 
 	rolebinding := rbacv1.RoleBinding{}
-	err = objects.CreateK8sObject(&rolebinding, gvr, grantNSName, filepath.Join(rbacFolderPath, "compositiondefinition-rolebinding.yaml"), "serviceAccount", sa.Name, "saNamespace", sa.Namespace)
+	err = objects.CreateK8sObject(&rolebinding, gvr, grantNSName, filepath.Join(rbacFolderPath, "compositiondefinition-rolebinding.yaml"), bindingValues(sa.Name, sa.Namespace)...)
 	if err != nil {
 		return corev1.ServiceAccount{}, rbacv1.ClusterRole{}, rbacv1.ClusterRoleBinding{}, rbacv1.Role{}, rbacv1.RoleBinding{}, err
 	}
@@ -486,7 +485,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			opts.GVR,
 			getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}),
 			filepath.Join(opts.RBACFolderPath, "secret-role.yaml"),
-			"secretName", opts.Spec.Credentials.PasswordRef.Name)
+			secretRoleValues(opts.Spec.Credentials.PasswordRef.Name)...)
 		if err != nil {
 			log.Error(err, "creating role")
 			return "", err
@@ -509,8 +508,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			opts.GVR,
 			getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}),
 			filepath.Join(opts.RBACFolderPath, "secret-rolebinding.yaml"),
-			"serviceAccount", sa.Name,
-			"saNamespace", sa.Namespace)
+			bindingValues(sa.Name, sa.Namespace)...)
 		if err != nil {
 			log.Error(err, "creating rolebinding")
 			return "", err
@@ -570,16 +568,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("JSON Schema ConfigMap successfully installed", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace, "digest", hsh.GetHash())
 
 	cm := corev1.ConfigMap{}
-	cmValues := append([]any{
-		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", opts.StatusDataTemplate,
-		"api_ref_name", opts.ApiRefName,
-		"api_ref_namespace", opts.ApiRefNamespace,
-		"api_ref_extras", opts.ApiRefExtras,
-		"authn_url", opts.ControllerAuthnURL,
-	}, memberEnvValues(opts)...) // a pool member's keys (§5c); none for a dedicated controller
-	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath, cmValues...)
+	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
+		envConfigMapValues(sa.Name, sa.Namespace, opts)...)
 	if err != nil {
 		return "", err
 	}
@@ -648,8 +638,11 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 	log.Debug("Deployment successfully installed", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace, "digest", hsh.GetHash())
 
-	_, err = os.Stat(opts.ServiceTemplatePath)
-	if err == nil {
+	service, err := serviceTemplateMounted(opts.ServiceTemplatePath)
+	if err != nil {
+		return "", err
+	}
+	if service {
 		svc := corev1.Service{}
 		err = objects.CreateK8sObject(&svc, opts.GVR, getCDCDeploymentNN(namespacedName), opts.ServiceTemplatePath)
 		if err != nil {
@@ -726,8 +719,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	hub := hubOr(opts.HubDynamicClient, opts.DynamicClient)
 	schemaNN := schemaConfigMapNN(opts.Namespace, namespacedName)
 	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, schemaNN, opts.JsonSchemaTemplatePath,
-		"schema", string(opts.JsonSchemaBytes),
-	)
+		schemaConfigMapValues(string(opts.JsonSchemaBytes))...)
 	if err != nil {
 		return fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
@@ -752,10 +744,9 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name,
 		// Undeploy renders the Deployment only to delete it by name; the token volume is
 		// irrelevant here.
-		"api_ref_name", "")
+		deploymentIdentityValues(sa.Name, "")...)
 	if err != nil {
 		return err
 	}
@@ -822,13 +813,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 
 	cm := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
-		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", "",
-		"api_ref_name", "",
-		"api_ref_namespace", "",
-		"api_ref_extras", "",
-		"authn_url", "")
+		envConfigMapValues(sa.Name, sa.Namespace, DeployOptions{})...)
 	if err != nil {
 		return err
 	}
@@ -881,8 +866,11 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		}
 	}
 
-	_, err = os.Stat(opts.ServiceTemplatePath)
-	if err == nil {
+	service, err := serviceTemplateMounted(opts.ServiceTemplatePath)
+	if err != nil {
+		return err
+	}
+	if service {
 		svc := corev1.Service{}
 		err = objects.CreateK8sObject(&svc, opts.GVR, getCDCDeploymentNN(namespacedName), opts.ServiceTemplatePath)
 		if err != nil {
@@ -905,7 +893,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		opts.Spec.Credentials.PasswordRef.Namespace != opts.Namespace
 	if opts.Spec != nil && opts.Spec.Credentials != nil && !keepCredentialsRBAC {
 		role := rbacv1.Role{}
-		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), "secretName", opts.Spec.Credentials.PasswordRef.Name)
+		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), secretRoleValues(opts.Spec.Credentials.PasswordRef.Name)...)
 		if err != nil {
 			log.Error(err, "creating role")
 			return err
@@ -919,7 +907,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		log.Debug("Role successfully uninstalled", "gvr", opts.GVR.String(), "name", role.Name, "namespace", role.Namespace)
 
 		rolebinding := rbacv1.RoleBinding{}
-		err = objects.CreateK8sObject(&rolebinding, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-rolebinding.yaml"))
+		err = objects.CreateK8sObject(&rolebinding, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-rolebinding.yaml"), bindingValues(sa.Name, sa.Namespace)...)
 		if err != nil {
 			log.Error(err, "creating rolebinding")
 			return err
@@ -970,7 +958,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	hsh := hasher.NewFNVObjectHash()
 	if opts.Spec != nil && opts.Spec.Credentials != nil {
 		role := rbacv1.Role{}
-		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), "secretName", opts.Spec.Credentials.PasswordRef.Name)
+		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), secretRoleValues(opts.Spec.Credentials.PasswordRef.Name)...)
 		if err != nil {
 			log.Error(err, "creating role")
 			return "", err
@@ -988,7 +976,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		log.Debug("Role successfully fetched", "gvr", opts.GVR.String(), "name", role.Name, "namespace", role.Namespace, "digest", hsh.GetHash())
 
 		rolebinding := rbacv1.RoleBinding{}
-		err = objects.CreateK8sObject(&rolebinding, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-rolebinding.yaml"), "serviceAccount", sa.Name, "saNamespace", sa.Namespace)
+		err = objects.CreateK8sObject(&rolebinding, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-rolebinding.yaml"), bindingValues(sa.Name, sa.Namespace)...)
 		if err != nil {
 			log.Error(err, "creating rolebinding")
 			return "", err
@@ -1035,8 +1023,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	jsonSchemaConfigmap := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, schemaConfigMapNN(opts.Namespace, namespacedName), opts.JsonSchemaTemplatePath,
-		"schema", string(opts.JsonSchemaBytes),
-	)
+		schemaConfigMapValues(string(opts.JsonSchemaBytes))...)
 	if err != nil {
 		return "", fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
@@ -1057,16 +1044,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("JSON Schema ConfigMap successfully fetched", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace, "digest", hsh.GetHash())
 
 	cm := corev1.ConfigMap{}
-	cmValues := append([]any{
-		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", opts.StatusDataTemplate,
-		"api_ref_name", opts.ApiRefName,
-		"api_ref_namespace", opts.ApiRefNamespace,
-		"api_ref_extras", opts.ApiRefExtras,
-		"authn_url", opts.ControllerAuthnURL,
-	}, memberEnvValues(opts)...) // a pool member's keys (§5c); none for a dedicated controller
-	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath, cmValues...)
+	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
+		envConfigMapValues(sa.Name, sa.Namespace, opts)...)
 	if err != nil {
 		return "", err
 	}
@@ -1096,8 +1075,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name,
-		"api_ref_name", opts.ApiRefName)
+		deploymentIdentityValues(sa.Name, opts.ApiRefName)...)
 	if err != nil {
 		return "", err
 	}
@@ -1121,8 +1099,11 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 	log.Debug("Deployment successfully fetched", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace, "digest", hsh.GetHash())
 
-	_, err = os.Stat(opts.ServiceTemplatePath)
-	if err == nil {
+	service, err := serviceTemplateMounted(opts.ServiceTemplatePath)
+	if err != nil {
+		return "", err
+	}
+	if service {
 		svc := corev1.Service{}
 		err = objects.CreateK8sObject(&svc, opts.GVR, getCDCDeploymentNN(namespacedName), opts.ServiceTemplatePath)
 		if err != nil {

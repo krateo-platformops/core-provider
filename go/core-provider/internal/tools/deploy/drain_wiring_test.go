@@ -43,9 +43,7 @@ func TestUndeploy_DoesNotRevokeTheIdentityWhileAPodSurvives(t *testing.T) {
 	})
 	var rendered appsv1.Deployment
 	if err := objects.CreateK8sObject(&rendered, guardGVR, nn, "testdata/deploy.yaml",
-		"serviceAccountName", "irrelevant-for-the-selector",
-		"composition_controller_sa_name", "irrelevant-for-the-selector",
-		"api_ref_name", ""); err != nil {
+		deploymentIdentityValues("irrelevant-for-the-selector", "")...); err != nil {
 		t.Fatalf("rendering the controller Deployment: %v", err)
 	}
 	if rendered.Spec.Selector == nil || len(rendered.Spec.Selector.MatchLabels) == 0 {

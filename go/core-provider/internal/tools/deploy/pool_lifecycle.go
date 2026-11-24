@@ -315,18 +315,9 @@ func renderPoolConfigMap(opts PoolOptions, pool string) (corev1.ConfigMap, error
 	if err != nil {
 		return corev1.ConfigMap{}, err
 	}
-	names, saNN := PoolNames(pool), PoolServiceAccount(pool, opts.Namespace)
 	cm := corev1.ConfigMap{}
-	if err := objects.CreateK8sObject(&cm, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.EnvConfigMap},
-		opts.Assets.ConfigmapTemplatePath,
-		"pool", pool,
-		"poolConfigMap", names.EnvConfigMap,
-		"poolDeployment", names.Workload,
-		"poolIndex", names.Index,
-		"poolWorkers", sizing.Workers,
-		"composition_controller_sa_name", saNN.Name,
-		"composition_controller_sa_namespace", saNN.Namespace,
-		"authn_url", opts.Assets.AuthnURL); err != nil {
+	if err := objects.CreateK8sObject(&cm, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: PoolNames(pool).EnvConfigMap},
+		opts.Assets.ConfigmapTemplatePath, poolConfigMapValues(opts, pool, sizing)...); err != nil {
 		return corev1.ConfigMap{}, fmt.Errorf("pool %s: rendering its process ConfigMap: %w", pool, err)
 	}
 	return cm, nil
@@ -424,13 +415,7 @@ func renderPoolDeployment(opts PoolOptions, pool string, processEnv map[string]s
 	}
 	dep := appsv1.Deployment{}
 	if err := objects.CreateK8sObject(&dep, schema.GroupVersionResource{}, types.NamespacedName{Namespace: opts.Namespace, Name: names.Workload},
-		opts.Assets.DeploymentTemplatePath,
-		"pool", pool,
-		"poolDeployment", names.Workload,
-		"poolConfigMap", names.EnvConfigMap,
-		"poolServiceAccount", PoolServiceAccount(pool, opts.Namespace).Name,
-		"poolResources", string(resources),
-		"config_checksum", configChecksum(processEnv)); err != nil {
+		opts.Assets.DeploymentTemplatePath, poolDeploymentValues(opts, pool, string(resources), processEnv)...); err != nil {
 		return appsv1.Deployment{}, fmt.Errorf("pool %s: rendering its Deployment: %w", pool, err)
 	}
 	return dep, nil

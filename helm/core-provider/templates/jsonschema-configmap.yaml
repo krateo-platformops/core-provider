@@ -1,10 +1,2 @@
-# Source: core-provider/templates/configmap-cdc.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "core-provider.fullname" . }}-jsonschema-configmap
-  labels:
-    {{- include "core-provider.labels" . | nindent 4 }}
-data:
-  configmap.yaml: |-
-{{ tpl (.Files.Get "assets/jsonSchemaConfigmap.yaml") . | indent 4 }}
+{{- /* The data and the name are defined together in _assets.tpl (#651). */ -}}
+{{ include "core-provider.assetConfigMap" (dict "root" . "asset" "jsonschema-configmap") }}

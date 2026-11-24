@@ -341,6 +341,38 @@ turn one member's fault into an outage for all of them (§3.3), so pool mode cha
   failing is reported on its own definition as `ControllerActive=False`, with a reason naming the
   member, so the pool's pod is not killed for it.
 
+### Drains, as built
+
+A member that leaves the index, or whose entry changes, is cancelled when the index change arrives.
+Its drain (up to `COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT`, 30s by default) is waited for by
+that member's own goroutine and by nothing else. The probes, the index watch and every other member's
+start and stop go on meanwhile, and members draining together drain side by side.
+
+- **One controller per key, by construction.** Each index key has one goroutine, which starts a
+  controller only when the previous one for that key has returned: drained, its Lease released. The
+  Lease cannot be the guard here. Both controllers would hold it as the same identity, the pod, so a
+  second one in the same process takes a Lease the first still holds. Between two pods it still is.
+- **The last index wins.** An index change that lands during a drain replaces what runs after it.
+  Leave, rejoin, leave runs nothing; two configuration changes run only the second.
+- **A new version of a Kind is another key** (`<resource>-<version>`) and another Lease, so it does not
+  wait for the old version's drain, exactly as two dedicated Deployments do not. The instances are
+  partitioned by the composition-version label.
+- **Process exit** cancels every member at once and waits for all of them, for at most the drain plus
+  10s, under the pod's `terminationGracePeriodSeconds` (45s).
+
+`/readyz` is unchanged in meaning, "every member the index names has synced", and reads state without
+waiting. A member that has left does not count while it drains. A member being replaced does: it is
+named, as draining and then as starting, until its successor has synced.
+
+**A drain that outlives its grace** (a helm operation longer than 30s; `helmTimeout` allows one 15m). The
+runtime cancels the reconcile, does not wait for it, and releases the Lease; the
+key then restarts. In a dedicated controller the process exits next, which ends whatever ignored the
+cancellation. A pool's process goes on, and helm does not stop: an uninstall ignores its context, and
+an install or upgrade returns on cancellation but leaves its own goroutine writing. So the successor
+can reconcile a release the abandoned operation is still writing, and that operation's slot of the pool's
+total stays taken if its handler has not returned. The same holds after a lost Lease, whose restart also
+does not wait. Not closed here: the pool cannot see a reconcile the runtime has abandoned.
+
 ### Sizing and workers
 Workers are capped **pool-wide**: the pool's `workers` is the process total, and no member takes
 more than its own `spec.controller.workers`. The default pool request comes from §5b: the members'
@@ -393,6 +425,10 @@ on a ServiceAccount it has a mapping for.
   index names has its env ConfigMap, its Lease grant and the pool's permission to read it.
 - **Envtest:** a pool hosting two members; a member added and removed at runtime without the process
   restarting; a member that loses its Lease is restarted alone while the other keeps reconciling.
+- **Drains:** `pool_drain_test.go` (fake controllers whose drain the test holds) and
+  `pool_drain_envtest_test.go` (real controllers, Leases and `/readyz`, one reconcile held in flight):
+  a drain blocks no probe and no other member; a successor never overlaps its predecessor; the last
+  index change wins; 15 members changed in one write take one drain; exit is one drain long and bounded.
 - **Integration (kind):** a definition moves dedicated → pool → dedicated, and stop-before-start
   holds (sampled, as #313's migration test does). The last leaver deletes the pool.
 - **Golden:** a definition without `pool` renders byte-identical objects (step 1's test, kept).

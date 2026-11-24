@@ -1818,7 +1818,10 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 			"chart %q is cluster-local to the management cluster and unreachable from the remote target; "+
 				"publish it to a spoke-reachable registry (public OCI/HTTPS)", pkgURL))
 		cr.SetConditions(cond)
-		return fmt.Errorf("remote chart %q is cluster-local and unreachable from the target", pkgURL)
+		e.recordObservedGeneration(cr) // #644: the refusal is about this spec's chart
+		// Assessed (#649): a plain error from Observe made the runtime replace this Ready with NotObserved,
+		// so the reason was never served. The mark means nothing to Create and Update.
+		return reconciler.ReadyAssessed(fmt.Errorf("remote chart %q is cluster-local and unreachable from the target", pkgURL))
 	}
 
 	if err := deploy.SeedRemoteTarget(ctx, e.kube, e.dynamic, deploy.RemoteSeedOptions{
@@ -2296,7 +2299,14 @@ func (e *external) observeWithoutChart(ctx context.Context, cr *compositiondefin
 	if err != nil {
 		// A failed CRD read is a live apiserver problem, not a permanent state, and retrying is
 		// right. Returning the error here cannot wedge anything the way the chart path did.
-		return reconciler.ExternalObservation{}, fmt.Errorf("error getting CRD while the chart is unreadable: %w", err)
+		err = fmt.Errorf("error getting CRD while the chart is unreadable: %w", err)
+		// The chart is unreadable whatever the CRD read says, so Ready stays Unavailable (#649). Not on a
+		// definition being deleted: an Observe error there reads Deleting, which the runtime writes.
+		if !meta.WasDeleted(cr) {
+			e.recordObservedGeneration(cr)
+			err = reconciler.ReadyAssessed(err)
+		}
+		return reconciler.ExternalObservation{}, err
 	}
 	exists := crd != nil
 	log.Info("Chart unreadable; answered from the GVK on status rather than returning an error",

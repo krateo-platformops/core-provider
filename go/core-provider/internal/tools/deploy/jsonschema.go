@@ -38,7 +38,7 @@ func renderJSONSchemaConfigMap(gvr schema.GroupVersionResource, nn types.Namespa
 		return corev1.ConfigMap{}, fmt.Errorf("compacting the chart's values.schema.json: %w", err)
 	}
 	cm := corev1.ConfigMap{}
-	if err := objects.CreateK8sObject(&cm, gvr, nn, templatePath, "schema", compact.String()); err != nil {
+	if err := objects.CreateK8sObject(&cm, gvr, nn, templatePath, schemaConfigMapValues(compact.String())...); err != nil {
 		return corev1.ConfigMap{}, fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
 	return cm, nil
