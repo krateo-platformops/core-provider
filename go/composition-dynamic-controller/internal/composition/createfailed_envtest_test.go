@@ -16,37 +16,99 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/rest"
 )
 
-// inspector646 is a chart-inspector that refuses the render, or answers it, as told.
+// inspector646 is a chart-inspector that fails as told, or answers.
 type inspector646 struct {
 	url    string
-	refuse atomic.Bool
+	failed atomic.Pointer[failure646] // nil: it answers
 	calls  atomic.Int32
 }
 
-const refusal646 = "mcp.audience is required when hermesClient.enabled"
+type failure646 struct {
+	code int
+	body string
+}
 
-func newInspector646(t *testing.T, e *env636) *inspector646 {
-	t.Helper()
-	body, valid := templateRefusedBody(t, refusal646), e.inspector
-	i := &inspector646{}
+const (
+	refusal646  = "mcp.audience is required when hermesClient.enabled"
+	unserved646 = `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"no matches for kind \"Widget\" in version \"example.com/v1\"","reason":"Invalid","code":422}`
+)
+
+func refused646(t *testing.T) *failure646 {
+	return &failure646{http.StatusBadRequest, templateRefusedBody(t, refusal646)}
+}
+
+func (a *arm636) inspector646(first *failure646) *inspector646 {
+	a.t.Helper()
+	i, valid := &inspector646{}, a.e.inspector
+	i.failed.Store(first)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		i.calls.Add(1)
-		if !i.refuse.Load() {
+		f := i.failed.Load()
+		if f == nil {
 			http.Redirect(w, r, valid, http.StatusTemporaryRedirect)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(body))
+		w.WriteHeader(f.code)
+		_, _ = w.Write([]byte(f.body))
 	}))
-	t.Cleanup(srv.Close)
+	a.t.Cleanup(srv.Close)
 	i.url = srv.URL
-	i.refuse.Store(true)
+	a.h.chartInspectorUrl = i.url
 	return i
+}
+
+// readyStates646 counts the Ready of every state the apiserver serves until it is called.
+func (a *arm636) readyStates646() func() map[string]int {
+	a.t.Helper()
+	ctx, cancel := context.WithCancel(a.e.ctx)
+	w, err := a.e.dyn.Resource(gvr636).Namespace(a.ns).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		cancel()
+		a.t.Fatal(err)
+	}
+	stop, out := make(chan struct{}), make(chan map[string]int, 1)
+	go func() {
+		states := map[string]int{}
+		for {
+			select {
+			case ev := <-w.ResultChan():
+				if u, ok := ev.Object.(*unstructured.Unstructured); ok {
+					if r := condOf(u, "Ready"); r != nil {
+						states[string(r.Status)+"/"+r.Reason]++
+					}
+				}
+			case <-stop:
+				out <- states
+				return
+			}
+		}
+	}()
+	return func() map[string]int { close(stop); s := <-out; cancel(); return s }
+}
+
+// failedPasses646 waits until a pass that failed was recorded, and n more renders were asked for.
+func (a *arm636) failedPasses646(i *inspector646, n int32) {
+	a.t.Helper()
+	had := i.calls.Load()
+	waitUntil(a.t, "failed passes", 60*time.Second, func() bool {
+		return i.calls.Load() >= had+n && a.has646("Synced", "False/ReconcileError")
+	})
+}
+
+func (a *arm636) assert646(when string, want map[string]string) {
+	a.t.Helper()
+	for typ, w := range want {
+		if !a.has646(typ, w) {
+			a.t.Errorf("%s: %s is %+v, want %s", when, typ, condOf(a.get(), typ), w)
+		}
+	}
 }
 
 func (a *arm636) create646(status map[string]any) *unstructured.Unstructured {
@@ -85,44 +147,14 @@ func (a *arm636) conds646() string {
 func TestEnvtest_646_AFirstRenderRefusedReadsAsOnAnInstalledComposition(t *testing.T) {
 	e := start636(t)
 	a := e.arm(t, "refused", getter636{ann: map[string]string{}})
-	i := newInspector646(t, e)
-	a.h.chartInspectorUrl = i.url
-	ctx, cancel := context.WithCancel(e.ctx)
-	defer cancel()
-	w, err := e.dyn.Resource(gvr636).Namespace(a.ns).Watch(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	refusedStates := make(chan map[string]int, 1)
-	stopWatching := make(chan struct{})
-	go func() {
-		states := map[string]int{}
-		for {
-			select {
-			case ev := <-w.ResultChan():
-				if u, ok := ev.Object.(*unstructured.Unstructured); ok {
-					if r := condOf(u, "Ready"); r != nil {
-						states[string(r.Status)+"/"+r.Reason]++
-					}
-				}
-			case <-stopWatching:
-				refusedStates <- states
-				return
-			}
-		}
-	}()
+	i := a.inspector646(refused646(t))
+	readyStates := a.readyStates646()
 	a.create646(nil)
 
 	assertRefused := func(when string) {
 		t.Helper()
-		for typ, want := range map[string]string{
-			"ChartRenderable": "False/TemplateRefused", "RBACComplete": "Unknown/NotEvaluated",
-			"Ready": "False/Unavailable", "Synced": "False/ReconcileError",
-		} {
-			if !a.has646(typ, want) {
-				t.Errorf("%s: %s is %+v, want %s", when, typ, condOf(a.get(), typ), want)
-			}
-		}
+		a.assert646(when, map[string]string{"ChartRenderable": "False/TemplateRefused", "RBACComplete": "Unknown/NotEvaluated",
+			"Ready": "False/Unavailable", "Synced": "False/ReconcileError"})
 		for _, typ := range []string{"ChartRenderable", "Ready", "Synced"} {
 			if c := condOf(a.get(), typ); c != nil && !strings.Contains(c.Message, refusal646) {
 				t.Errorf("%s: %s message %q does not carry the refusal", when, typ, c.Message)
@@ -137,15 +169,13 @@ func TestEnvtest_646_AFirstRenderRefusedReadsAsOnAnInstalledComposition(t *testi
 
 	stop := a.run636()
 	// Several passes: what a later one overwrites is found. Synced is the witness of a finished one.
-	waitUntil(t, "four refused passes", 60*time.Second, func() bool { return i.calls.Load() >= 4 && a.has646("Synced", "False/ReconcileError") })
+	a.failedPasses646(i, 4)
 	first := condOf(a.get(), "Ready")
-	n := i.calls.Load()
-	waitUntil(t, "two more", 60*time.Second, func() bool { return i.calls.Load() >= n+2 })
+	a.failedPasses646(i, 2)
 	stop()
-	close(stopWatching)
 	t.Logf("SAMPLE a first render refused, after %d renders: %s", i.calls.Load(), a.conds646())
 	assertRefused("a first render refused")
-	states := <-refusedStates
+	states := readyStates()
 	t.Logf("Ready in every state served while it was refused: %v", states)
 	if len(states) != 1 || states["False/Unavailable"] == 0 {
 		t.Errorf("Ready flapped, or was never Unavailable: %v", states)
@@ -158,7 +188,7 @@ func TestEnvtest_646_AFirstRenderRefusedReadsAsOnAnInstalledComposition(t *testi
 	}
 	onCreate := conds646(conditionsOn(a.get(), "ChartRenderable", "RBACComplete", "Ready"))
 
-	i.refuse.Store(false)
+	i.failed.Store(nil)
 	stop = a.run636()
 	waitUntil(t, "the install", 120*time.Second, func() bool {
 		return a.has646("Synced", "True/ReconcileSuccess") && a.history() == "1:deployed"
@@ -176,10 +206,9 @@ func TestEnvtest_646_AFirstRenderRefusedReadsAsOnAnInstalledComposition(t *testi
 		t.Errorf("not recovered: %s", a.conds646())
 	}
 
-	i.refuse.Store(true)
-	n = i.calls.Load()
+	i.failed.Store(refused646(t))
 	stop = a.run636()
-	waitUntil(t, "the installed composition's refusal", 60*time.Second, func() bool { return i.calls.Load() >= n+2 && a.has646("Synced", "False/ReconcileError") })
+	a.failedPasses646(i, 2)
 	stop()
 	assertRefused("installed")
 	onObserve := conds646(conditionsOn(a.get(), "ChartRenderable", "RBACComplete", "Ready"))
@@ -199,14 +228,119 @@ func TestEnvtest_646_AFirstRenderRefusedReadsAsOnAnInstalledComposition(t *testi
 func TestEnvtest_646_ARefusedRenderIsNotAnInstallFailure(t *testing.T) {
 	e := start636(t)
 	a := e.arm(t, "counted", getter636{ann: map[string]string{}})
-	i := newInspector646(t, e)
-	a.h.chartInspectorUrl = i.url
+	i := a.inspector646(refused646(t))
 	a.create646(map[string]any{"installFailures": map[string]any{"count": int64(installFailingAfter - 1), "lastAt": "2026-11-23T21:00:00Z", "lastError": "x"}})
 	stop := a.run636()
-	waitUntil(t, "refused passes", 60*time.Second, func() bool { return i.calls.Load() >= 4 && a.has646("Synced", "False/ReconcileError") })
+	a.failedPasses646(i, 4)
 	stop()
 	if !a.has646("Ready", "False/Unavailable") || installFailureCount(a.get()) != installFailingAfter-1 {
 		t.Errorf("Ready %s, %d failed attempts counted", a.ready(), installFailureCount(a.get()))
+	}
+}
+
+// What is not a verdict stays converging on a first create: a kind this cluster does not serve YET, as in an
+// umbrella that installs its CRDs meanwhile. ChartRenderable says why; Ready is Creating in every state served;
+// once the kind is served it heals by itself.
+func TestEnvtest_646_AnUnservedKindStaysCreatingAndHeals(t *testing.T) {
+	e := start636(t)
+	a := e.arm(t, "unserved", getter636{ann: map[string]string{}})
+	i := a.inspector646(&failure646{http.StatusUnprocessableEntity, unserved646})
+	readyStates := a.readyStates646()
+	a.create646(nil)
+	stop := a.run636()
+	a.failedPasses646(i, 4)
+	t.Logf("SAMPLE an unserved kind: %s", a.conds646())
+	a.assert646("an unserved kind", map[string]string{"ChartRenderable": "False/UnservedKind", "RBACComplete": "Unknown/NotEvaluated",
+		"Ready": "False/Creating", "Synced": "False/ReconcileError"})
+	if r := condOf(a.get(), "Ready"); r == nil || !strings.Contains(r.Message, "no matches for kind") {
+		t.Errorf("Ready does not say why: %+v", r)
+	}
+	if states := readyStates(); len(states) != 1 || states["False/Creating"] == 0 {
+		t.Errorf("Ready in every state served: %v", states)
+	}
+	i.failed.Store(nil) // the CRD arrives
+	waitUntil(t, "the install", 120*time.Second, func() bool {
+		return a.has646("Synced", "True/ReconcileSuccess") && a.history() == "1:deployed"
+	})
+	a.assert646("healed", map[string]string{"ChartRenderable": "True/Renderable", "RBACComplete": "True/Applied"})
+	stop()
+	stop = a.run636() // the resync is an hour: a new controller observes what it finds
+	waitUntil(t, "Available", 120*time.Second, func() bool { return a.ready() == "True/Available" })
+	stop()
+}
+
+// RBAC the API server REFUSES, for real: the handler acts as an identity that may write RBAC and may not grant
+// what it does not hold, so the derived ClusterRole is an escalation. The chart renders, the RBAC is refused,
+// and that is a verdict. Granted what was missing, it heals.
+func TestEnvtest_646_RefusedRBACIsAVerdict(t *testing.T) {
+	e := start636(t)
+	a := e.arm(t, "escalation", getter636{ann: map[string]string{}})
+	i := a.inspector646(nil)
+	rules := []rbacv1.PolicyRule{
+		{APIGroups: []string{"composition.krateo.io"}, Resources: []string{"*"}, Verbs: []string{"*"}},
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"*"}},
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"*"}, Verbs: []string{"get", "list", "create", "update", "patch", "delete"}},
+	}
+	if _, err := e.kube.RbacV1().ClusterRoles().Create(e.ctx, &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "cdc-646"}, Rules: rules}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	bind := func(role string) {
+		t.Helper()
+		if _, err := e.kube.RbacV1().ClusterRoleBindings().Create(e.ctx, &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "cdc-646-" + role},
+			RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: role}, Subjects: []rbacv1.Subject{{Kind: "User", Name: "cdc-646", APIGroup: "rbac.authorization.k8s.io"}}}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bind("cdc-646")
+	a.h.kubeconfig = rest.CopyConfig(e.cfg)
+	a.h.kubeconfig.Impersonate = rest.ImpersonationConfig{UserName: "cdc-646"}
+	readyStates := a.readyStates646()
+	a.create646(nil)
+	stop := a.run636()
+	a.failedPasses646(i, 4)
+	t.Logf("SAMPLE an escalation refused: %s", a.conds646())
+	a.assert646("refused", map[string]string{"ChartRenderable": "True/Renderable", "RBACComplete": "False/ApplyFailed",
+		"Ready": "False/Unavailable", "Synced": "False/ReconcileError"})
+	if r := condOf(a.get(), "Ready"); r == nil || !strings.Contains(r.Message, "attempting to grant RBAC permissions not currently held") {
+		t.Errorf("premise: an escalation: %+v", r)
+	}
+	if states := readyStates(); len(states) != 1 || states["False/Unavailable"] == 0 {
+		t.Errorf("Ready in every state served: %v", states)
+	}
+	bind("cluster-admin")
+	waitUntil(t, "the install", 120*time.Second, func() bool {
+		return a.has646("Synced", "True/ReconcileSuccess") && a.history() == "1:deployed"
+	})
+	a.assert646("healed", map[string]string{"ChartRenderable": "True/Renderable", "RBACComplete": "True/Applied"})
+	stop()
+}
+
+// A first install that keeps failing does not read converging because the next retry met something that is not
+// a verdict: InstallFailing is kept in every state served, through a failing chart-inspector.
+func TestEnvtest_646_InstallFailingIsKeptOverANonVerdict(t *testing.T) {
+	e := start636(t)
+	a := e.arm(t, "kept", getter636{ann: map[string]string{}})
+	i := a.inspector646(&failure646{http.StatusInternalServerError, `{"message":"boom"}`})
+	a.create646(map[string]any{
+		"installFailures": map[string]any{"count": int64(installFailingAfter), "lastAt": "2026-11-23T21:00:00Z", "lastError": "hook-2 failed"},
+		"conditions":      []any{map[string]any{"type": "Ready", "status": "False", "reason": "InstallFailing", "message": "the first install has failed 3 times", "lastTransitionTime": "2026-11-24T10:00:00Z"}},
+	})
+	readyStates := a.readyStates646()
+	stop := a.run636()
+	a.failedPasses646(i, 4)
+	stop()
+	t.Logf("SAMPLE a non-verdict over InstallFailing: %s", a.conds646())
+	a.assert646("kept", map[string]string{"ChartRenderable": "False/InspectorUnavailable", "RBACComplete": "Unknown/NotEvaluated",
+		"Ready": "False/InstallFailing", "Synced": "False/ReconcileError"})
+	if states := readyStates(); len(states) != 1 || states["False/InstallFailing"] == 0 {
+		t.Errorf("Ready in every state served: %v", states)
+	}
+	r := condOf(a.get(), "Ready")
+	if r == nil || !strings.Contains(r.Message, "last error: hook-2 failed; the next retry did not start: ") || r.LastTransitionTime.UTC().Format(time.RFC3339) != "2026-11-24T10:00:00Z" {
+		t.Errorf("Ready %+v", r)
+	}
+	if n := installFailureCount(a.get()); n != installFailingAfter {
+		t.Errorf("%d failed attempts counted", n)
 	}
 }
 
@@ -246,7 +380,7 @@ func TestEnvtest_646_WhatCreateReturns(t *testing.T) {
 
 	t.Run("while being deleted", func(t *testing.T) {
 		a := e.arm(t, "deleting", getter636{ann: map[string]string{}})
-		a.h.chartInspectorUrl = newInspector646(t, e).url
+		a.inspector646(refused646(t))
 		a.create646(nil)
 		u := a.edit(func(u *unstructured.Unstructured) { u.SetFinalizers([]string{"test.krateo.io/hold"}) })
 		res, err := a.h.CreateWithResult(e.ctx, u)

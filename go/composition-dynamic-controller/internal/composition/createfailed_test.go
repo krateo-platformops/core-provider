@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +19,8 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,50 +55,105 @@ func answer646(t *testing.T, code int, body string) string {
 
 type noGVR646 struct{ pluralizer.PluralizerInterface }
 
+// A Forbidden from anywhere but the RBAC apply is not a refusal of the RBAC.
 func (noGVR646) GVKtoGVR(schema.GroupVersionKind) (schema.GroupVersionResource, error) {
-	return schema.GroupVersionResource{}, errors.New("no such kind")
+	return schema.GroupVersionResource{}, forbidden646
 }
 
-// Every way applyDerivedRBAC fails, through the real applyDerivedRBAC. The oracle is Observe: what Create
-// returns is what failObserveOnDerivedRBAC PERSISTS for the same failure on the same object, type by type,
-// with the same error. The rows also state the outcome, so the two cannot be wrong together.
-func TestCreateFailedOnDerivedRBAC_CarriesWhatObserveRecords(t *testing.T) {
+var (
+	crGR646      = schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"}
+	forbidden646 = apierrors.NewForbidden(crGR646, "x", errors.New("attempting to grant RBAC permissions not currently held"))
+	invalid646   = apierrors.NewInvalid(schema.GroupKind{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole"}, "x", nil)
+	conflict646  = apierrors.NewConflict(crGR646, "x", errors.New("modified"))
+	notFound646  = apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, "gone")
+	teapot646    = &apierrors.StatusError{ErrStatus: metav1.Status{Status: "Failure", Code: 403, Reason: "SomethingNew", Message: "a reason nobody classified"}}
+	renders646   = `[{"group":"","version":"v1","resource":"configmaps","verbs":["*"]}]`
+	// chart-inspector's own failure carrying a template's words: what is read is its marker, not the text.
+	unmarked646 = `{"message":"execution error at (x): audience is required","reason":"BadRequest","code":400}`
+)
+
+func terminating646() error {
+	err := apierrors.NewForbidden(schema.GroupResource{Resource: "roles"}, "x", errors.New("being terminated"))
+	err.ErrStatus.Details.Causes = append(err.ErrStatus.Details.Causes, metav1.StatusCause{Type: corev1.NamespaceTerminatingCause})
+	return err
+}
+
+// Every way applyDerivedRBAC fails, through the real applyDerivedRBAC, against what Observe persists for the
+// same failure on the same object. ChartRenderable, RBACComplete and the error are always Observe's. Ready is
+// Observe's exactly where the failure is a verdict, or kept inside the grace; otherwise Observe says
+// Unavailable and Create returns none (the runtime's Creating stands), or the InstallFailing it keeps. Both
+// sides are asserted, and the rows state the outcome, so the two cannot be wrong together.
+func TestCreateFailedOnDerivedRBAC_AgainstObserve(t *testing.T) {
 	at := func(c metav1.Condition, age time.Duration) metav1.Condition {
 		c.LastTransitionTime = metav1.NewTime(time.Now().Add(-age).Truncate(time.Second))
 		return c
 	}
 	creating := conditionreason.Creating.WithMessage("an earlier failure")
+	unavailable := conditionreason.Unavailable.WithMessage("a refusal, since fixed")
+	failing := conditionreason.InstallFailing.WithMessage("the first install has failed 3 times")
 	inspectorDown := conditionreason.ChartInspectorUnavailable.WithMessage("could not reach chart-inspector")
+	renders := answer646(t, 200, renders646)
+	const notEvaluated, down = "Unknown/NotEvaluated", "False/InspectorUnavailable"
 	for _, tc := range []struct {
-		name     string
-		url      string
-		plural   pluralizer.PluralizerInterface
-		stored   []metav1.Condition
-		want     map[string]string // type -> status/reason
-		readyHas string
-		errHas   string
+		name      string
+		url       string
+		apply     error // what every RBAC write gets
+		plural    pluralizer.PluralizerInterface
+		stored    []metav1.Condition
+		counted   int64
+		chart     string
+		rbac      string
+		ready     string // "": none is returned
+		asObserve bool   // Ready is what Observe records
+		readyHas  string
+		errHas    string
 	}{
+		// VERDICTS.
 		{name: "the chart refused the values", url: answer646(t, 400, templateRefusedBody(t, "audience is required")),
-			want: map[string]string{"ChartRenderable": "False/TemplateRefused", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "audience is required"},
-		{name: "refused, over a stored InstallFailing: as Observe", url: answer646(t, 400, templateRefusedBody(t, "audience is required")),
-			stored: []metav1.Condition{conditionreason.InstallFailing.WithMessage("the first install has failed 3 times")},
-			want:   map[string]string{"ChartRenderable": "False/TemplateRefused", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "audience is required"},
+			chart: "False/TemplateRefused", rbac: notEvaluated, ready: "False/Unavailable", asObserve: true, readyHas: "audience is required"},
 		{name: "the values break the schema", url: answer646(t, 400, schemaViolationBody(t, "replicas must be an integer")),
-			want: map[string]string{"ChartRenderable": "False/ValuesSchemaViolation", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "replicas must be an integer"},
+			chart: "False/ValuesSchemaViolation", rbac: notEvaluated, ready: "False/Unavailable", asObserve: true, readyHas: "replicas must be an integer"},
+		{name: "a verdict over InstallFailing: as Observe", url: answer646(t, 400, templateRefusedBody(t, "audience is required")), stored: []metav1.Condition{failing}, counted: 3,
+			chart: "False/TemplateRefused", rbac: notEvaluated, ready: "False/Unavailable", asObserve: true, readyHas: "audience is required"},
+		{name: "RBAC forbidden, as an escalation is", url: renders, apply: forbidden646,
+			chart: "True/Renderable", rbac: "False/ApplyFailed", ready: "False/Unavailable", asObserve: true, readyHas: "not currently held"},
+		{name: "RBAC invalid", url: renders, apply: invalid646,
+			chart: "True/Renderable", rbac: "False/ApplyFailed", ready: "False/Unavailable", asObserve: true, readyHas: "is invalid"},
+		// NOT VERDICTS.
 		{name: "an unserved kind", url: answer646(t, 422, `{"message":"no matches for kind","reason":"Invalid","code":422}`),
-			want: map[string]string{"ChartRenderable": "False/UnservedKind", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "no matches for kind"},
-		{name: "chart-inspector failed", url: answer646(t, 500, `{"message":"boom"}`),
-			want: map[string]string{"ChartRenderable": "False/InspectorUnavailable", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "boom"},
-		{name: "the RBAC apply was refused: it rendered", url: answer646(t, 200, `[{"group":"","version":"v1","resource":"configmaps","verbs":["*"]}]`),
-			want: map[string]string{"ChartRenderable": "True/Renderable", "RBACComplete": "False/ApplyFailed", "Ready": "False/Unavailable"}, readyHas: "applying rbac"},
-		{name: "before the render: nothing computed but Ready", url: "http://127.0.0.1:9", plural: noGVR646{},
-			want: map[string]string{"Ready": "False/Unavailable"}, readyHas: "converting GVK to GVR"},
-		{name: "no answer, first create: no Ready to keep", url: refusedURL(),
-			want: map[string]string{"ChartRenderable": "False/InspectorUnavailable", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "connection refused"},
+			chart: "False/UnservedKind", rbac: notEvaluated},
+		{name: "an unmarked 400", url: answer646(t, 400, unmarked646), chart: "False/InspectorRejected", rbac: notEvaluated},
+		{name: "another 4xx", url: answer646(t, 404, "404 page not found"), chart: "False/InspectorRejected", rbac: notEvaluated},
+		{name: "chart-inspector failed", url: answer646(t, 500, `{"message":"boom"}`), chart: down, rbac: notEvaluated},
+		{name: "an answer outside the protocol", url: answer646(t, 302, ""), chart: down, rbac: notEvaluated},
+		{name: "an answer that cannot be read", url: answer646(t, 200, "<html>"), chart: down, rbac: notEvaluated},
+		{name: "RBAC: a conflict", url: renders, apply: conflict646, chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: a timeout", url: renders, apply: apierrors.NewTimeoutError("slow", 1), chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: a deadline", url: renders, apply: context.DeadlineExceeded, chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: a 5xx", url: renders, apply: apierrors.NewInternalError(errors.New("etcd")), chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: the network", url: renders, apply: errors.New("connection reset by peer"), chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: no such namespace", url: renders, apply: notFound646, chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "RBAC: a reason nobody classified, at 403", url: renders, apply: teapot646, chart: "True/Renderable", rbac: "False/ApplyFailed"},
+		{name: "before the render, a Forbidden resolving the kind", url: "http://127.0.0.1:9", plural: noGVR646{}},
+		// KEPT: the grace.
+		{name: "no answer, first create: no Ready to keep", url: refusedURL(), chart: down, rbac: notEvaluated},
 		{name: "no answer, inside the grace: the last Ready is kept", url: refusedURL(), stored: []metav1.Condition{creating},
-			want: map[string]string{"ChartRenderable": "False/InspectorUnavailable", "Ready": "False/Creating"}, readyHas: "an earlier failure", errHas: "Ready is kept as last assessed until"},
-		{name: "no answer, the grace over", url: refusedURL(), stored: []metav1.Condition{creating, at(inspectorDown, 6*time.Minute)},
-			want: map[string]string{"ChartRenderable": "False/InspectorUnavailable", "RBACComplete": "Unknown/NotEvaluated", "Ready": "False/Unavailable"}, readyHas: "connection refused"},
+			chart: down, ready: "False/Creating", asObserve: true, readyHas: "an earlier failure", errHas: "Ready is kept as last assessed until"},
+		{name: "no answer, inside the grace: Unavailable is kept", url: refusedURL(), stored: []metav1.Condition{unavailable}, counted: 3,
+			chart: down, ready: "False/Unavailable", asObserve: true, readyHas: "since fixed", errHas: "Ready is kept as last assessed until"},
+		{name: "no answer, the grace over", url: refusedURL(), stored: []metav1.Condition{unavailable, at(inspectorDown, 6*time.Minute)}, chart: down, rbac: notEvaluated},
+		// KEPT: InstallFailing.
+		{name: "an unserved kind over InstallFailing", url: answer646(t, 422, `{"message":"no matches for kind"}`), stored: []metav1.Condition{failing}, counted: 3,
+			chart: "False/UnservedKind", rbac: notEvaluated, ready: "False/InstallFailing", readyHas: "the first install has failed 3 times (0 automatic retries so far); last error: hook failed; the next retry did not start: generating RBAC"},
+		{name: "a conflict over InstallFailing", url: renders, apply: conflict646, stored: []metav1.Condition{failing}, counted: 3,
+			chart: "True/Renderable", rbac: "False/ApplyFailed", ready: "False/InstallFailing", readyHas: "the next retry did not start: applying rbac"},
+		{name: "no answer, the grace over, over InstallFailing", url: refusedURL(), stored: []metav1.Condition{failing, at(inspectorDown, 6*time.Minute)}, counted: 3,
+			chart: down, rbac: notEvaluated, ready: "False/InstallFailing", readyHas: "the next retry did not start"},
+		{name: "counted as failing, Ready since a refusal that was fixed", url: answer646(t, 500, "boom"), stored: []metav1.Condition{unavailable}, counted: 4,
+			chart: down, rbac: notEvaluated, ready: "False/InstallFailing", readyHas: "failed 4 times"},
+		{name: "InstallFailing stored, its count not", url: answer646(t, 500, "boom"), stored: []metav1.Condition{failing}, counted: 2,
+			chart: down, rbac: notEvaluated, ready: "False/InstallFailing", readyHas: failing.Message},
+		{name: "control: two failures are Creating", url: answer646(t, 500, "boom"), stored: []metav1.Condition{creating}, counted: 2, chart: down, rbac: notEvaluated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, now := context.Background(), time.Now()
@@ -102,14 +162,17 @@ func TestCreateFailedOnDerivedRBAC_CarriesWhatObserveRecords(t *testing.T) {
 				if err := unstructuredtools.SetConditions(mg, tc.stored...); err != nil {
 					t.Fatal(err)
 				}
+				if tc.counted > 0 {
+					_ = unstructured.SetNestedMap(mg.Object, map[string]any{"count": tc.counted, "lastAt": "x", "lastError": "hook failed"}, "status", "installFailures")
+				}
 				var plural pluralizer.PluralizerInterface = stubPluralizerForRBAC{}
 				if tc.plural != nil {
 					plural = tc.plural
 				}
 				h := &handler{pluralizer: plural, chartInspectorUrl: tc.url, saName: "cdc", saNamespace: "krateo-system"}
-				refusing := fakeDynWith() // any RBAC write is refused
+				refusing := fakeDynWith()
 				refusing.PrependReactor("*", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
-					return a.GetVerb() != "get", nil, errors.New("forbidden")
+					return tc.apply != nil && a.GetVerb() != "get", nil, tc.apply
 				})
 				_, err := h.applyDerivedRBAC(ctx, mg, pkgFor577, refusing, "portal-abcde")
 				if err == nil {
@@ -126,32 +189,113 @@ func TestCreateFailedOnDerivedRBAC_CarriesWhatObserveRecords(t *testing.T) {
 			if !controller.IsReadyAssessed(oerr) || err.Error() != oerr.Error() {
 				t.Errorf("err\n create  %v\n observe %v", err, oerr)
 			}
-			have, want := conds646(got), conds646(conditionsOn(storedPortal(t, dyn), "ChartRenderable", "RBACComplete", "Ready"))
-			if len(have) != len(got) || fmt.Sprint(have) != fmt.Sprint(want) {
-				t.Errorf("conditions\n create  %v\n observe %v", have, want)
-			}
-			if len(got) != len(tc.want) {
-				t.Errorf("%d conditions, want %d: %v", len(got), len(tc.want), have)
-			}
-			for _, c := range got {
-				if string(c.Status)+"/"+c.Reason != tc.want[c.Type] {
-					t.Errorf("%s, want %s", cond646(c), tc.want[c.Type])
-				}
-				if c.Type == condition.TypeReady && !strings.Contains(c.Message, tc.readyHas) {
-					t.Errorf("Ready message %q lacks %q", c.Message, tc.readyHas)
-				}
-			}
 			if !strings.Contains(err.Error(), tc.errHas) {
 				t.Errorf("err %q lacks %q", err, tc.errHas)
 			}
-			if n := installFailureCount(mg); n != 0 {
-				t.Errorf("counted as %d failed install attempts", n)
+			have, obs := conds646(got), conds646(unstructuredtools.GetConditions(storedPortal(t, dyn)))
+			if len(have) != len(got) {
+				t.Errorf("a type returned twice: %v", got)
+			}
+			for _, typ := range []string{"ChartRenderable", "RBACComplete"} {
+				if have[typ] != obs[typ] {
+					t.Errorf("%s\n create  %s\n observe %s", typ, have[typ], obs[typ])
+				}
+			}
+			for typ, want := range map[string]string{"ChartRenderable": tc.chart, "RBACComplete": tc.rbac, "Ready": tc.ready} {
+				if have[typ] != "" && want == "" || want != "" && !strings.HasPrefix(have[typ], typ+"="+want+" ") {
+					t.Errorf("%s: returned %q, want %q", typ, have[typ], want)
+				}
+			}
+			if !strings.Contains(have["Ready"], tc.readyHas) {
+				t.Errorf("Ready %q lacks %q", have["Ready"], tc.readyHas)
+			}
+			switch {
+			case tc.asObserve && have["Ready"] != obs["Ready"]:
+				t.Errorf("Ready\n create  %s\n observe %s", have["Ready"], obs["Ready"])
+			case !tc.asObserve && !strings.HasPrefix(obs["Ready"], "Ready=False/Unavailable "):
+				t.Errorf("Observe is said to differ, and records %q", obs["Ready"])
+			}
+			if n := installFailureCount(mg); n != tc.counted {
+				t.Errorf("%d failed install attempts counted, had %d", n, tc.counted)
 			}
 		})
 	}
 }
 
-// The one difference from Observe: Create runs because the release is ABSENT, so a stored Ready=True is not
+// One refused object makes the apply refused, whatever failed beside it, in any order and at any depth. ApplyRBAC
+// returns its first failure today, so this is what holds if it ever returns them all.
+func TestRBACRefused_Mixed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"forbidden, then a conflict", errors.Join(forbidden646, conflict646), true},
+		{"a conflict, then forbidden", errors.Join(conflict646, forbidden646), true},
+		{"wrapped, a conflict, then invalid", fmt.Errorf("x: %w", errors.Join(conflict646, fmt.Errorf("y: %w", invalid646))), true},
+		{"a conflict and a missing namespace", errors.Join(conflict646, notFound646), false},
+		{"a namespace being deleted", terminating646(), false},
+		{"a namespace being deleted, and forbidden", errors.Join(terminating646(), forbidden646), true},
+		{"a 403 with a reason nobody classified", teapot646, false},
+	} {
+		if got := rbacRefused(tc.err); got != tc.want {
+			t.Errorf("%s: refused %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Every ChartRenderable reason is classified HERE, by name: one added to conditionreason and not to this table
+// fails, whatever the code does with it. Read from the source and from the rendered table, so a reason is not
+// missed by being declared and not listed.
+func TestChartVerdict_EveryReasonIsClassified(t *testing.T) {
+	classified := map[string]bool{
+		"Renderable":            false, // not a failure
+		"TemplateRefused":       true,  // the chart's own templates refused these values
+		"ValuesSchemaViolation": true,  // the values do not satisfy the chart's schema
+		"UnservedKind":          false, // resolves itself once the CRD is served
+		"InspectorRejected":     false, // the cdc and chart-inspector disagree; says nothing of the chart
+		"InspectorUnavailable":  false, // chart-inspector failed, or gave no answer
+	}
+	seen := map[string]bool{}
+	for _, r := range conditionreason.Table() {
+		if r.Type() != conditionreason.TypeChartRenderable {
+			continue
+		}
+		seen[r.String()] = true
+		if want, ok := classified[r.String()]; !ok {
+			t.Errorf("ChartRenderable reason %s is not classified: is it a verdict on the chart or the values?", r)
+		} else if got := chartVerdict(r); got != want {
+			t.Errorf("%s: verdict %v, want %v", r, got, want)
+		}
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "../conditionreason/conditionreason.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if f, ok := call.Fun.(*ast.Ident); !ok || f.Name != "on" {
+			return true
+		}
+		if typ, ok := call.Args[0].(*ast.Ident); ok && typ.Name == "TypeChartRenderable" {
+			declared++
+		}
+		return true
+	})
+	if declared != len(classified) || len(seen) != len(classified) {
+		t.Errorf("%d reasons classified, %d declared, %d in the table (%v)", len(classified), declared, len(seen), seen)
+	}
+	if chartVerdict(conditionreason.Reason{}) {
+		t.Error("an unknown reason is a verdict")
+	}
+}
+
+// Create runs because the release is ABSENT, so a stored Ready=True is not
 // kept while chart-inspector gives no answer. CONTROL: the same object on Observe's path is kept.
 func TestCreateFailedOnDerivedRBAC_AStoredTrueIsNotKept(t *testing.T) {
 	mg := fireworkFor577(t, condition.Available())
@@ -160,7 +304,7 @@ func TestCreateFailedOnDerivedRBAC_AStoredTrueIsNotKept(t *testing.T) {
 		t.Fatal("control: Observe would not keep it, so this tests nothing")
 	}
 	conds, err := createFailedOnDerivedRBAC(context.Background(), mg, cause, time.Now())
-	if got := conds646(conds)["Ready"]; !strings.HasPrefix(got, "Ready=False/Unavailable") || err.Error() != cause.Error() {
+	if got := conds646(conds)["Ready"]; got != "" || err.Error() != cause.Error() {
 		t.Errorf("Ready %s, err %v", got, err)
 	}
 	if got := conds646(conds)["RBACComplete"]; !strings.HasPrefix(got, "RBACComplete=Unknown/NotEvaluated") {

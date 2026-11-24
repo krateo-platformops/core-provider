@@ -2037,7 +2037,7 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 	}
 	// Written is reported on the error path too: an apply can write some objects and then fail.
 	if applyErr != nil {
-		return report.Written, fmt.Errorf("applying rbac: %w", applyErr)
+		return report.Written, &rbacApplyFailed{err: applyErr}
 	}
 	return report.Written, nil
 }
