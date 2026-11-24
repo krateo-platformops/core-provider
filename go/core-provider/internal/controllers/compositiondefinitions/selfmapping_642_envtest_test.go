@@ -876,7 +876,17 @@ func TestEnvtest_642_UnreadableMappingIsNotMissing(t *testing.T) {
 					t.Errorf("a real write was sent: %q", w)
 				}
 			}
-			b.wantCond("unreadable", "absent")
+			b.wantCond("unreadable", "Unknown/NotObserved")
+			// Only the mapping whose read failed is blamed for it: one entry per mapping, joined by "; ".
+			blamed := ""
+			for _, entry := range strings.Split(b.message("AuthnMappingApplied"), "; ") {
+				if strings.Contains(entry, "reads refused by the test") {
+					blamed += map[bool]string{true: "controller's ", false: "own "}[strings.HasPrefix(entry, "the authn mapping of this definition's controller")]
+				}
+			}
+			if want := map[bool]string{true: "own ", false: "controller's "}[strings.HasPrefix(tc.arm, "core-provider's own")]; blamed != want {
+				t.Errorf("message %q blames %q, want %q", b.message("AuthnMappingApplied"), blamed, want)
+			}
 			b.settle(2)
 			b.wantCond("after", "True/Applied")
 		})

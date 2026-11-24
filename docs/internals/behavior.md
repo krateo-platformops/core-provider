@@ -195,8 +195,9 @@ then `deploy.Undeploy`. For remote targets, discovery runs against the **spoke**
    **`AuthnMappingApplied`** is computed from what was read of the two mappings on that
    pass: `True/Applied` when both authorize, `False/AuthnNotInstalled` when a cluster one
    of them belongs on serves no mapping kind (the message names the cluster; nothing
-   fails because of it, and every pass looks again), and no condition when one could not
-   be read or is missing while the kind is served.
+   fails because of it, and every pass looks again), `False/MappingMissing` when the kind is
+   served and one is absent or does not authorize its ServiceAccount, and
+   `Unknown/NotObserved` when one could not be read. No condition means no `apiRef`.
 7. **`apiRef` read-set RBAC** — when `apiRefRBAC` is enabled: snowplow's
    `GET /rbac` enumerates the (group,version,resource,namespace,verb) rows the
    RESTAction's in-cluster calls touch; `restactionrbac.go` turns them into a

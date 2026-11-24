@@ -23,6 +23,8 @@ func TestRecordAuthnMappingApplied(t *testing.T) {
 	read := func(s deploy.MappingState) mappingRead { return mappingRead{state: s} }
 	unreadable := mappingRead{err: errors.New("get refused")}
 	const applied, absent, uninstalled = "True/Applied", "absent", "False/AuthnNotInstalled"
+	const gone, unknown = "False/MappingMissing", "Unknown/NotObserved"
+	const controllerGone, selfGone = "the authn mapping of this definition's controller, on KubernetesTarget apps/spoke-1, is absent", "core-provider's own authn mapping, on the management cluster, is absent"
 	const spokeMsg, selfMsg = "KubernetesTarget apps/spoke-1 serves no", "core-provider has no authn mapping of its own"
 
 	for name, tc := range map[string]struct {
@@ -32,16 +34,19 @@ func TestRecordAuthnMappingApplied(t *testing.T) {
 	}{
 		"both present":                                      {read(present), read(present), applied, "", ""},
 		"no self identity configured":                       {read(present), read(notNeeded), applied, "", ""},
-		"the controller's missing":                          {read(missing), read(present), absent, "", ""},
-		"core-provider's own missing":                       {read(present), read(missing), absent, "", ""},
-		"the controller's unreadable":                       {unreadable, read(present), absent, "", ""},
-		"core-provider's own unreadable":                    {read(present), unreadable, absent, "", ""},
-		"an unreadable one whose state also says installed": {mappingRead{state: present, err: errors.New("x")}, read(present), absent, "", ""},
-		"an error beside notInstalled is not notInstalled":  {read(present), mappingRead{state: notInstalled, err: errors.New("x")}, absent, "", ""},
+		"the controller's missing":                          {read(missing), read(present), gone, controllerGone, selfGone},
+		"core-provider's own missing":                       {read(present), read(missing), gone, selfGone, controllerGone},
+		"the controller's unreadable":                       {unreadable, read(present), unknown, "controller, on KubernetesTarget apps/spoke-1, could not be read: get refused", "own"},
+		"core-provider's own unreadable":                    {read(present), unreadable, unknown, "core-provider's own authn mapping, on the management cluster, could not be read: get refused", "controller,"},
+		"an unreadable one whose state also says installed": {mappingRead{state: present, err: errors.New("x")}, read(present), unknown, "could not be read: x", ""},
+		"an error beside notInstalled is not notInstalled":  {read(present), mappingRead{state: notInstalled, err: errors.New("x")}, unknown, "could not be read: x", ""},
 		"target without authn":                              {read(notInstalled), read(present), uninstalled, spokeMsg, selfMsg},
 		"hub without authn":                                 {read(present), read(notInstalled), uninstalled, selfMsg, spokeMsg},
 		"neither has authn":                                 {read(notInstalled), read(notInstalled), uninstalled, spokeMsg, ""},
 		"known absent wins over unreadable":                 {unreadable, read(notInstalled), uninstalled, selfMsg, ""},
+		"controller unreadable, own missing: the known one": {unreadable, read(missing), gone, selfGone, "could not be read"},
+		"both missing":                                      {read(missing), read(missing), gone, selfGone, ""},
+		"a state this does not know":                        {mappingRead{state: "other"}, read(present), unknown, "not known", ""},
 		"known absent wins over missing":                    {read(notInstalled), read(missing), uninstalled, spokeMsg, ""},
 	} {
 		// From both prior verdicts: a stale one must not survive a read that does not support it.

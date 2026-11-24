@@ -2,6 +2,7 @@ package compositiondefinitions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,6 +54,10 @@ type mappingRead struct {
 	err   error
 }
 
+// errMappingNotRead is the controller's mapping on a pass that stops before reading it, because
+// core-provider's own could not be ensured: unknown, and the failure is not its own.
+var errMappingNotRead = errors.New("the pass stopped before reading it")
+
 // authorizes: the mapping is there, or there is none to be.
 func (r mappingRead) authorizes() bool {
 	return r.err == nil && (r.state == deploy.MappingPresent || r.state == deploy.MappingNotNeeded)
@@ -84,36 +89,54 @@ const conditionTypeAuthnMappingApplied = cdreason.TypeAuthnMappingApplied
 //   - True/Applied only when both were read and both authorize;
 //   - False/AuthnNotInstalled when a cluster a mapping belongs on does not serve the kind, naming the
 //     cluster and what waits on it. It stands whatever the other read said: it is known;
-//   - no condition otherwise: a mapping that could not be read, or one that is absent while the kind is
-//     served. Neither is Applied, and neither is authn not being installed, the only two reasons this
-//     type has. Both are transient where core-provider may act: an unreadable mapping fails the pass
-//     and is retried, an absent one is written (core-provider's own in the same pass, the controller's
-//     by the Update the pass asks for). Removing rather than keeping the last one: a kept True would
-//     be a claim no read of this pass supports.
+//   - False/MappingMissing when the kind is served and a mapping is absent or does not authorize. Also
+//     known, so it stands beside a read that failed;
+//   - Unknown/NotObserved otherwise: one of them could not be read, and neither is known to be missing.
+//
+// Never the last one kept: a True would be a claim no read of this pass supports. And never absent, which
+// says the definition has no apiRef.
 func recordAuthnMappingApplied(cr *compositiondefinitionsv1alpha1.CompositionDefinition, controller, self mappingRead) {
 	if apiRefName(cr) == "" {
 		removeCondition(cr, conditionTypeAuthnMappingApplied)
 		return
 	}
 	const kind = "serviceaccounts.serviceaccount.authn.krateo.io"
-	var missing []string
+	var uninstalled, absent, unread []string
 	if controller.notInstalled() {
-		missing = append(missing, deployTargetDescription(cr)+" serves no "+kind+", "+
+		uninstalled = append(uninstalled, deployTargetDescription(cr)+" serves no "+kind+", "+
 			"so this definition's controller has no authn mapping there and cannot obtain service tokens: "+
 			"its compositions report ApiResolved=False/AuthnUnreachable until authn is installed on that cluster")
 	}
 	if self.notInstalled() {
-		missing = append(missing, "the management cluster serves no "+kind+", "+
+		uninstalled = append(uninstalled, "the management cluster serves no "+kind+", "+
 			"so core-provider has no authn mapping of its own and cannot resolve this definition's apiRef: "+
 			"it is waiting for authn to be installed there, and looks again on every reconcile")
 	}
+	for _, m := range []struct {
+		read mappingRead
+		what string
+	}{
+		{controller, "the authn mapping of this definition's controller, on " + deployTargetDescription(cr)},
+		{self, "core-provider's own authn mapping, on the management cluster"},
+	} {
+		switch {
+		case m.read.err != nil:
+			unread = append(unread, m.what+", could not be read: "+m.read.err.Error())
+		case m.read.state == deploy.MappingMissing:
+			absent = append(absent, m.what+", is absent or does not authorize its ServiceAccount")
+		}
+	}
 	switch {
-	case len(missing) > 0:
-		cr.SetConditions(cdreason.AuthnNotInstalled.WithMessage(strings.Join(missing, "; ")))
+	case len(uninstalled) > 0:
+		cr.SetConditions(cdreason.AuthnNotInstalled.WithMessage(strings.Join(uninstalled, "; ")))
+	case len(absent) > 0:
+		cr.SetConditions(cdreason.AuthnMappingMissing.WithMessage(strings.Join(absent, "; ")))
+	case len(unread) > 0:
+		cr.SetConditions(cdreason.AuthnMappingNotObserved.WithMessage(strings.Join(unread, "; ")))
 	case controller.authorizes() && self.authorizes():
 		cr.SetConditions(cdreason.AuthnMappingApplied.Condition())
-	default:
-		removeCondition(cr, conditionTypeAuthnMappingApplied)
+	default: // a state this does not know: never Applied
+		cr.SetConditions(cdreason.AuthnMappingNotObserved.WithMessage("the mappings were read in a state that is not known"))
 	}
 }
 

@@ -1231,12 +1231,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// above; a definition whose policy or a pause forbids acting writes nothing.
 	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, observeMayWriteSelfMapping(cr))
 	authnSupport, aerr := e.authnSupport(ctx, cr)
-	if aerr == nil {
-		aerr = selfMapping.err
-	}
 	if aerr != nil {
 		recordAuthnMappingApplied(cr, mappingRead{err: aerr}, selfMapping)
 		return reconciler.ExternalObservation{}, aerr
+	}
+	if selfMapping.err != nil {
+		recordAuthnMappingApplied(cr, mappingRead{err: errMappingNotRead}, selfMapping)
+		return reconciler.ExternalObservation{}, selfMapping.err
 	}
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
@@ -1692,7 +1693,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	// relocation below, so a mapping that cannot be ensured stops nothing.
 	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, true)
 	if selfMapping.err != nil {
-		recordAuthnMappingApplied(cr, mappingRead{err: selfMapping.err}, selfMapping)
+		recordAuthnMappingApplied(cr, mappingRead{err: errMappingNotRead}, selfMapping)
 		return selfMapping.err
 	}
 
@@ -2104,7 +2105,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	// relocation below, so a mapping that cannot be ensured stops nothing.
 	selfMapping := e.ensureSelfAuthnMapping(ctx, cr, true)
 	if selfMapping.err != nil {
-		recordAuthnMappingApplied(cr, mappingRead{err: selfMapping.err}, selfMapping)
+		recordAuthnMappingApplied(cr, mappingRead{err: errMappingNotRead}, selfMapping)
 		return gvr, selfMapping.err
 	}
 
