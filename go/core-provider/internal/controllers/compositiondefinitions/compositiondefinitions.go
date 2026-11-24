@@ -1263,6 +1263,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
 		Pool:                   poolOf(cr),
+		Pools:                  e.poolOptions(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -1314,6 +1315,23 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			ResourceExists:   true,
 			ResourceUpToDate: false,
 		}, nil
+	}
+
+	// The pool is in no definition's digest, so it is compared here (#652): this controller's own index
+	// entry, its env ConfigMap's mark, and the pool's objects. Update repairs all of them.
+	if p := poolOf(cr); p != "" && opts.Pools != nil {
+		why, err := deploy.PoolDrift(ctx, *opts.Pools, p, gvr)
+		if err != nil {
+			return reconciler.ExternalObservation{}, err
+		}
+		if why != "" {
+			log.Debug("The controller's pool is not current", "gvr", gvr.String(), "why", why)
+			markUpdatePending(cr, why)
+			return reconciler.ExternalObservation{
+				ResourceExists:   true,
+				ResourceUpToDate: false,
+			}, nil
+		}
 	}
 
 	// The digest covers what is RENDERED for the controller's authn mapping, not the live object (#251,
@@ -1731,6 +1749,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
 		Pool:                   poolOf(cr),
+		Pools:                  e.poolOptions(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -1758,8 +1777,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if err != nil {
 		return err
 	}
-	// The pools this controller touches, recomputed from the live definitions (§5c Lifecycle).
-	if err := e.reconcilePools(ctx, cr, gvr); err != nil {
+	// Deploy put this controller in its pool; a pool it was in before it was recreated may be empty now.
+	if err := e.reconcilePools(ctx, cr, nil); err != nil {
 		return err
 	}
 
@@ -1902,6 +1921,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if err != nil {
 		return err
 	}
+	// The pools this Kind's controllers run in before this pass moves any of them (reconcilePools, below).
+	poolsBefore, err := e.poolsOfKind(ctx, cr, cr.Status.CurrentGVR())
+	if err != nil {
+		return err
+	}
 	var gvr schema.GroupVersionResource
 	if owner != nil {
 		gvr, err = e.yieldController(ctx, cr, gvk, owner, log)
@@ -1976,7 +2000,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					continue
 				}
 				if err := e.retireController(ctx, cr, (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
-					oldGVR, gvr, currentControllerNamespace(cr, owner), log); err != nil {
+					oldGVR, gvr, owner, log); err != nil {
 					return err
 				}
 			}
@@ -2026,7 +2050,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// the Deployment LIST this costs is not paid per reconcile across 68 controllers.
 	reclaimed, failed, kept, lerr := e.reclaimLeakedControllers(ctx, gvk, gvr, cr.Name, cr.Namespace, controllerPlacements(cr),
 		func(ctx context.Context, retired schema.GroupVersionResource) error {
-			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, currentControllerNamespace(cr, owner), log)
+			return e.retireController(ctx, cr, cr.Spec.Chart.DeepCopy(), retired, gvr, owner, log)
 		})
 	switch {
 	case lerr != nil:
@@ -2054,6 +2078,12 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	sweep, serr := e.sweepDanglingControllerRBAC(ctx, gvr, controllerPlacements(cr), false)
 	msg, kv := danglingSweepLogLine(danglingPhaseUpdate, gvr.Resource, sweep, serr)
 	log.Info(msg, kv...)
+
+	// The pools, once every controller this pass deploys or retires is in its place. Before the status
+	// below, so a failure leaves the old version in it and the whole step is run again.
+	if err := e.reconcilePools(ctx, cr, poolsBefore); err != nil {
+		return err
+	}
 
 	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
 	// `crd`: the VersionInfo projection keeps only versions present in the CRD it is given, so feeding
@@ -2143,6 +2173,7 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		Spec:                   cr.Spec.Chart.DeepCopy(),
 		Controller:             cr.Spec.Controller.DeepCopy(),
 		Pool:                   poolOf(cr),
+		Pools:                  e.poolOptions(cr),
 		DeploymentTemplatePath: CDCtemplateDeploymentPath,
 		ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 		JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
@@ -2170,11 +2201,6 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 	if err != nil {
 		return gvr, fmt.Errorf("error deploying dynamic controller: %w", err)
 	}
-	// The pools this controller touches, recomputed from the live definitions (§5c Lifecycle).
-	if err := e.reconcilePools(ctx, cr, gvr); err != nil {
-		return gvr, err
-	}
-
 	cr.Status.Digest = dig
 
 	log.Debug("Dynamic Controller successfully updated",
@@ -2450,6 +2476,11 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			log.Debug("Deleting CRD", "gvk", gvk.String(), "remote", remote)
 		}
 
+		poolsBefore, err := e.poolsOfKind(ctx, cr, gvr)
+		if err != nil {
+			return err
+		}
+
 		// Retire any coexisting OLD-version controllers first (Manual/Paused UpgradePolicy can leave
 		// more than one version's controller running). Their per-version-named Deployment/RBAC/Service
 		// would otherwise be orphaned once the CRD is removed below. Best-effort + SkipCRD (the CRD is
@@ -2496,7 +2527,11 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 				JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 				AuthnNamespace:         AuthnNamespace,
-			}); uerr != nil && !errors.Is(uerr, deploy.ErrCompositionStillExist) {
+				LocalPools:             !remote,
+			}); errors.Is(uerr, deploy.ErrPoolMemberNotDrained) {
+				// Not best effort: its pool may still be running it, and what follows removes the CRD.
+				return uerr
+			} else if uerr != nil && !errors.Is(uerr, deploy.ErrCompositionStillExist) {
 				log.Debug("Best-effort retire of coexisting old-version controller on delete failed", "version", vi.Version, "error", uerr.Error())
 			}
 		}
@@ -2529,6 +2564,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 			JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 			AuthnNamespace:         AuthnNamespace,
+			LocalPools:             !remote,
 		}
 
 		err = deploy.Undeploy(ctx, e.kube, opts)
@@ -2549,9 +2585,9 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		if err := e.sweepOnDelete(ctx, gvr, controllerPlacements(cr), skipCRD, log); err != nil {
 			return err
 		}
-		// A member leaving with its definition: its pool is recomputed without it, and deleted when it
-		// was the last (§5c Lifecycle). cr carries its deletion timestamp, so poolMembers excludes it.
-		if err := e.reconcilePools(ctx, cr, gvr); err != nil {
+		// A member leaving with its definition: Undeploy stopped it and took it out of its pool, which is
+		// deleted here when it was the last (§5c Lifecycle).
+		if err := e.reconcilePools(ctx, cr, poolsBefore); err != nil {
 			return err
 		}
 	} else {

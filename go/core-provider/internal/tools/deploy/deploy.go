@@ -80,7 +80,11 @@ type UndeployOptions struct {
 	// deploy is removed on undeploy. AuthnNamespace is the authn operator namespace it lives in.
 	ApiRefName     string
 	AuthnNamespace string
-	// DrainTimeout bounds how long Undeploy waits for the retiring controller's pod to disappear
+	// LocalPools says ControllerNamespace may hold pools (a local definition). Undeploy then stops a
+	// controller a pool runs, and waits for its ownership Lease, before removing what it runs with.
+	LocalPools bool
+	// DrainTimeout bounds how long Undeploy waits for the retiring controller's pod to disappear, or
+	// for a pool to release the controller's ownership Lease,
 	// before it deletes that pod's ServiceAccount and RBAC (#263). Zero means derive it from the
 	// rendered Deployment's own terminationGracePeriodSeconds plus a margin, which is what
 	// production uses — the kubelet SIGKILLs at the grace period, so the pod cannot outlive it.
@@ -179,6 +183,10 @@ type DeployOptions struct {
 	// RBAC) with the POOL's ServiceAccount as subject, and has no Deployment, ServiceAccount or Service
 	// of its own; the pool's objects are applied by EnsurePool.
 	Pool string
+	// Pools are the pools of ControllerNamespace, when this controller runs where they do (a LOCAL
+	// definition): Deploy then stops a controller a pool other than Pool runs before taking it over, and
+	// ensures Pool before cutting over to it. Nil for a remote target, which has none (§5c Scope).
+	Pools *PoolOptions
 	// KeepLiveReplicas makes this apply leave the controller Deployment's spec.replicas as it is live,
 	// for a definition that opted into scale-to-zero (#393). provider-runtime's scaletozero helper is
 	// then the ONLY writer of replicas, which it requires: the apply is a full Get -> Update, and
@@ -448,6 +456,18 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
+	// A controller leaving a pool (for a dedicated Deployment, or for another pool) is stopped there
+	// first: everything below re-subjects what it runs with to another identity (#652).
+	leaseGuarded := false
+	if opts.Pools != nil && !opts.DryRunServer {
+		if _, err := releasePoolMember(ctx, opts.DynClient, opts.ControllerNamespace, opts.GVR, opts.Pool, 0); err != nil {
+			return "", fmt.Errorf("leaving the pool that ran this controller: %w", err)
+		}
+		if leaseGuarded, err = deployedWithLease(ctx, opts.DynClient, opts.ControllerNamespace, opts.GVR); err != nil {
+			return "", err
+		}
+	}
+
 	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), getCDCrbacNN(types.NamespacedName{Namespace: opts.Namespace, Name: namespacedName.Name}), opts.RBACFolderPath)
 	if err != nil {
 		return "", err
@@ -563,6 +583,19 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
+	// The label is the membership (pool_index.go): from here on, any recomputation of the pool's index
+	// lists this controller, so a dedicated one that cannot hold the Lease is retired before it.
+	if opts.poolMember() {
+		if !opts.DryRunServer && !leaseGuarded {
+			if err := cutoverToPool(ctx, opts, namespacedName, dedicatedSA); err != nil {
+				return "", err
+			}
+		}
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
+		}
+		cm.Labels[PoolLabel] = opts.Pool
+	}
 	_, err = kubecli.Apply(ctx, opts.DynClient, configMapGVR, &cm, applyOpts)
 	if err != nil {
 		log.Error(err, "installing configmap")
@@ -580,7 +613,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// the digests agree.
 	if opts.poolMember() {
 		if !opts.DryRunServer {
-			if err := cutoverToPool(ctx, opts, namespacedName, dedicatedSA); err != nil {
+			if err := joinPool(ctx, opts, namespacedName, dedicatedSA); err != nil {
 				return "", err
 			}
 		}
@@ -769,6 +802,22 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		log.Error(err, "Refusing to revoke the retiring controller's identity before it has drained",
 			"gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
 		return fmt.Errorf("waiting for retiring controller to drain: %w", err)
+	}
+
+	// The same for a controller a pool runs: it has no Deployment, and its pod is the pool's. It is
+	// dropped from the pool's index, and its ownership Lease says when it has stopped (#652).
+	if opts.LocalPools {
+		if _, err := releasePoolMember(ctx, opts.DynamicClient, opts.ControllerNamespace, opts.GVR, "", opts.DrainTimeout); err != nil {
+			if errors.Is(err, ErrDrainUnobservable) {
+				log.Error(err, "Cannot observe the retiring pool member's drain, so its identity will "+
+					"NOT be revoked and will be left in place. Grant the controller 'get' on "+
+					"coordination.k8s.io/v1 leases; the migration is completing without the drain guarantee",
+					"gvr", opts.GVR.String(), "namespace", opts.ControllerNamespace)
+				return nil
+			}
+			log.Error(err, "Refusing to revoke the retiring controller's identity before its pool has stopped it", "gvr", opts.GVR.String())
+			return fmt.Errorf("waiting for the retiring controller's pool to stop it: %w", err)
+		}
 	}
 
 	cm := corev1.ConfigMap{}

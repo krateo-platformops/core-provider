@@ -151,6 +151,15 @@ rules:
   - update
   - patch
   - delete
+# A controller a pool runs has no pod of its own, so its ownership Lease is what says it has stopped, and
+# its ServiceAccount's grants are not removed before that (core-provider#652). Read only, and needed with
+# leader election off too.
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
 {{- if .Values.leaderElection.enabled }}
 # Leader election (on by default, #382): the controller-runtime manager holds a coordination.k8s.io
 # Lease so only one replica reconciles at a time, including the old and new pod of a rolling update.

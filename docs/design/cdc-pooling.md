@@ -264,8 +264,8 @@ member's configuration (chart inspection, status projections, apiRef), which cor
 derives and renders as the member's env ConfigMap. So the pool consumes core-provider's output, not
 its input:
 
-- core-provider writes `cdc-pool-<p>-members` as a pure function of the live local definitions
-  naming `<p>`, recomputed on every member reconcile. There is no increment or decrement to drift.
+- core-provider writes `cdc-pool-<p>-members` as a pure function of the live member env ConfigMaps
+  (below), recomputed on every member's write. There is no increment or decrement to drift.
 - The pool **watches** that one ConfigMap by name, and reads each member's env ConfigMap. A key
   added starts that member. A key removed stops it (drain, then release its Lease). A member's env
   ConfigMap changing restarts that member only. Nothing restarts the process.
@@ -274,18 +274,61 @@ its input:
   krateo-system, which RBAC cannot narrow by label. core-provider rewrites the Role as members join
   and leave.
 
+### Membership, as built (#652)
+A member is **a live env ConfigMap** (`<resource>-<version>-configmap`) labelled `krateo.io/cdc-pool:
+<p>`, and the index is computed from one LIST of them. Deploy writes that ConfigMap before its
+controller runs, and Undeploy removes it after the controller has stopped, so it says exactly what the
+index must: which Kind x versions have a controller due in this pool. Neither of the other two sources
+can:
+
+- A definition's **status** is written only after the reconcile that deploys has returned. During a
+  bump it still names the old version, and after a Create it names none. An index computed from it
+  re-listed the old version and dropped the new one (#652).
+- Its **spec** names the version it wants, not the older ones still running beside it (`upgradePolicy`
+  Manual or Paused keeps the old version's instances, and so its controller).
+
+Every version from its first deploy to its retirement is therefore a member: a new version from its
+bump, a definition created in a pool from its Create, an old version as long as it is kept, a paused
+definition's, and a definition whose status was never written because core-provider stopped first. Only
+the Kind x version's owner deploys, so a follower's own `pool` still changes nothing.
+
+**Writes are serialised and never replayed.** Writes to one pool take one lock in the process, and the
+index is updated at the resourceVersion of the LIST it was computed from. A refused write starts again
+from a new LIST. A member is granted its env ConfigMap before the index names it.
+
+**Leaving is stop-before-revoke**, the pool's form of #263: a retired version, a definition being
+deleted, one that stops naming `<p>` or names another pool. The env ConfigMap is annotated
+`krateo.io/cdc-pool-draining` (a restarted core-provider still knows), the key leaves the index, and
+core-provider waits until the controller's ownership Lease has been unheld for 3s, for at most 60s.
+Only then is the ConfigMap, the RBAC or the Lease grant removed or given to another identity. A Lease
+whose record does not change for its own duration belongs to a process that died, and counts as unheld:
+client-go's rule, measured on core-provider's clock from when it first saw the record, so no two clocks
+are compared. **At the bound nothing is revoked**: the Update or Delete fails, naming the Lease's holder
+in `Synced`, and is retried. Retirement still precedes the instances' migration, so between a key's
+leaving and the relabelling they have no controller, exactly as with a dedicated one.
+
+**Observe compares.** A pool is in no definition's digest (a member's digest stops at its own objects),
+so an entry lost from the index, or a release that changed only the pool's image or `cdc.pool` sizing,
+stayed as it was until some member's next Update. Every pass of a member now compares its own entry and
+the mark on its env ConfigMap, that no other pool lists it, and the pool's index, Role, RoleBinding,
+ServiceAccount, process ConfigMap and Deployment (through a server dry run, like a dedicated one), and
+reports not up to date with what differs. Update repairs all of it.
+
 ### Lifecycle, ref-counted by recomputation
 On each reconcile of a definition naming `<p>`, core-provider applies the pool objects (idempotent),
 labels and binds the member, and recomputes the index. A definition that stops naming `<p>`, or is
-deleted, is removed from the index. When the recomputed set is empty, the **last leaver** deletes
-the pool's objects. A failed list removes nothing (the rule the teardown paths already follow).
+deleted, is removed from the index. When no env ConfigMap is left in it, a draining one included, the
+**last leaver** deletes the pool's objects: the Deployment first, its pods waited for, then the RBAC,
+and the ConfigMaps an unfinished deletion is found by last. A failed list removes nothing (the rule the
+teardown paths already follow).
 
 ### Cutover, stop-before-start, by step 2's Lease
 Joining a pool and leaving a dedicated controller are one reconcile. core-provider adds the member
-to the index and deletes its dedicated Deployment. The pool's member starts its informer at once
+to the index and then deletes its dedicated Deployment (a controller deployed before step 2, which
+holds no Lease, is deleted first). The pool's member starts its informer at once
 (so readiness keeps meaning "can see its resource"), but its workers start only on the Lease. The
 dedicated controller releases the Lease after its drain. There is never a second writer, and
-nothing else needs to coordinate. Leaving a pool is the mirror image.
+nothing else needs to coordinate. Leaving a pool is the mirror image, waiting for the Lease as above.
 
 ### Failure isolation, which step 4 left provisional
 Step 4 stops the whole process when a member fails, a lost Lease included. In a pool that would
@@ -344,6 +387,10 @@ on a ServiceAccount it has a mapping for.
 - **Unit:** the index is a pure function of the definitions (join, leave, rename, delete, a failed
   list removes nothing); the Role's `resourceNames` track the index; the CEL rules refuse a remote
   pool and `pool` with `scaleToZero`.
+- **Envtest, core-provider (#652):** `pool_652_envtest_test.go`, through the real reconciler, with an
+  invariant replayed over every persisted state: a controller is in at most one index; a version with
+  an instance has a Deployment or exactly one index entry, unless it is being retired; whatever an
+  index names has its env ConfigMap, its Lease grant and the pool's permission to read it.
 - **Envtest:** a pool hosting two members; a member added and removed at runtime without the process
   restarting; a member that loses its Lease is restarted alone while the other keeps reconciling.
 - **Integration (kind):** a definition moves dedicated → pool → dedicated, and stop-before-start

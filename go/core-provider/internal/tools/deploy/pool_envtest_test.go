@@ -54,22 +54,24 @@ func TestPoolLifecycleEnvtest(t *testing.T) {
 	manifests := renderShippedChart(t, map[string]any{"cdc": map[string]any{"pool": map[string]any{"overrides": map[string]any{
 		"heavy": map[string]any{"workers": 4, "resources": map[string]any{"limits": map[string]any{"memory": "3Gi"}}},
 	}}}})
-	sizing, err := LoadPoolSizing(mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"), "heavy")
-	if err != nil {
+	members := []PoolMember{{GVR: schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-2-0", Resource: "portals"}}}
+	// The member, as Deploy leaves it: its env ConfigMap, labelled with the pool.
+	if err := kube.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: MemberEnvConfigMapName(members[0].GVR), Namespace: ns, Labels: map[string]string{PoolLabel: "heavy"}},
+		Data:       map[string]string{memberKeyGroup: "composition.krateo.io", memberKeyVersion: "v1-2-0", memberKeyResource: "portals"},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	members := []PoolMember{{
-		GVR:       schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-2-0", Resource: "portals"},
-		EnvConfig: map[string]string{"COMPOSITION_CONTROLLER_RESOURCE": "portals"},
-	}}
 	opts := PoolOptions{
-		Pool: "heavy", Namespace: ns, Members: members, Sizing: sizing,
-		ConfigmapTemplatePath:  mountedTemplate(t, manifests, "cdc-configmap.yaml", "pool-configmap.yaml"),
-		DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml"),
-		AuthnURL:               "http://authn.krateo-system.svc:8082",
-		DynClient:              dyn,
+		Namespace: ns, DynClient: dyn, KubeClient: kube,
+		Assets: PoolAssets{
+			SizingPath:             mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"),
+			ConfigmapTemplatePath:  mountedTemplate(t, manifests, "cdc-configmap.yaml", "pool-configmap.yaml"),
+			DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml"),
+			AuthnURL:               "http://authn.krateo-system.svc:8082",
+		},
 	}
-	if err := EnsurePool(ctx, opts); err != nil {
+	if err := EnsurePool(ctx, opts, "heavy"); err != nil {
 		t.Fatalf("EnsurePool: %v", err)
 	}
 	names := PoolNames("heavy")
@@ -153,7 +155,7 @@ func TestPoolLifecycleEnvtest(t *testing.T) {
 		if err := kube.Get(ctx, types.NamespacedName{Namespace: ns, Name: names.Workload}, &role); err != nil {
 			t.Fatal(err)
 		}
-		want, _ := PoolRBAC("heavy", ns, members)
+		want, _ := PoolRBAC("heavy", ns, []string{MemberEnvConfigMapName(members[0].GVR)})
 		if !reflect.DeepEqual(role.Rules, want.Rules) {
 			t.Errorf("Role rules %+v, want %+v", role.Rules, want.Rules)
 		}
@@ -161,7 +163,7 @@ func TestPoolLifecycleEnvtest(t *testing.T) {
 
 	// DeletePool removes every object EnsurePool applied, and a second call is a no-op.
 	for i := 0; i < 2; i++ {
-		if err := DeletePool(ctx, dyn, "heavy", ns); err != nil {
+		if err := DeletePool(ctx, opts, "heavy"); err != nil {
 			t.Fatalf("DeletePool #%d: %v", i+1, err)
 		}
 	}

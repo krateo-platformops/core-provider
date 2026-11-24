@@ -12,7 +12,9 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 )
 
 // poolMember says this Kind x version's controller runs in a pool (docs/design/cdc-pooling.md §5c).
@@ -64,6 +66,33 @@ func memberEnvValues(o DeployOptions) []any {
 		}
 	}
 	return values
+}
+
+// deployedWithLease reports whether gvr's controller was last deployed with its ownership Lease, from
+// its live env ConfigMap: one deployed before the Lease existed (step 2) does not hold it.
+func deployedWithLease(ctx context.Context, dyn dynamic.Interface, namespace string, gvr schema.GroupVersionResource) (bool, error) {
+	cm := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: MemberEnvConfigMapName(gvr), Namespace: namespace}}
+	err := kubecli.Get(ctx, dyn, configMapGVR, &cm)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading the live env ConfigMap of %s: %w", gvr, err)
+	}
+	return cm.Data[memberKeyLease] != "", nil
+}
+
+// joinPool is a member's last step of Deploy: its pool runs it, and its dedicated controller is retired
+// (§5c Cutover). The pool is ensured FIRST, so the controller is never in neither place: the pool's
+// member waits on the ownership Lease, which the dedicated controller holds until it has drained.
+func joinPool(ctx context.Context, o DeployOptions, controller types.NamespacedName, dedicatedSA corev1.ServiceAccount) error {
+	if o.Pools == nil {
+		return fmt.Errorf("pool %s: a controller that does not run beside its pool cannot join it", o.Pool)
+	}
+	if err := EnsurePool(ctx, *o.Pools, o.Pool); err != nil {
+		return err
+	}
+	return cutoverToPool(ctx, o, controller, dedicatedSA)
 }
 
 // poolCutoverDrainTimeout bounds how long joining a pool waits for the dedicated controller to exit.
