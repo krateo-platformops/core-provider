@@ -21,7 +21,10 @@ Every arm decides the result; any failure exits 1.
   witness                               CONTROL: deleting a composition DOES run the pre-delete hook, so its
                                         absence elsewhere means something.
 
-A version before #636 fails these arms: that is the control for the exercise itself.
+A version before #636 fails the first two rows: that is the control for the exercise itself. Run it with
+--control, which exits 0 only when exactly those arms FAIL and the others PASS. So a control that behaves
+is green and one that does not is red, like any other run; without it, a red control run on a commit reads
+as that commit's CI failing (installer's pin gate did, on 2.13.129).
 """
 import argparse, datetime, json, subprocess, sys, threading, time
 
@@ -32,7 +35,19 @@ UNVERIFIED = "krateo.io/hooks-unverified"
 NEVER = "krateo.io/release-never-deployed"
 RETRIED = {"Interrupted": "InterruptedInstallRetried", "Failed": "FailedInstallRetried"}
 HOOK_SECONDS = 45
-results = []  # (arm, verdict, detail)
+results = []  # (arm, verdict, detail, deciding)
+REQUIRED = ["sigkill", "kill-switch", "once-deployed", "witness", "force-delete", "lease-stolen", "graceful-delete", "failing-hook"]
+FAIL_BEFORE_636 = {"sigkill", "force-delete", "lease-stolen", "graceful-delete", "failing-hook"}
+
+
+def problems(results, control):
+    """What makes this run red. An arm that never ran, or that ended in ERROR, is a problem in both modes."""
+    out = [f"{a}: did not run" for a in REQUIRED if a not in {r[0] for r in results}]
+    for arm, verdict, detail, deciding in results:
+        want = "FAIL" if control and arm in FAIL_BEFORE_636 else "PASS"
+        if deciding and verdict != want:
+            out.append(f"{arm}: {verdict}, want {want}")
+    return out
 
 
 def sh(*a, check=True, inp=None):
@@ -513,8 +528,8 @@ def main():
     ap.add_argument("--node", required=True, help="the kind node's container name")
     ap.add_argument("--chart", required=True)
     ap.add_argument("--image-tag", default=None)
+    ap.add_argument("--control", action="store_true", help="a version before #636: exactly its known arms must FAIL")
     o = ap.parse_args()
-    required = ["sigkill", "kill-switch", "once-deployed", "witness", "force-delete", "lease-stolen", "graceful-delete", "failing-hook"]
 
     def arm(name, fn):
         try:
@@ -538,14 +553,13 @@ def main():
     log(f"=== results, core-provider {o.image_tag or o.version}")
     for arm, verdict, detail, dec in results:
         print(f"  {verdict:15} {arm:16} {'deciding' if dec else ''}  {detail}")
-    ran = {r[0] for r in results}
-    missing = [r for r in required if r not in ran]  # the denominator: an arm that never ran is a failure
-    if missing:
-        print(f"  deciding arms that did not run: {missing}")
-    bad = missing or [r for r in results if r[3] and r[1] != "PASS"]
+    bad = problems(results, o.control)
+    for p in bad:
+        print("  " + p)
     if bad:
         diagnostics()
-    print("first-install exercise", "FAILED" if bad else "passed", "for core-provider", o.image_tag or o.version)
+    print("first-install exercise" + (" CONTROL" if o.control else ""), "FAILED" if bad else "passed",
+          "for core-provider", o.image_tag or o.version)
     sys.exit(1 if bad else 0)
 
 

@@ -6,13 +6,18 @@ name: exercise-interrupted-install
 # controller. Decided by Diego (2026-11-23): exercise it before a cluster runs it.
 #
 # On a pull request it runs the PR's own core-provider and composition controller, on the published
-# charts. By hand (workflow_dispatch) it runs a released version; one before #636 fails, as it should.
+# charts. By hand (workflow_dispatch) it runs a released version. For one before #636 set control: the arms
+# #636 fixed must then FAIL, and that run is green. A red check here is always about the version it names.
 on:
   workflow_dispatch:
     inputs:
       version:
         description: "Released core-provider version to exercise"
         required: true
+      control:
+        description: "A version before #636, as the control: green only if exactly the arms #636 fixed fail"
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "go/composition-dynamic-controller/hack/interrupted-install-e2e/**"
@@ -25,7 +30,7 @@ permissions:
 
 jobs:
   exercise:
-    name: exercise (kind)
+    name: ${{ inputs.control && 'exercise control (kind)' || 'exercise (kind)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -50,10 +55,12 @@ jobs:
       - name: Exercise
         env:
           # The charts' version; on a pull request only chart-inspector runs that version's image.
-          VERSION: ${{ inputs.version || '2.13.128' }}
+          VERSION: ${{ inputs.version || '2.13.129' }}
+          CONTROL: ${{ inputs.control }}
         run: |
           set -euo pipefail
           helm version --short
           python3 -I go/composition-dynamic-controller/hack/interrupted-install-e2e/run.py \
             --version "$VERSION" --node exercise-control-plane ${IMAGE_TAG:+--image-tag "$IMAGE_TAG"} \
+            $([ "$CONTROL" = true ] && echo --control) \
             --chart go/composition-dynamic-controller/hack/interrupted-install-e2e/chart
