@@ -138,3 +138,20 @@ func TestApplyRBAC_OtherRefusalsStillFail(t *testing.T) {
 		})
 	}
 }
+
+// The failure ApplyRBAC returns does not depend on map order: what a caller concludes from it must not alternate
+// from pass to pass while two namespaces fail differently (core-provider#646).
+func TestApplyRBAC_ReturnsTheSameFailureEveryTime(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		cli := refusingClient("zz", func(resource, name, _ string) error {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: resource}, name, fmt.Errorf("no"))
+		})
+		cli.PrependReactor("create", "roles", func(a k8stesting.Action) (bool, runtime.Object, error) {
+			return a.GetNamespace() == "aa", nil, apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, "aa")
+		})
+		_, err := NewRBACInstaller(cli).ApplyRBAC(&RBAC{Namespaced: map[string]Namespaced{"zz": pairIn("zz"), "aa": pairIn("aa")}})
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("run %d: %v, want the first namespace's", i, err)
+		}
+	}
+}

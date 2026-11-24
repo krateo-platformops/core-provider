@@ -148,7 +148,7 @@ var (
 	Creating = ready(condition.ReasonCreating, metav1.ConditionFalse, WriterCDC,
 		"stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating)", Clearance{Indefinite, "until the converging child converges; no deadline (core-provider#498 adds one)"})
 	Unavailable = ready(condition.ReasonUnavailable, metav1.ConditionFalse, WriterCDC,
-		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error", Clearance{Indefinite, "until the failing child, or the observation, recovers"})
+		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error; createFailedOnDerivedRBAC: a first render the chart or the values refuse, or RBAC the API server refuses, the message is the error (#646); any other failure there stays Creating", Clearance{Indefinite, "until the failing child, or the observation, recovers"})
 	HelmOperationInProgress = ready(ReasonHelmOperationInProgress, metav1.ConditionFalse, WriterCDC,
 		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound", Clearance{Timer, "until the install or uninstall returns; each hook and each wait must finish within {helmOperationTimeout}, and the message carries the start time"})
 	InstallFailing = ready(ReasonInstallFailing, metav1.ConditionFalse, WriterCDC,

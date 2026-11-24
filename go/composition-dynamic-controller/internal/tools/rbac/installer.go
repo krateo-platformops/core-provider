@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 
@@ -107,7 +109,10 @@ func (i *RBACInstaller) ApplyRBAC(rbac *RBAC) (ApplyReport, error) {
 			return report, fmt.Errorf("failed to Apply ClusterRoleBinding: %w - name: %s", err, rbac.ClusterRoleBinding.Name)
 		}
 	}
-	for _, ns := range rbac.Namespaced {
+	// In order: the first failure is the one returned, and with two namespaces failing differently a random
+	// order would report one or the other from pass to pass, and what the caller concludes with it (#646).
+	for _, name := range slices.Sorted(maps.Keys(rbac.Namespaced)) {
+		ns := rbac.Namespaced[name]
 		if ns.Role != nil {
 			var changed bool
 			_, err := i.applyRole(context.Background(), ns.Role, &changed)
