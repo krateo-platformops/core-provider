@@ -115,18 +115,31 @@ func (r *reader644) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 	return err
 }
 
-// kube644 is the manager's client: lagging644, and a CRD's conditions as hook leaves them.
+// kube644 is the manager's client: lagging644, a CRD's conditions as hook leaves them, and the reads
+// refuse says cannot be answered.
 type kube644 struct {
 	*lagging644
-	mu  sync.Mutex
-	crd func(*apiextensionsv1.CustomResourceDefinition)
+	mu     sync.Mutex
+	crd    func(*apiextensionsv1.CustomResourceDefinition)
+	refuse func(client.Object) error
+}
+
+func (k *kube644) onGet(refuse func(client.Object) error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.refuse = refuse
 }
 
 func (k *kube644) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	err := k.lagging644.Get(ctx, key, obj, opts...)
 	k.mu.Lock()
-	hook := k.crd
+	hook, refuse := k.crd, k.refuse
 	k.mu.Unlock()
+	if refuse != nil {
+		if err := refuse(obj); err != nil {
+			return err
+		}
+	}
+	err := k.lagging644.Get(ctx, key, obj, opts...)
 	if crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok && err == nil && hook != nil {
 		hook(crd)
 	}
@@ -1001,35 +1014,5 @@ func TestEnvtest_644_OlderCRDAndOlderWriter(t *testing.T) {
 	d.rest(2)
 	if v, ok := raw(d); !ok || v != 1 {
 		t.Errorf("the next pass did not record it again: %d %v", v, ok)
-	}
-}
-
-// SIDE FINDING, not fixed here: what a remote definition reports when its chart is cluster-local to the
-// management cluster. cdreason declares Ready=False/RemoteChartUnreachable (parent verdict failed). The
-// seed sets it and returns a plain error from Observe, so the runtime replaces it with
-// Ready=Unknown/NotObserved, and from Create the status re-read drops it. This records what is served
-// today; a fix changes the assertion.
-func TestEnvtest_644_RemoteChartUnreachableIsOverwritten(t *testing.T) {
-	e := start644(t)
-	e.charts.add(t, "remotelocal", "1.0.0", `{"type":"object"}`) // served from 127.0.0.1: cluster-local
-	e.spokeIsThisCluster(t, "")
-	d := e.define(t, "remotelocal", "remotelocal", func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) {
-		cd.Spec.Deploy = &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "spoke"}}
-	})
-	w := d.watch()
-	for i := 0; i < 4; i++ {
-		_, err := d.pass()
-		t.Logf("pass %d: err=%v Ready=%s Synced=%s", i, err, d.cond("Ready"), d.cond("Synced"))
-	}
-	if !strings.Contains(d.message("Synced"), "cluster-local") {
-		t.Fatalf("premise: the remote seed must have refused the chart; Synced=%s %q", d.cond("Synced"), d.message("Synced"))
-	}
-	for i, s := range w.served() {
-		if s.readyReason == "RemoteChartUnreachable" {
-			t.Errorf("served version %d carries RemoteChartUnreachable: the finding does not hold", i)
-		}
-	}
-	if got := d.cond("Ready"); got != "Unknown/NotObserved" {
-		t.Errorf("Ready = %s, recorded finding is Unknown/NotObserved", got)
 	}
 }

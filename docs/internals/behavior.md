@@ -64,10 +64,11 @@ reads `values.schema.json`.
 
 **`status.observedGeneration`** (#644) is recorded by `recordObservedGeneration` (`observedgeneration.go`)
 at each place Observe itself **decides** `Ready`: up to date (owner and follower), not Established, the
-CRD absent, an add refused for lack of room (#494), an unreadable chart, and the three refusals
-(`ValuesSchemaMissing`, `SchemaDefaultContradiction`, `DerivedNameTooLong`). It is **not** recorded where
-`markUpdatePending` keeps an earlier `Ready`, on an error that leaves `NotObserved`, or by Create, Update
-or Delete. The value is the generation of the object Observe re-read live and took the spec from, copied
+CRD absent, an add refused for lack of room (#494), an unreadable chart, and the refusals
+(`ValuesSchemaMissing`, `SchemaDefaultContradiction`, `DerivedNameTooLong`, and `RemoteChartUnreachable`
+from the remote seed, which Update runs too). It is **not** recorded where `markUpdatePending` keeps an
+earlier `Ready`, on an error that leaves `NotObserved`, or anywhere else in Create, Update or Delete. The
+value is the generation of the object Observe re-read live and took the spec from, copied
 into the status there and never read again at write time, so it is never ahead:
 
 - a spec edited mid-pass makes the status write conflict, and the whole status of that pass is dropped;
