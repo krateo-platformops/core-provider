@@ -340,11 +340,21 @@ func TestEnvtest_653_ThePoolDeploymentWakesItsMembers(t *testing.T) {
 		}
 		t.Logf("%s observed %s after its pool's Deployment was deleted", k, woke.Round(100*time.Millisecond))
 	}
-	for _, d := range []*cd644{a, b} {
-		e.waitReady(t, d, "True/Available", "True/Running", time.Minute) // repaired by its own Update
+	// The repair is the members' Update recreating the Deployment, so that is what is waited for. Their
+	// Ready is no witness of it: it read True/Available before the delete and still did with the
+	// Deployment gone, so a wait on it returned at once, before the Update ran (the gate run of 5b7ff1a).
+	recreated := time.Duration(0)
+	for end := time.Now().Add(30 * time.Second); recreated == 0 && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		if e.exists(&appsv1.Deployment{}, "cdc-pool-web") {
+			recreated = time.Since(t0)
+		}
 	}
-	if !e.exists(&appsv1.Deployment{}, "cdc-pool-web") {
-		t.Error("the pool's Deployment was not recreated")
+	if recreated == 0 {
+		t.Fatal("the pool's Deployment was not recreated within 30s of its delete")
+	}
+	t.Logf("the pool's Deployment was recreated %s after its delete", recreated.Round(100*time.Millisecond))
+	for _, d := range []*cd644{a, b} {
+		e.waitReady(t, d, "True/Available", "True/Running", time.Minute)
 	}
 }
 

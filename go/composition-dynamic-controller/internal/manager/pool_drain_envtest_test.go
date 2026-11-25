@@ -308,6 +308,17 @@ func (e *poolEnv) eventuallyReady(what string) {
 	eventually(e.t, what, func() bool { code, _ := e.readyz(); return code == http.StatusOK })
 }
 
+// eventuallyMembersReady waits for every member the index names to be running and ready, by the pool's
+// own account. Once /readyz has latched (#653) it answers 200 whatever the members do, so a wait on it
+// after the first members have run returns at once and proves nothing about them.
+func (e *poolEnv) eventuallyMembersReady(what string) {
+	e.t.Helper()
+	eventually(e.t, what, func() bool { return e.pool.membersReady(nil) == nil })
+	if code, body := e.readyz(); code != http.StatusOK {
+		e.t.Errorf("%s: /readyz = %d %q", what, code, body)
+	}
+}
+
 // busy gives gvr a composition whose reconcile is held, so gvr's controller cannot drain.
 func (e *poolEnv) busy(gvr schema.GroupVersionResource) {
 	e.t.Helper()
@@ -354,7 +365,7 @@ func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
 	eventually(t, "quick released its Lease while slow drains", func() bool { return e.log.count(quick, "release") == 1 && e.holder(quick) == "" })
 
 	e.index(map[schema.GroupVersionResource]string{later: "1"}) // slow leaves, still draining
-	e.eventuallyReady("ready: a member that left does not count while it drains")
+	e.eventuallyMembersReady("ready: a member that left does not count while it drains")
 	if got, want := e.pool.Members(), []string{keyOf(later)}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Members() = %v, want %v", got, want)
 	}
@@ -368,7 +379,7 @@ func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
 	}
 
 	e.get.let()
-	e.eventuallyReady("the slow member's successor is ready")
+	e.eventuallyMembersReady("the slow member's successor is ready")
 	if n := e.log.count(slow, "start"); n != 2 {
 		t.Errorf("slow started %d controllers, want 2: the first, and one for the last of its three index changes", n)
 	}
@@ -404,7 +415,7 @@ func TestEnvtest_PoolDrainThatOutlivesItsGrace(t *testing.T) {
 		return err != nil && strings.Contains(err.Error(), "draining") && code == http.StatusOK
 	})
 	eventually(t, "the key restarted although its predecessor's reconcile never ended", func() bool { return e.log.count(slow, "start") == 2 })
-	e.eventuallyReady("the successor is ready")
+	e.eventuallyMembersReady("the successor is ready")
 	if d := time.Since(start); d < grace {
 		t.Errorf("the successor was ready after %s, inside its predecessor's %s drain", d, grace)
 	}
