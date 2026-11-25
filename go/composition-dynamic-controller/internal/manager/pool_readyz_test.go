@@ -107,9 +107,17 @@ func TestPoolReadyz_ProcessLevelAndLatched(t *testing.T) {
 		if p.ReadyzCheck(nil) == nil {
 			t.Fatal("control: gone, running and not synced, was to be waited for")
 		}
+		// Its drain is held, so it is still in the pool, marked as left, when the probe asks: a member
+		// whose stop had already finished would be gone from the pool, and could not tell the two apart.
+		release := f.holdDrain(t, "gone")
+		defer release()
 		set(map[string]string{})
+		soon(t, "gone is draining", func() bool { return f.saw("cancel gone=1") })
+		if f.saw("stop gone=1") {
+			t.Fatal("premise: gone's drain was to be held")
+		}
 		if err := p.ReadyzCheck(nil); err != nil {
-			t.Errorf("ReadyzCheck = %v after the only first member left", err)
+			t.Errorf("ReadyzCheck = %v after the only first member left, while it drains", err)
 		}
 	})
 }
