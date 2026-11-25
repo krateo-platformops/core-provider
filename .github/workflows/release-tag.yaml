@@ -119,6 +119,11 @@ jobs:
   # nothing could wait for it. It is a job here so verify-artifacts can `need` it. release-oci.yaml
   # keeps its workflow_dispatch for republishing a chart by hand.
   release-oci:
+    # #680: the same gate as build. Without it the charts published at the tag push, concurrently with
+    # the tests and whatever they concluded, so a tag whose suites failed still left pullable charts
+    # pointing at images that were never built. .github/scripts/check-release-gate.py keeps every
+    # publishing job behind every gate job.
+    needs: [test-core-provider, test-composition-dynamic-controller, test-chart-inspector, release-ready-reasons]
     uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: read
