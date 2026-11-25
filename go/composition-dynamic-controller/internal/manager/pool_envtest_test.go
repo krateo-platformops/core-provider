@@ -143,19 +143,23 @@ func TestEnvtest_PoolMembership(t *testing.T) {
 	fw = pool.controllerOf(fwKey)
 
 	// Isolation: a member whose configuration cannot be read fails and is retried ALONE; the healthy
-	// member keeps its controller and keeps reconciling, and readiness names the failing one.
+	// member keeps its controller and keeps reconciling. The pool's account names the failing one, and
+	// the process stays ready (#653): that member is reported on its own definition, by its Lease.
 	setIndex(map[string]string{fwKey: entry(t, fwKey+"-configmap", "2"), ptKey: entry(t, "missing-configmap", "1")})
-	eventually(t, "readiness names the failing member", func() bool {
-		err := pool.ReadyzCheck(nil)
+	eventually(t, "the pool's account names the failing member", func() bool {
+		err := pool.membersReady(nil)
 		return err != nil && strings.Contains(err.Error(), ptKey) && strings.Contains(err.Error(), "restarting after")
 	})
+	if err := pool.ReadyzCheck(nil); err != nil {
+		t.Errorf("ReadyzCheck = %v: a failing member made the process not ready", err)
+	}
 	time.Sleep(time.Second) // several backoff cycles of the failing member
 	if pool.controllerOf(fwKey) != fw || fw.ReadyzCheck(nil) != nil {
 		t.Fatal("a failing member disturbed the healthy one")
 	}
 	// It recovers once its configuration exists.
 	setIndex(map[string]string{fwKey: entry(t, fwKey+"-configmap", "2"), ptKey: entry(t, ptKey+"-configmap", "1")})
-	eventually(t, "the failing member recovered", func() bool { return pool.ReadyzCheck(nil) == nil })
+	eventually(t, "the failing member recovered", func() bool { return pool.membersReady(nil) == nil })
 
 	time.Sleep(time.Second) // past informer startup, as TestEnvtest_TwoMembersInOneProcess explains
 	stop()

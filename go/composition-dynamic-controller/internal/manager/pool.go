@@ -58,6 +58,16 @@ type Pool struct {
 	running  map[string]*poolMember
 	stopping bool
 
+	// What /readyz has established (#653), guarded by mu. listed: the index's first list is done, at
+	// listedAt; first: the members it named then, each true once its first attempt has synced or
+	// failed; ready: latched, never cleared.
+	listed   bool
+	listedAt time.Time
+	first    map[string]bool
+	ready    bool
+	// now is the clock; nil is time.Now. Tests replace it.
+	now func() time.Time
+
 	// attempt builds and runs one controller until it stops; nil is runOnce. Tests replace it.
 	attempt func(ctx context.Context, key string, e IndexEntry, m *poolMember) error
 }
@@ -148,6 +158,11 @@ func (p *Pool) Run(ctx context.Context) error {
 			DeleteFunc: func(any) { p.sync(ctx, nil) }, // no index: no members (the pool is being torn down)
 		},
 	})
+	go func() {
+		if cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+			p.indexListed()
+		}
+	}()
 	informer.Run(ctx.Done())
 	p.stopAll()
 	return nil
@@ -344,11 +359,95 @@ func (p *Pool) wantedLocked() []string {
 	return keys
 }
 
-// ReadyzCheck is ready when every member the index names is running and ready (§5c). A member being
-// rebuilt after a failure is reported by name, so /readyz says which one; so is a member whose previous
-// controller is still draining before its new configuration starts. A member that has LEFT does not
-// count while it drains: the index no longer names it. The check reads state and never waits.
+// memberSyncWait bounds how long /readyz waits for the members the index named at the first list. A
+// member that can never list (its CRD version is not served, #333) would otherwise keep the pod
+// NotReady, and with it every member's definition: what the per-member Lease reports instead (#653).
+const memberSyncWait = time.Minute
+
+// indexListed records that the index's first list is done, and which members it named.
+func (p *Pool) indexListed() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listed, p.listedAt, p.first = true, p.clock(), map[string]bool{}
+	for _, k := range p.wantedLocked() {
+		p.first[k] = false
+	}
+}
+
+func (p *Pool) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// ReadyzCheck is the PROCESS's readiness (#653, docs/design/cdc-pooling.md §5c): ready once the index
+// has been listed and each member it named then has synced once, or its first attempt has failed, or
+// memberSyncWait has passed. It then stays ready: a member failing, draining, joining or leaving later
+// is that member's, and core-provider reads it from the member's ownership Lease, on that member's
+// definition alone. Before, one member that failed made the pod NotReady, and so every member's
+// definition read Unavailable. It never waits.
 func (p *Pool) ReadyzCheck(req *http.Request) error {
+	type state struct {
+		key  string
+		ctrl *controller.Controller
+		last error
+	}
+	p.mu.Lock()
+	if p.ready {
+		p.mu.Unlock()
+		return nil
+	}
+	if !p.listed {
+		p.mu.Unlock()
+		return errors.New("the membership index has not been listed yet")
+	}
+	var pending []state
+	for k, done := range p.first {
+		m := p.running[k]
+		if done || m == nil || m.want == nil {
+			delete(p.first, k) // done, or it left before it ran: not this process's to wait for
+			continue
+		}
+		m.mu.Lock()
+		pending = append(pending, state{k, m.ctrl, m.last})
+		m.mu.Unlock()
+	}
+	expired := p.clock().Sub(p.listedAt) >= memberSyncWait
+	p.mu.Unlock()
+
+	sort.Slice(pending, func(i, j int) bool { return pending[i].key < pending[j].key })
+	var waiting []string
+	var done []string
+	for _, s := range pending {
+		if s.last != nil || (s.ctrl != nil && s.ctrl.ReadyzCheck(req) == nil) {
+			done = append(done, s.key)
+			continue
+		}
+		waiting = append(waiting, s.key)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range done {
+		p.first[k] = true
+	}
+	if len(waiting) == 0 || expired {
+		if len(waiting) > 0 {
+			p.logError(fmt.Errorf("not synced after %s: %s", memberSyncWait, strings.Join(waiting, ", ")),
+				"pool ready without these members; each is reported on its own definition")
+		}
+		p.ready = true
+		return nil
+	}
+	return fmt.Errorf("the first members have not synced yet: %s", strings.Join(waiting, ", "))
+}
+
+// membersReady says whether every member the index names is running and ready, and which is not: a
+// member being rebuilt after a failure, one whose previous controller is still draining, one starting.
+// A member that has LEFT does not count while it drains. It reads state and never waits. It is no longer
+// the probe (#653): one member must not decide another's readiness, so it is what the process logs and
+// tests read.
+func (p *Pool) membersReady(req *http.Request) error {
 	type state struct {
 		key      string
 		draining bool

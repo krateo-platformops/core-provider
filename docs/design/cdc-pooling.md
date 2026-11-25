@@ -361,9 +361,8 @@ start and stop go on meanwhile, and members draining together drain side by side
 - **Process exit** cancels every member at once and waits for all of them, for at most the drain plus
   10s, under the pod's `terminationGracePeriodSeconds` (45s).
 
-`/readyz` is unchanged in meaning, "every member the index names has synced", and reads state without
-waiting. A member that has left does not count while it drains. A member being replaced does: it is
-named, as draining and then as starting, until its successor has synced.
+`/readyz` reads state without waiting. Since #653 it is the process's, not every member's (see "Per-member
+readiness, by its Lease").
 
 **A drain that outlives its grace** (a helm operation longer than 30s; `helmTimeout` allows one 15m). The
 runtime cancels the reconcile, does not wait for it, and releases the Lease; the

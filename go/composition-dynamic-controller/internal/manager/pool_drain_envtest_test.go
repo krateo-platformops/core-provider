@@ -330,7 +330,7 @@ var (
 )
 
 // One member's configuration changes while its reconcile is in flight, so it drains for as long as the
-// test holds it. The probe keeps answering; a member joins and reconciles; a member leaves and releases
+// test holds it. The probe keeps answering, ready: a member's drain is that member's (#653); a member joins and reconciles; a member leaves and releases
 // its Lease; the slow member leaves and rejoins. When it has drained, exactly one successor starts, with
 // the Lease free, and the pool is Ready.
 func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
@@ -341,10 +341,13 @@ func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
 	eventually(t, "quick holds its Lease", func() bool { return e.holder(quick) == drainPod })
 
 	e.index(map[schema.GroupVersionResource]string{slow: "2", quick: "1", later: "1"}) // slow is replaced, later joins
-	eventually(t, "readiness names the draining member", func() bool {
-		code, body := e.readyz()
-		return code == http.StatusServiceUnavailable && strings.Contains(body, keyOf(slow)) && strings.Contains(body, "draining")
+	eventually(t, "the pool's own account names the draining member", func() bool {
+		err := e.pool.membersReady(nil)
+		return err != nil && strings.Contains(err.Error(), keyOf(slow)) && strings.Contains(err.Error(), "draining")
 	})
+	if code, body := e.readyz(); code != http.StatusOK {
+		t.Errorf("/readyz = %d %q while one member drains: one member decided the pod's readiness", code, body)
+	}
 	eventually(t, "later runs while slow drains", func() bool { return e.holder(later) == drainPod && e.log.count(later, "hold") == 1 })
 
 	e.index(map[schema.GroupVersionResource]string{slow: "2", later: "1"}) // quick leaves
@@ -356,7 +359,10 @@ func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
 		t.Errorf("Members() = %v, want %v", got, want)
 	}
 	e.index(map[schema.GroupVersionResource]string{slow: "3", later: "1"}) // and rejoins
-	eventually(t, "readiness waits for the rejoined member", func() bool { code, _ := e.readyz(); return code == http.StatusServiceUnavailable })
+	eventually(t, "the rejoined member waits for its drain", func() bool { return e.pool.membersReady(nil) != nil })
+	if code, body := e.readyz(); code != http.StatusOK {
+		t.Errorf("/readyz = %d %q for a member rejoining", code, body)
+	}
 	if n, h := e.log.count(slow, "start"), e.holder(slow); n != 1 || h != drainPod || e.log.count(slow, "release") != 0 {
 		t.Fatalf("slow must still be draining its one controller, holding its Lease: %d starts, holder %q", n, h)
 	}
@@ -392,9 +398,10 @@ func TestEnvtest_PoolDrainThatOutlivesItsGrace(t *testing.T) {
 	e.busy(slow)
 	start := time.Now()
 	e.index(map[schema.GroupVersionResource]string{slow: "2", quick: "1"})
-	eventually(t, "readiness answers, and names the draining member, while it drains", func() bool {
-		code, body := e.readyz()
-		return code == http.StatusServiceUnavailable && strings.Contains(body, "draining")
+	eventually(t, "the pool's account names the draining member while /readyz stays ready", func() bool {
+		err := e.pool.membersReady(nil)
+		code, _ := e.readyz()
+		return err != nil && strings.Contains(err.Error(), "draining") && code == http.StatusOK
 	})
 	eventually(t, "the key restarted although its predecessor's reconcile never ended", func() bool { return e.log.count(slow, "start") == 2 })
 	e.eventuallyReady("the successor is ready")
