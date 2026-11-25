@@ -8,7 +8,7 @@ Standard library only; helm and kubectl on the PATH.
   run.py --node <kind node> --probe <hookprobe chart dir> --from 2.13.129 \\
          (--target-chart DIR --crds-chart DIR --image-tag ci-abc --chart-inspector-tag 2.13.129 |
           --target-version 2.13.130)
-  run.py ... --suite from-old --from 2.13.57
+  run.py ... --suite from-old --from 2.13.57   (or 2.13.105, 2.13.111: the versions clusters run)
   run.py ... --target-version 2.13.129 --control
 
 The target chart is always a copy with one key added to the controller's env ConfigMap template
@@ -32,7 +32,7 @@ suite main, FROM a released chart:
   values-only        a values change on the same chart reaches the controller promptly.
   unknown-key        a template key the binary does not know is refused: nothing is applied, the
                      definition says which key, and it recovers when the key goes.
-suite from-old, FROM a much older released chart (the acmp incident's, 2.13.57):
+suite from-old, FROM an older released chart a cluster really runs (2.13.57, the incident's; 2.13.105; 2.13.111):
   from-old           quota-full, from that version.
   from-old-lifted    everything converges.
 
