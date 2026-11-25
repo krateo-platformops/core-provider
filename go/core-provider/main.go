@@ -19,6 +19,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/ptr"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -227,6 +228,11 @@ func run() int {
 		LeaderElectionReleaseOnCancel: true,
 		Cache: cache.Options{
 			SyncPeriod: syncPeriod,
+			// #653: pool members' ownership Leases are watched, in the management namespace only. Every
+			// node's Lease (kube-node-lease) renews every 10s and is none of this process's business.
+			ByObject: map[client.Object]cache.ByObject{
+				&coordinationv1.Lease{}: {Namespaces: map[string]cache.Config{compositiondefinitions.ManagementNamespace: {}}},
+			},
 		},
 		Metrics: metricsserver.Options{
 			BindAddress: ":8080",

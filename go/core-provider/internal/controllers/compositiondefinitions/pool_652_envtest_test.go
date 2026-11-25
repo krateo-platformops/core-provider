@@ -232,10 +232,14 @@ type leases652 struct {
 	// would restart for ever, and fail its pool's readiness with it.
 	unread map[string]string
 	since  map[string]time.Time // when a holder was asked to stop
+	// dead: Leases whose holder is a process that stopped renewing them without releasing them (#653).
+	// refused: Leases the pool's process does not run, although its index names them.
+	dead, refused map[string]bool
 }
 
 func startLeases652(t *testing.T, c *cluster642) *leases652 {
-	l := &leases652{t: t, c: c, stuck: map[string]bool{}, unread: map[string]string{}, since: map[string]time.Time{}}
+	l := &leases652{t: t, c: c, stuck: map[string]bool{}, unread: map[string]string{}, since: map[string]time.Time{},
+		dead: map[string]bool{}, refused: map[string]bool{}}
 	stop, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -311,6 +315,11 @@ func (l *leases652) step() {
 			}
 		}
 	}
+	for name := range l.refused {
+		if strings.HasPrefix(runs[name], "cdc-pool-") {
+			delete(runs, name)
+		}
+	}
 	held, err := l.c.cs.CoordinationV1().Leases(ns652).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return
@@ -323,6 +332,9 @@ func (l *leases652) step() {
 		holder := ""
 		if lease.Spec.HolderIdentity != nil {
 			holder = *lease.Spec.HolderIdentity
+		}
+		if l.dead[name] {
+			continue // its holder stopped renewing, and never released it
 		}
 		if holder == "" || holder == runs[name] {
 			delete(l.since, name)

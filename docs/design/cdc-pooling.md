@@ -373,23 +373,29 @@ can reconcile a release the abandoned operation is still writing, and that opera
 total stays taken if its handler has not returned. The same holds after a lost Lease, whose restart also
 does not wait. Not closed here: the pool cannot see a reconcile the runtime has abandoned.
 
-### Per-member readiness, by its Lease (#653): proposed, not built
+### Per-member readiness, by its Lease (#653), as built
 Diego decided on 2026-11-24 that a member's state is read from its ownership Lease. Today one member that
 fails, or a same-key replacement slower than about 15s, fails the pool pod's `/readyz`, and every member's
 definition reads `Ready=False`/`Unavailable` through the shared pool Deployment.
 
 **Two halves.**
-1. *The pool's `/readyz` becomes process-level.* It is ready once the index has been listed and every
-   member it named at that point has synced once. That is latched: a later failure, a drain or a join
-   does not fail it. The pod's readiness then means "this process runs", and no member can flip another.
+1. *The pool's `/readyz` is process-level.* It is ready once the index has been listed and every member
+   it named at that point has synced once, or failed once, or a minute has passed (beyond the proposal:
+   a member whose CRD version is not served never syncs, and would hold the pod, and every member with
+   it). That is latched: a later failure, a drain or a join does not fail it. The pod's readiness then
+   means "this process runs", and no member can flip another.
 2. *core-provider reads each member's Lease*, `templates.ControllerLeaseName` (`<version>.<plural>.<group>`)
    in the management namespace. The holder is a pod name, and the elector's timings are 15s duration,
    10s renew deadline and 2s retry.
 
 **States and text.** These apply only when the pool Deployment has rolled out. A Deployment rolling
 out, given up or unavailable keeps today's rows for every member, because then the process is the
-problem. `G` is 20s: longer than a same-key replacement leaves the Lease unheld (it is held through the
-drain, then retaken within 4.4s), so a bump does not flip anyone.
+problem. `G` is `leaseDuration + 2.5 x retryPeriod` (20s at the default 15s/10s/2s): a successor takes a
+released Lease within the elector's longest wait between attempts (2.2 x retryPeriod), and one whose
+holder died without releasing it within a full duration more, so neither a bump nor a pool pod's
+rolling update flips anyone. Every such wait is derived from `deploy.LeaseTimings`
+(`OwnershipLeaseTimings{Duration, RenewDeadline, RetryPeriod}`), the timings the controllers run with;
+#652's "unheld for 5s" is its `Quiet()`, `2.5 x retryPeriod`.
 
 | member | Ready | ControllerActive |
 |---|---|---|
@@ -412,11 +418,13 @@ it run again by itself except its own restart, and the message says which Lease 
 
 **Freshness without comparing clocks.** `renewTime` is the pool's clock. "Fresh" is decided on
 core-provider's clock instead: an informer on Leases records, per Lease, the local time of the last
-update it saw. An update is a renewal, every 2s while held. A Lease is fresh while a holder is named and
-the last renewal was seen less than its `leaseDurationSeconds` ago, which is client-go's own rule. After a
-core-provider restart, a Lease seen for less than its duration has no local history yet. For that window
-only (15s), it is judged on `now - renewTime < 2 x leaseDurationSeconds`. That is wrong only with more
-than 15s of skew, and then only during those 15s after a restart.
+update it saw. An update is a renewal, every retryPeriod while held. A Lease is fresh while a holder is
+named and the last renewal was seen less than its own `leaseDurationSeconds` ago, which is client-go's
+own rule. After a core-provider restart, a Lease seen only in the first list has no local history yet.
+For its first duration it is judged on `now - renewTime < 2 x leaseDurationSeconds`; one already stale
+by that rule counts as not held from when this process first saw it, so skew at a restart costs G and
+never a false `Unavailable`. A renewal after a silence of a duration also wakes the definition, so a
+member that comes back is seen at once.
 
 **Wake-ups.**
 - The pool Deployment's rollout events, mapped by `krateo.io/cdc-pool` to the definitions whose
@@ -425,12 +433,14 @@ than 15s of skew, and then only during those 15s after a restart.
 - Lease events, filtered to a changed `holderIdentity` and to create/delete. A renewal changes neither,
   so 15 members renewing every 2s wake nothing. The informer still sees the renewals, which is how
   freshness is measured.
-- Residual: a member that dies inside a live process without releasing its Lease leaves no event. Its
-  definition reads `Unavailable` at its next poll, up to 3m later. A requeue after `G` for a pool member
-  closes that, at 15 requeues per 20s per pool; I would ship without it and measure first.
+- A member that dies inside a live process without releasing its Lease leaves no event. Each Observe of
+  a pool member records when its verdict can next change without one (a fresh Lease: when it would be
+  stale for G; a member starting: when G runs out), and the reconciler's poll hook brings it back then,
+  never later than the poll interval. Measured in `TestEnvtest_653_DeadMemberMeasured`.
 
-**RBAC.** core-provider needs `list`/`watch` on `coordination.k8s.io` leases regardless of leader
-election (#652 added `get`).
+**RBAC.** core-provider `get`/`list`/`watch`es `coordination.k8s.io` leases regardless of leader
+election, in the management namespace only: its cache is limited to it, because every node's Lease
+renews every 10s and is none of its business.
 
 **Remote pools:** none, because CEL refuses `pool` on a remote definition.
 

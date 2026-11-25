@@ -306,8 +306,8 @@ func TestWaitLeaseReleased(t *testing.T) {
 			if err := wait(dyn, 20*time.Second); err != nil {
 				t.Fatal(err)
 			}
-			if d := time.Since(start); d < leaseQuiet {
-				t.Errorf("released after %s, before it had stayed unheld for %s", d, leaseQuiet)
+			if d := time.Since(start); d < leaseQuiet() {
+				t.Errorf("released after %s, before it had stayed unheld for %s", d, leaseQuiet())
 			}
 		})
 	}
