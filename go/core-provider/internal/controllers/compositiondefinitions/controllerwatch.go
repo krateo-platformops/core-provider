@@ -4,6 +4,7 @@ import (
 	"context"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	appsv1 "k8s.io/api/apps/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlevent "sigs.k8s.io/controller-runtime/pkg/event"
@@ -29,7 +30,10 @@ const (
 
 func isCompositionControllerDeployment(obj client.Object) bool {
 	l := obj.GetLabels()
-	return l[labelComponent] == "controller" && l[labelManagedBy] == "krateo" && l[labelInstance] != "" && l[labelVersion] != ""
+	if l[labelComponent] != "controller" || l[labelManagedBy] != "krateo" {
+		return false
+	}
+	return (l[labelInstance] != "" && l[labelVersion] != "") || l[deploy.PoolLabel] != ""
 }
 
 func trunc63(s string) string {
@@ -47,6 +51,17 @@ func definitionsOfController(dep client.Object, cds []compositiondefinitionsv1al
 	}
 	l := dep.GetLabels()
 	var reqs []reconcile.Request
+	// A pool's Deployment (#653) carries no per-version labels: it runs every member, so it wakes every
+	// definition whose recorded placement (#580) is that pool, followers included.
+	if pool := l[deploy.PoolLabel]; pool != "" {
+		for i := range cds {
+			c := cds[i].Status.Controller
+			if c != nil && c.Pool == pool && c.Namespace == dep.GetNamespace() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&cds[i])})
+			}
+		}
+		return reqs
+	}
 	for i := range cds {
 		cd := &cds[i]
 		gvk := cd.Status.CurrentGVK()

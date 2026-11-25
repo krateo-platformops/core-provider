@@ -424,7 +424,12 @@ jobs:
           set -euo pipefail
           export KUBEBUILDER_ASSETS="$(setup-envtest use 1.36.0 -p path)"
           echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS"
-          go test -tags envtest -count=1 -timeout 20m -v -run 'Envtest' ./... 2>&1 | tee /tmp/envtest.log
+          # -timeout bounds ONE test binary, and internal/controllers/compositiondefinitions runs its
+          # envtests serially: 1015s on this runner before #653 (run 45563877034), whose tests add
+          # ~160s that cannot shrink without measuring less (a dead member is Unavailable only after a
+          # lease duration plus G, and the production rate limiter is measured on purpose). At 20m
+          # the binary timed out locally at 1202s with every test passing. 30m leaves room.
+          go test -tags envtest -count=1 -timeout 30m -v -run 'Envtest' ./... 2>&1 | tee /tmp/envtest.log
           if grep -q -- "--- SKIP" /tmp/envtest.log; then
             echo "::error::an envtest test SKIPPED - this job exists to run them"
             grep -- "--- SKIP" /tmp/envtest.log

@@ -67,7 +67,7 @@ func TestControllerConditions_ReadTheDeploymentThatRunsTheController(t *testing.
 	ctx := context.Background()
 	member := poolCD("team-a", "page", 1, "v1-0-0", "pages")
 
-	ready, _, ok, err := e.controllerConditions(ctx, &member, controllerPlacement(&member, pagesGVR))
+	ready, _, ok, err := e.controllerConditions(ctx, &member, controllerPlacement(&member, pagesGVR), pagesGVR)
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
@@ -77,7 +77,7 @@ func TestControllerConditions_ReadTheDeploymentThatRunsTheController(t *testing.
 
 	// CONTROL: the read before #580 (the dedicated name), against the same cluster.
 	old := compositiondefinitionsv1alpha1.ControllerStatus{Namespace: ns, Deployment: deploy.ControllerDeploymentKey(ns, pagesGVR).Name}
-	ready, _, _, _ = e.controllerConditions(ctx, &member, old)
+	ready, _, _, _ = e.controllerConditions(ctx, &member, old, pagesGVR)
 	if ready.Reason != cdreason.Creating.Condition().Reason || !strings.Contains(ready.Message, "not found") {
 		t.Errorf("control: the dedicated read should reproduce the defect (Creating, not found), got %s/%s %q", ready.Status, ready.Reason, ready.Message)
 	}
@@ -89,7 +89,7 @@ func TestControllerConditions_ReadTheDeploymentThatRunsTheController(t *testing.
 		if p.Mode != compositiondefinitionsv1alpha1.ControllerModePool {
 			t.Fatalf("owner placement %+v", p)
 		}
-		ready, _, _, err := e.controllerConditions(ctx, &follower, p)
+		ready, _, _, err := e.controllerConditions(ctx, &follower, p, pagesGVR)
 		if err != nil || ready.Reason != cdreason.Available.Condition().Reason {
 			t.Errorf("follower: Ready = %s/%s %q err=%v, want Available", ready.Status, ready.Reason, ready.Message, err)
 		}

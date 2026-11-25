@@ -687,7 +687,7 @@ func (e *external) observeFollower(ctx context.Context, cr *compositiondefinitio
 	// The OWNER decides where the shared controller runs, in a pool or not (#580).
 	placement := controllerPlacement(owner, gvr)
 	cr.Status.Controller = &placement
-	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement)
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement, gvr)
 	asFollower := func(c rtv1.Condition) rtv1.Condition { return followerReady(c, owner, gvr) }
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, asFollower, followerCondition(owner, gvr)); err != nil {
 		return reconciler.ExternalObservation{}, err

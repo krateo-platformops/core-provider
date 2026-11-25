@@ -267,11 +267,12 @@ func PoolMemberVersions(ctx context.Context, dyn dynamic.Interface, namespace, g
 // to be retried.
 var ErrPoolMemberNotDrained = errors.New("the pool's controller has not released its ownership Lease")
 
-// leaseQuiet is how long a Lease must stay unheld before its controller counts as stopped: longer than
+// leaseQuiet: LeaseTimings.Quiet. It was a constant (5s) until #653; it moves with the timings. Kept as
+// the reason it is what it is: longer than
 // the elector's longest wait between attempts (a 2s retry period jittered to 4.4s), so a second pool pod
 // (a rolling update), or a member that had only been waiting, has either taken it by then, and is waited
 // for in turn, or has seen the key leave the index.
-const leaseQuiet = 5 * time.Second
+func leaseQuiet() time.Duration { return LeaseTimings.Quiet() }
 
 // releasePoolMember stops gvr's controller in every pool of namespace that runs it, except keep, and
 // waits until it has stopped: the mark, the index, then the Lease (see the top of this file). left is
@@ -364,7 +365,7 @@ func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.N
 			holder, _, _ = unstructured.NestedString(l.Object, "spec", "holderIdentity")
 			secs, ok, _ := unstructured.NestedInt64(l.Object, "spec", "leaseDurationSeconds")
 			if !ok || secs <= 0 {
-				secs = 15
+				secs = int64(LeaseTimings.Duration / time.Second)
 			}
 			if r := l.GetResourceVersion(); r != record {
 				record, seen = r, now
@@ -377,12 +378,12 @@ func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.N
 		case free.IsZero():
 			free = now
 		}
-		if !held && now.Sub(free) >= leaseQuiet {
+		if !held && now.Sub(free) >= leaseQuiet() {
 			return nil
 		}
 		if now.After(deadline) {
 			if !held {
-				holder = "nobody for less than " + leaseQuiet.String()
+				holder = "nobody for less than " + leaseQuiet().String()
 			}
 			return fmt.Errorf("%w: %s is held by %s after %s; its env ConfigMap, RBAC and Lease grant are kept", ErrPoolMemberNotDrained, lease, holder, timeout)
 		}

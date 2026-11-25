@@ -9,6 +9,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	"io/fs"
 	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +166,14 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	// management cluster the chart ships it; for remote targets core-provider projects it
 	// into the target during bootstrap (see external.ensureCompositionVersionPolicy).
 
+	// #653: every pool member's state is its ownership Lease, seen through this clock, which the Lease
+	// watch below feeds. The watch is limited to the management namespace by the manager's cache (main.go).
+	leases, requeue := newLeaseClock(nil), &memberRequeue{}
+	leaseInformer, err := mgr.GetCache().GetInformer(context.Background(), &coordinationv1.Lease{})
+	if err != nil {
+		return fmt.Errorf("error getting the Lease informer: %w", err)
+	}
+	leases.synced = leaseInformer.HasSynced
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
 		reconciler.WithExternalConnecter(&connector{
@@ -178,7 +187,10 @@ func Setup(mgr ctrl.Manager, o Options) error {
 
 			removeDanglingRBAC: o.RemoveDanglingRBAC,
 			audit:              o.Audit,
+			leases:             leases,
+			requeue:            requeue,
 		}),
+		reconciler.WithPollIntervalHook(memberPollHook(requeue)),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
 		reconciler.WithLogger(l),
@@ -209,6 +221,9 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		Watches(&appsv1.Deployment{},
 			handler.EnqueueRequestsFromMapFunc(enqueueForControllerDeployment(cli)),
 			builder.WithPredicates(controllerDeploymentPredicate())).
+		// #653: a pool member's state is its Lease. A holder that changes, a Lease created or deleted,
+		// and a renewal after a silence wake the definitions it is for; a renewal does not.
+		Watches(&coordinationv1.Lease{}, leaseHandler(leases, cli)).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
@@ -357,6 +372,10 @@ type connector struct {
 
 	removeDanglingRBAC bool
 	audit              *auditrec.Recorder
+
+	// leases and requeue: a pool member's state, by its ownership Lease (#653, memberlease.go).
+	leases  *leaseClock
+	requeue *memberRequeue
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -382,6 +401,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		pluralizer:  c.pluralizer,
 
 		removeDanglingRBAC: c.removeDanglingRBAC,
+		leases:             c.leases,
+		requeue:            c.requeue,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -442,6 +463,9 @@ type external struct {
 
 	// removeDanglingRBAC: see Options.RemoveDanglingRBAC.
 	removeDanglingRBAC bool
+
+	leases  *leaseClock
+	requeue *memberRequeue
 
 	// connectedTarget is the KubernetesTarget these clients were built for, "" for the management
 	// cluster. See recordObservedGeneration.
@@ -1468,7 +1492,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// pass could not establish. A remote definition keeps plain Available.
 	placement := controllerPlacement(cr, gvr)
 	cr.Status.Controller = &placement // #580: recorded where the deployment is observed up to date
-	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement)
+	ready, active, ok, readErr := e.controllerConditions(ctx, cr, placement, gvr)
 	if err := applyControllerConditions(cr, ready, active, ok, readErr, func(c rtv1.Condition) rtv1.Condition { return c }, cdreason.Available.Condition()); err != nil {
 		return reconciler.ExternalObservation{}, err
 	}

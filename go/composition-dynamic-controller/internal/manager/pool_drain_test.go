@@ -199,7 +199,7 @@ func TestPoolDrain_BlocksNobodyElse(t *testing.T) {
 
 	set(map[string]string{"b": "1", "c": "1"}) // a leaves and drains; c joins
 	soon(t, "a cancelled", func() bool { return f.saw("cancel a=1") })
-	within(t, time.Second, "ReadyzCheck", func() { _ = p.ReadyzCheck(nil) })
+	within(t, time.Second, "ReadyzCheck", func() { _ = p.membersReady(nil) })
 	within(t, time.Second, "Members", func() {
 		if got := p.Members(); !reflect.DeepEqual(got, []string{"b", "c"}) {
 			t.Errorf("Members() = %v while a drains after leaving, want [b c]", got)
@@ -227,7 +227,7 @@ func TestPoolDrain_Readiness(t *testing.T) {
 	soon(t, "a cancelled", func() bool { return f.saw("cancel a=1") })
 	readyz := func() (err error) {
 		t.Helper()
-		within(t, time.Second, "ReadyzCheck", func() { err = p.ReadyzCheck(nil) })
+		within(t, time.Second, "ReadyzCheck", func() { err = p.membersReady(nil) })
 		return err
 	}
 	if err := readyz(); err == nil || !strings.HasPrefix(err.Error(), "a: ") || !strings.Contains(err.Error(), "draining") {
@@ -390,7 +390,7 @@ func TestPoolDrain_StopAllSupersedesASuccessor(t *testing.T) {
 		t.Fatal("stopAll returned before the member had drained")
 	case <-time.After(50 * time.Millisecond):
 	}
-	within(t, time.Second, "ReadyzCheck during stopAll", func() { _ = p.ReadyzCheck(nil) })
+	within(t, time.Second, "ReadyzCheck during stopAll", func() { _ = p.membersReady(nil) })
 	release()
 	within(t, 5*time.Second, "stopAll", func() { <-done })
 	if f.saw("start a=2") {
@@ -429,7 +429,7 @@ func TestPoolDrain_FailureWhileDraining(t *testing.T) {
 	soon(t, "a cancelled", func() bool { return f.saw("cancel a=1") })
 	release()
 	soon(t, "the successor started despite the failure", func() bool { return f.saw("start a=2") })
-	if err := p.ReadyzCheck(nil); err == nil || strings.Contains(err.Error(), "boom") {
+	if err := p.membersReady(nil); err == nil || strings.Contains(err.Error(), "boom") {
 		t.Errorf("ReadyzCheck = %v: the predecessor's error is not the successor's", err)
 	}
 	f.noOverlap(t)
@@ -453,7 +453,7 @@ func TestPoolDrain_FailingMember(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if err := p.ReadyzCheck(nil); err == nil || !strings.HasPrefix(err.Error(), "a: ") {
+	if err := p.membersReady(nil); err == nil || !strings.HasPrefix(err.Error(), "a: ") {
 		t.Errorf("ReadyzCheck = %v, want a named", err)
 	}
 	if got := f.lines("b"); !reflect.DeepEqual(got, []string{"start b=1"}) {
@@ -467,7 +467,7 @@ func TestPoolDrain_FailingMember(t *testing.T) {
 	f.mu.Unlock()
 	set(map[string]string{"a": "2", "b": "1"})
 	soon(t, "a runs its new configuration", func() bool { return f.saw("start a=2") })
-	if err := p.ReadyzCheck(nil); err == nil || err.Error() != "a: starting" {
+	if err := p.membersReady(nil); err == nil || err.Error() != "a: starting" {
 		t.Errorf("ReadyzCheck = %v: the old configuration's failure is not the new one's", err)
 	}
 	set(map[string]string{"b": "1"})
@@ -495,7 +495,7 @@ func TestPoolDrain_AnySequenceEndsOnTheLastIndex(t *testing.T) {
 			last["k0"] = "last"
 		}
 		set(last)
-		within(t, time.Second, "ReadyzCheck", func() { _ = p.ReadyzCheck(nil) })
+		within(t, time.Second, "ReadyzCheck", func() { _ = p.membersReady(nil) })
 		time.Sleep(time.Duration(rnd.Intn(4)) * time.Millisecond)
 	}
 	if n := f.count("stop k0=0"); n != 0 {

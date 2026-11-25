@@ -189,8 +189,8 @@ func TestControllerConditionsReadNoConfigMap(t *testing.T) {
 	old := ManagementNamespace
 	ManagementNamespace = leakNS
 	t.Cleanup(func() { ManagementNamespace = old })
-	_, active, ok, err := e.controllerConditions(context.Background(), &cr,
-		controllerPlacement(&cr, schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "pages"}))
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "pages"}
+	_, active, ok, err := e.controllerConditions(context.Background(), &cr, controllerPlacement(&cr, gvr), gvr)
 	if err != nil || !ok || active.Type == "" {
 		t.Fatalf("active = %+v, %v, %v; want a verdict, or nothing was shown", active, ok, err)
 	}

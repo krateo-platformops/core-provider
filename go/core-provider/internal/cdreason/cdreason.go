@@ -131,9 +131,9 @@ var (
 	ScaledToZero = ready(conditions.ReasonScaledToZero, metav1.ConditionTrue, WriterCoreProvider, Healthy,
 		"Observe: the controller is at 0 replicas and the definition opted into scale-to-zero (#393); it wakes on the first instance")
 	Creating = ready(rtv1.ReasonCreating, metav1.ConditionFalse, WriterCoreProvider, Converging,
-		"Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, the controller Deployment is absent or rolling out, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387). Update: the pass that switches status to a new version, until Observe looks at its controller")
+		"Observe: a first pass (seeded before any work), the CRD does not exist yet or is not yet Established, the controller Deployment is absent or rolling out, an update pending with no earlier verdict to keep (#395), or the definition has just become the controller's owner (#387); for a pool member whose pool runs, its controller is starting there, its ownership Lease not yet held by the pool for less than G (20s at the default timings), or is taking over from the Lease's current holder (#653). Update: the pass that switches status to a new version, until Observe looks at its controller")
 	Unavailable = ready(rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider, Failed,
-		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, or adding the served version is refused (a held version, no room); the message says which, and for lost availability ends with the first not-ready pod's cause, e.g. \"; pod <name>: restarting (last exit: Error)\" (#559)")
+		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, a pool member's controller is not running in its pool (its ownership Lease not held by the pool for G or more, #653), or adding the served version is refused (a held version, no room); the message says which, and for lost availability ends with the first not-ready pod's cause, e.g. \"; pod <name>: restarting (last exit: Error)\" (#559)")
 	RemoteChartUnreachable = ready(ReasonRemoteChartUnreachable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it")
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
@@ -185,13 +185,13 @@ const (
 // The reasons of those types, each with the one status it is written with.
 var (
 	ControllerRunning = on(TypeControllerActive, conditions.ReasonRunning, metav1.ConditionTrue, WriterCoreProvider,
-		"the controller Deployment has replicas declared; the message says whether scale-to-zero applies and when")
+		"the controller Deployment has replicas declared; the message says whether scale-to-zero applies and when; for a pool member, its pool runs, and its controller holds its ownership Lease, is starting or is taking over (#653)")
 	ControllerScaledToZero = on(TypeControllerActive, conditions.ReasonScaledToZero, metav1.ConditionFalse, WriterCoreProvider,
 		"0 replicas, and the definition opted into scale-to-zero: idle, wakes on the first instance (#393)")
 	ControllerUnavailable = on(TypeControllerActive, rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider,
-		"0 replicas, and the definition did NOT opt into scale-to-zero: nothing reconciles the Kind")
+		"0 replicas, and the definition did NOT opt into scale-to-zero, or, for a pool member, its ownership Lease has not been held by the pool for G or more (#653): nothing reconciles the Kind")
 	ControllerNotObserved = on(TypeControllerActive, rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterCoreProvider,
-		"the controller Deployment was not found or could not be read")
+		"the controller Deployment was not found or could not be read, or, for a pool member, core-provider has not listed the ownership Leases yet (#653)")
 
 	SchemaFullyEnforced = on(TypeSchemaFullyEnforced, "FullyEnforced", metav1.ConditionTrue, WriterCoreProvider,
 		"the generated CRD enforces every constraint in the chart's values schema")

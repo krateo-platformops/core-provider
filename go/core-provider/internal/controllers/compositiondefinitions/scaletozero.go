@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -204,9 +205,14 @@ func lostAvailability(available *appsv1.DeploymentCondition) string {
 // (Diego, 2026-11-11), and a remote one keeps the Ready it had. readErr is the Deployment read's error
 // other than NotFound: the owner's Observe returns it, because an unreadable controller cannot vouch
 // for Available (active still says why).
+//
+// A pool member's own state is its ownership Lease (#653, memberlease.go): read on top of the pool
+// Deployment's verdict, so one member that does not run reads Unavailable on its own definition, and
+// the others keep theirs.
 func (e *external) controllerConditions(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition,
-	placement compositiondefinitionsv1alpha1.ControllerStatus) (ready, active rtv1.Condition, ok bool, readErr error) {
+	placement compositiondefinitionsv1alpha1.ControllerStatus, gvr schema.GroupVersionResource) (ready, active rtv1.Condition, ok bool, readErr error) {
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		e.requeue.set(client.ObjectKeyFromObject(cr), time.Time{}) // a remote definition is no pool member (#653)
 		return rtv1.Condition{}, rtv1.Condition{}, false, nil
 	}
 	// The Deployment that RUNS the controller (#580): for a pool member that is the pool's
@@ -223,6 +229,16 @@ func (e *external) controllerConditions(ctx context.Context, cr *compositiondefi
 		return ready, active, true, fmt.Errorf("reading the controller Deployment: %w", err)
 	default:
 		ready, active = controllerReadiness(cr, cr.Status.Kind, &dep, nil, e.controllerPods(ctx, &dep))
+	}
+	if placement.Mode != compositiondefinitionsv1alpha1.ControllerModePool || e.leases == nil {
+		e.requeue.set(client.ObjectKeyFromObject(cr), time.Time{}) // not (or no longer) a pool member
+		return ready, active, true, nil
+	}
+	s := e.leases.state(placement.Pool, gvr, placement.Namespace)
+	e.requeue.set(client.ObjectKeyFromObject(cr), s.recheck)
+	ready, active, known := memberConditions(ready, active, s, placement.Pool, gvr)
+	if !known {
+		return ready, active, true, fmt.Errorf("reading the ownership Lease %s: core-provider has not listed the Leases yet", s.lease)
 	}
 	return ready, active, true, nil
 }
