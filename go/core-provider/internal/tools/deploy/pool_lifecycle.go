@@ -188,7 +188,9 @@ func reconcilePool(ctx context.Context, opts PoolOptions, pool string, touched b
 		return err
 	}
 	defer lockPool(opts.Namespace, pool)()
-	// Under the lock, so a member that joined since the caller's list is seen.
+	// Under the lock, so a member that joined since the caller's list is seen and its pool is not
+	// deleted. Correctness does not rest on it: the joiner's own EnsurePool takes this lock after, and
+	// recreates a pool deleted under it before its dedicated controller is retired.
 	pools, err := listPools(ctx, opts.DynClient, opts.Namespace)
 	if err != nil {
 		return err

@@ -1081,6 +1081,11 @@ func TestEnvtest_652_DeleteOneVersionOfAKind(t *testing.T) {
 	}
 	key1, key2 := "alphas-"+v1, "alphas-"+v2
 	e.wantIndex("two versions of one Kind", "web", key1, key2)
+	// Without its published schema, which would otherwise hold the finalizer by itself: what keeps it is
+	// that the pool still runs the controller.
+	if err := e.c.cs.CoreV1().ConfigMaps(self642CDNS).Delete(context.Background(), key2+"-jsonschema-configmap", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("premise: the published schema %s: %v", key2+"-jsonschema-configmap", err)
+	}
 	if err := e.c.cl.Delete(context.Background(), b.cd()); err != nil {
 		t.Fatal(err)
 	}
@@ -1214,6 +1219,16 @@ func TestEnvtest_652_ObserveRepairsThePool(t *testing.T) {
 			cm, err := cms.Get(ctx, e.key(a, v1)+"-configmap", metav1.GetOptions{})
 			return err == nil && cm.Annotations[deploy.PoolDrainingAnnotation] == "" && reflect.DeepEqual(e.index("web"), want)
 		}},
+		{"marked as leaving and already dropped: a leave interrupted, then a rejoin", func(t *testing.T) {
+			if _, err := cms.Patch(ctx, e.key(a, v1)+"-configmap", types.MergePatchType,
+				[]byte(`{"metadata":{"annotations":{"`+deploy.PoolDrainingAnnotation+`":"true"}}}`), metav1.PatchOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			patchIndex(t, func(d map[string]string) { delete(d, e.key(a, v1)) })
+		}, func() bool {
+			cm, err := cms.Get(ctx, e.key(a, v1)+"-configmap", metav1.GetOptions{})
+			return err == nil && cm.Annotations[deploy.PoolDrainingAnnotation] == "" && reflect.DeepEqual(e.index("web"), want)
+		}},
 		{"the Deployment is gone", func(t *testing.T) {
 			if err := deps.Delete(ctx, names.Workload, metav1.DeleteOptions{}); err != nil {
 				t.Fatal(err)
@@ -1224,6 +1239,19 @@ func TestEnvtest_652_ObserveRepairsThePool(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, func() bool { return e.exists(&rbacv1.Role{}, names.Workload) }},
+		{"its process ConfigMap is edited", func(t *testing.T) {
+			cm, err := cms.Get(ctx, names.EnvConfigMap, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cm.Data["COMPOSITION_CONTROLLER_POOL_WORKERS"] = "99"
+			if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}, func() bool {
+			cm, err := cms.Get(ctx, names.EnvConfigMap, metav1.GetOptions{})
+			return err == nil && cm.Data["COMPOSITION_CONTROLLER_POOL_WORKERS"] != "99"
+		}},
 		{"a release changes only the pool's image", func(_ *testing.T) {
 			root := t.TempDir() // the outer test's: read by every later pass
 			if _, err := renderChartAssets(root, ns652, "ghcr.io/krateo-platformops/composition-dynamic-controller:652-next"); err != nil {
