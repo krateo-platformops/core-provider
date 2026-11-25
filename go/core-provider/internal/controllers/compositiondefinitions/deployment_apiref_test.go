@@ -16,8 +16,7 @@ func renderCDCDeployment(t *testing.T, apiRefName string) appsv1.Deployment {
 		schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "fireworksapps"},
 		types.NamespacedName{Name: "fireworksapps-v1-0-0-controller", Namespace: "demo"},
 		"testdata/manifests/deployment.yaml",
-		"serviceAccountName", "fireworksapps-v1-0-0",
-		"api_ref_name", apiRefName,
+		deploymentTemplateValues("serviceAccountName", "fireworksapps-v1-0-0", "api_ref_name", apiRefName)...,
 	)
 	if err != nil {
 		t.Fatalf("rendering deployment (apiRef=%q): %v", apiRefName, err)

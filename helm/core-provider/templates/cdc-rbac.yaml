@@ -1,27 +1,2 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "core-provider.fullname" . }}-rbac-configmap
-  labels:
-    {{- include "core-provider.labels" . | nindent 4 }}
-data:
-  serviceaccount.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/serviceaccount.yaml") . | indent 4 }}
-  clusterrole.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/clusterrole.yaml") . | indent 4 }}
-  clusterrolebinding.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/clusterrolebinding.yaml") . | indent 4 }}
-  compositiondefinition-role.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/compositiondefinition-role.yaml") . | indent 4 }}
-  compositiondefinition-rolebinding.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/compositiondefinition-rolebinding.yaml") . | indent 4 }}
-  secret-role.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/secret-role.yaml") . | indent 4 }}
-  secret-rolebinding.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/secret-rolebinding.yaml") . | indent 4 }}
-  lease-role.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/lease-role.yaml") . | indent 4 }}
-  lease-rolebinding.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/lease-rolebinding.yaml") . | indent 4 }}
-  authn-serviceaccount.yaml: |
-{{ tpl (.Files.Get "assets/cdc/rbac/authn-serviceaccount.yaml") . | indent 4 }}
+{{- /* The data and the name are defined together in _assets.tpl (#651). */ -}}
+{{ include "core-provider.assetConfigMap" (dict "root" . "asset" "rbac-configmap") }}

@@ -103,3 +103,16 @@ the upstream roadmap and set the direction for everything below.
   the remote seed left Observe with an error the runtime takes for "could not tell". It now reads
   `Ready=False`/`RemoteChartUnreachable`, on a bump of a definition that worked before too (its status still
   names the version it serves), until the chart moves somewhere the spoke reaches.
+
+## A core-provider renders only the templates it was deployed with (2026-11)
+
+- **Content-addressed template ConfigMaps** (#651): the kubelet refreshed the mounted templates in the
+  *running* pod, so during an upgrade the old engine rendered the new chart's templates. On a demo tenant
+  (acmp, 2026-11-24, 2.13.57 to 2.13.105) a full pod quota kept the new engine from starting: seven
+  controllers came up with a lease named `<no value>` and no grant for it, and held the room the only
+  process able to repair them needed. The ConfigMaps are now immutable and named by their data's digest.
+  This protects upgrades **from** any earlier version too, since nothing in the old binary takes part. A
+  pod that replaces a deleted old one while the roll is stuck runs the same templates (the kubelet keeps an
+  immutable ConfigMap that a pod on its node still names) or can't mount them; it never runs the new ones.
+- **A missing template key refuses the render** (#651, `missingkey=error`), on rows that already exist. A
+  scan for `<no value>` would have missed half of it: a missing key piped through `quote` renders nothing.

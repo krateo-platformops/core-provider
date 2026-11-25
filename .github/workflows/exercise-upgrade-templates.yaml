@@ -1,0 +1,97 @@
+name: exercise-upgrade-templates
+
+# #651: while a roll of core-provider is stuck, the OLD process must keep rendering its own controller
+# templates. The half that decides is the kubelet's (a running pod keeps its files when the ConfigMap its
+# volume names is gone, also across a container restart), which no unit or envtest test reaches. This
+# upgrades a real core-provider on a disposable kind cluster and keeps the new pod from starting.
+#
+# On a pull request it runs the PR's own charts and images, from released ones, and beside it the control:
+# the same steps to a released chart from before the fix, which must fail exactly its arms, for the defect
+# itself, and is then green. By hand (workflow_dispatch) it runs a released version as the target. A red
+# check here is always about the version it names.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released core-provider version to upgrade TO"
+        required: true
+      control:
+        description: "A version before #651, as the control: green only if exactly the arms #651 fixed fail"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "helm/core-provider/**"
+      - "go/core-provider/hack/upgrade-templates-e2e/**"
+      - "go/core-provider/internal/tools/deploy/**"
+      - "go/core-provider/internal/tools/objects/**"
+      - ".github/workflows/exercise-upgrade-templates.yaml"
+
+permissions:
+  contents: read
+
+env:
+  # The last release before the fix: what upgrades start from, and the control's target.
+  BEFORE_651: "2.13.129"
+
+jobs:
+  exercise:
+    name: ${{ matrix.start == 'main' && 'main' || format('from {0}', matrix.start) }}${{ matrix.control && ' control' || '' }} (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # main: every arm, from the last release before the fix. Each other entry is a STARTING version
+        # that clusters really upgrade from, through the from-old suite (quota-full, then converge):
+        # 2.13.57 (the incident's, acmp), 2.13.105 (acmp's tenants acme and globex run it), 2.13.111
+        # (demo). Their charts and images are published, their kubeVersion floor is this cluster's 1.36,
+        # and each installs with the same values and its own core-provider-crds chart; 2.13.57 runs without
+        # leader election (its chart's default then), the others with it. Parallel jobs.
+        start: [main, "2.13.57", "2.13.105", "2.13.111"]
+        control: ${{ fromJSON(github.event_name == 'pull_request' && '[false, true]' || format('[{0}]', inputs.control)) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Check what the exercise concludes
+        run: python3 -I go/core-provider/hack/upgrade-templates-e2e/verdicts_test.py
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.19.0
+      - name: Create the kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          # The CLI and the node image go together (integration.yaml says why). The charts need >= 1.36.
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4
+          cluster_name: exercise
+          config: go/core-provider/hack/upgrade-templates-e2e/kind.yaml
+      - name: Build and load this commit's images
+        if: github.event_name == 'pull_request' && !matrix.control
+        run: |
+          set -euo pipefail
+          tag="ci-${GITHUB_SHA::12}"
+          for m in core-provider composition-dynamic-controller; do
+            docker build -q -t "ghcr.io/krateo-platformops/$m:$tag" "go/$m"
+            kind load docker-image "ghcr.io/krateo-platformops/$m:$tag" --name exercise
+          done
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Exercise
+        env:
+          START: ${{ matrix.start }}
+          CONTROL: ${{ matrix.control }}
+          VERSION: ${{ inputs.version || '2.13.129' }}
+        run: |
+          set -euo pipefail
+          helm version --short
+          if [ "$START" = main ]; then suite=main from="$BEFORE_651"; else suite=from-old from="$START"; fi
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            target=(--target-chart helm/core-provider --crds-chart helm/core-provider-crds --image-tag "$IMAGE_TAG"
+                    --chart-inspector-tag "$BEFORE_651")
+          else
+            target=(--target-version "$VERSION")
+          fi
+          if [ "$CONTROL" = true ]; then target+=(--control); fi
+          python3 -I go/core-provider/hack/upgrade-templates-e2e/run.py \
+            --suite "$suite" --from "$from" --node exercise-control-plane "${target[@]}" \
+            --probe go/composition-dynamic-controller/hack/interrupted-install-e2e/chart

@@ -58,7 +58,7 @@ func TestShippedControllerDeployment_CarriesTheConfigChecksum(t *testing.T) {
 
 	var with appsv1.Deployment
 	if err := objects.CreateK8sObject(&with, gvr, getCDCDeploymentNN(nn), tmpl,
-		"serviceAccountName", "sa", "api_ref_name", "", "config_checksum", "abc123"); err != nil {
+		append(deploymentIdentityValues("sa", ""), "config_checksum", "abc123")...); err != nil {
 		t.Fatalf("stage 2 with a checksum: %v", err)
 	}
 	if got := with.Spec.Template.Annotations["krateo.io/config-checksum"]; got != "abc123" {
@@ -67,7 +67,7 @@ func TestShippedControllerDeployment_CarriesTheConfigChecksum(t *testing.T) {
 
 	var without appsv1.Deployment
 	if err := objects.CreateK8sObject(&without, gvr, getCDCDeploymentNN(nn), tmpl,
-		"serviceAccountName", "sa", "api_ref_name", ""); err != nil {
+		deploymentIdentityValues("sa", "")...); err != nil {
 		t.Fatalf("stage 2 without a checksum: %v", err)
 	}
 	if v, ok := without.Spec.Template.Annotations["krateo.io/config-checksum"]; ok {

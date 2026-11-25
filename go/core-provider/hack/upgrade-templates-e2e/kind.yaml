@@ -1,0 +1,9 @@
+# The kubelet refreshes a pod's ConfigMap volumes on its sync of the pod: every minute by default, every
+# 10 seconds here, so the exercise's holds outlast several refreshes. Only the rate differs.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+kubeadmConfigPatches:
+  - |
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    kind: KubeletConfiguration
+    syncFrequency: 10s

@@ -46,26 +46,6 @@ func repointBindings(sa corev1.ServiceAccount, bindings ...*[]rbacv1.Subject) {
 	}
 }
 
-// memberEnvValues are the extra values a pool member's env ConfigMap is rendered with
-// (assets/cdc/configmap.yaml): its pool, and its own workers and resync interval only when the
-// definition sets them (manager.MemberFromConfig). A dedicated controller renders none of them, so
-// its ConfigMap, and the checksum its pod carries, do not move (TestPoolMemberConfigMapKeys).
-func memberEnvValues(o DeployOptions) []any {
-	if !o.poolMember() {
-		return nil
-	}
-	values := []any{"pool", o.Pool}
-	if c := o.Controller; c != nil {
-		if c.Workers != nil {
-			values = append(values, "workers", *c.Workers)
-		}
-		if c.ResyncInterval != nil {
-			values = append(values, "resyncInterval", *c.ResyncInterval)
-		}
-	}
-	return values
-}
-
 // poolCutoverDrainTimeout bounds how long joining a pool waits for the dedicated controller to exit.
 const poolCutoverDrainTimeout = 5 * time.Minute
 

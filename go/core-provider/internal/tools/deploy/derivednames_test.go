@@ -47,7 +47,7 @@ func TestDerivedNameViolations_AgreeWithTheShippedTemplates(t *testing.T) {
 
 		// What the write would produce.
 		var dep appsv1.Deployment
-		if err := objects.CreateK8sObject(&dep, gvr, nn, depTemplate, "serviceAccountName", resourceNamer(gvr.Resource, gvr.Version), "api_ref_name", ""); err != nil {
+		if err := objects.CreateK8sObject(&dep, gvr, nn, depTemplate, deploymentIdentityValues(resourceNamer(gvr.Resource, gvr.Version), "")...); err != nil {
 			t.Fatalf("depLen %d: stage 2, Deployment: %v", tc.depLen, err)
 		}
 		var svc corev1.Service

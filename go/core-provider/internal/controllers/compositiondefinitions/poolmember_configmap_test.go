@@ -31,6 +31,10 @@ func renderMemberConfigMap(t *testing.T, extra map[string]any) map[string]string
 		t.Fatal(err)
 	}
 	values := templates.Values(templates.Renderoptions{Group: "composition.krateo.io", Version: "v1-2-4", Resource: "fireworksapps", Namespace: "krateo-system"})
+	unset := envConfigMapTemplateValues()
+	for i := 0; i < len(unset); i += 2 {
+		values[unset[i].(string)] = unset[i+1]
+	}
 	for k, v := range extra {
 		values[k] = v
 	}

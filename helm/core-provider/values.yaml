@@ -166,6 +166,16 @@ topologySpreadConstraints: []
 # GracefulShutdownTimeout, ~30s). Keep the pod grace period above it so the kubelet does not SIGKILL
 # mid-drain.
 terminationGracePeriodSeconds: 45
+# core-provider's Deployment strategy. Empty (the default): not rendered, so Kubernetes' own default
+# applies (RollingUpdate 25%/25%: at one replica the new pod starts beside the old one, which keeps
+# running until the new one is Ready). That needs room for one more pod, and it is what keeps
+# core-provider running when the new pod cannot start (image pull failure, missing CRDs).
+# rollingUpdate {maxSurge: 0, maxUnavailable: 1} replaces the pod in place instead: it fits a namespace
+# whose pod quota is full, but a new pod that cannot start leaves no core-provider.
+strategy: {}
+# PriorityClass of core-provider's pod, by name. Empty (the default): not rendered. The class must
+# exist. It lets the scheduler preempt for this pod; it does NOT bypass a ResourceQuota.
+priorityClassName: ""
 autoscaling:
   enabled: false
   minReplicas: 1

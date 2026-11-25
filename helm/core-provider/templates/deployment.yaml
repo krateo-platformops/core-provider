@@ -8,13 +8,19 @@ spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "core-provider.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
-        checksum/configmap: {{ printf "%s%s%s%s%s%s" (include (print $.Template.BasePath "/configmap.yaml") .) (include (print $.Template.BasePath "/cdc-configmap.yaml") .) (include (print $.Template.BasePath "/cdc-deployment.yaml") .) (include (print $.Template.BasePath "/cdc-rbac.yaml") .) (include (print $.Template.BasePath "/cdc-service.yaml") .) (include (print $.Template.BasePath "/jsonschema-configmap.yaml") .) | sha256sum }}
+        # The env ConfigMap only (envFrom). The five template ConfigMaps roll the pod by their names in
+        # spec.volumes, which carry the digest of their data (_assets.tpl, #651).
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -29,6 +35,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "core-provider.serviceAccountName" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{ . }}
       {{- end }}
@@ -122,20 +131,20 @@ spec:
       volumes:
         - name: cdc-deployment
           configMap:
-            name: {{ include "core-provider.fullname" . }}-cdc-deployment
+            name: {{ include "core-provider.assetName" (dict "root" . "asset" "cdc-deployment") }}
         - name: cdc-configmap
           configMap:
-            name: {{ include "core-provider.fullname" . }}-cdc-configmap
+            name: {{ include "core-provider.assetName" (dict "root" . "asset" "cdc-configmap") }}
         - name: cdc-rbac
           configMap:
-            name: {{ include "core-provider.fullname" . }}-rbac-configmap
+            name: {{ include "core-provider.assetName" (dict "root" . "asset" "rbac-configmap") }}
         - name: jsonschema-configmap
           configMap:
-            name: {{ include "core-provider.fullname" . }}-jsonschema-configmap
+            name: {{ include "core-provider.assetName" (dict "root" . "asset" "jsonschema-configmap") }}
         {{- if .Values.cdc.metrics.enabled }}
         - name: cdc-service
           configMap:
-            name: {{ include "core-provider.fullname" . }}-service-configmap
+            name: {{ include "core-provider.assetName" (dict "root" . "asset" "service-configmap") }}
         {{- end }}
         {{- if .Values.apiRefRBAC.enabled }}
         - name: authn-serviceaccount-token
