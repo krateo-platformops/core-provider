@@ -36,7 +36,9 @@ const (
 //     keeps failing, every retry writes a new failed revision, and it too has no record (what was
 //     applied before it is unknown), so a line per revision is a line per pass. A process restart says
 //     it once more;
-//   - not recorded, with an error: the record could not be read. Every pass, as an error.
+//   - not recorded, with an error: the heal could not tell, because the record could not be read or
+//     the revision was superseded after Reconcile read it. Every pass, with the error, and the
+//     once-per-composition flag is neither set nor cleared.
 func reportFailedReleaseHeal(mg *unstructured.Unstructured, res *helmconfig.ReconcileResult, release string, log logging.Logger) {
 	if res == nil {
 		return // the Reconcile failed before it could say anything: the state is unknown, so is kept
@@ -49,11 +51,14 @@ func reportFailedReleaseHeal(mg *unstructured.Unstructured, res *helmconfig.Reco
 		return
 	}
 	fields := []any{"release", release, "revision", heal.Revision, "recorded", heal.Recorded}
-	if !heal.Recorded {
-		if heal.Err != nil {
-			log.Info(msgFailedReleaseHealFailed, append(fields, "error", heal.Err.Error())...)
-			return
-		}
+	if !heal.Recorded && heal.Err != nil {
+		// The heal could not tell whether the revision is recorded: it could not be read, or another
+		// revision was written after Reconcile read the release (plumbing v1.111.0 says which). Not "no
+		// record", and the flag below is left as it is.
+		log.Info(msgFailedReleaseHealFailed, append(fields, "error", heal.Err.Error())...)
+		return
+	}
+	if !heal.Recorded && heal.Err == nil {
 		if _, said := failedReleaseNoRecordSaid.LoadOrStore(mg.GetUID(), heal.Revision); said {
 			return
 		}

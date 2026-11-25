@@ -83,6 +83,15 @@ func TestReportFailedReleaseHeal(t *testing.T) {
 		one(t, report("e", res), failed, "revision=2", "error=reading revision 2: boom")
 		one(t, report("e", res), failed)
 	})
+	t.Run("superseded after Reconcile read it: the error line, never the no-record one, and the flag untouched", func(t *testing.T) {
+		race := retry(helmconfig.FailedReleaseHeal{Revision: 2, Err: errors.New("revision 2 is no longer the latest: revision 3 was written since")})
+		// From a clean flag: the race does not set it, so the no-record line still comes after it.
+		one(t, report("x", race), failed, "revision=2", "recorded=false", "error=revision 2 is no longer the latest: revision 3 was written since")
+		one(t, report("x", retry(helmconfig.FailedReleaseHeal{Revision: 3})), noRecord, "revision=3")
+		// With the flag set: the race does not clear it, so the no-record line is not repeated.
+		one(t, report("x", race), failed)
+		none(t, report("x", retry(helmconfig.FailedReleaseHeal{Revision: 4})))
+	})
 	t.Run("no record: once per composition while it stays unrecorded, however many revisions", func(t *testing.T) {
 		one(t, report("n", retry(helmconfig.FailedReleaseHeal{Revision: 2})), noRecord, "release=rel", "revision=2", "recorded=false")
 		none(t, report("n", retry(helmconfig.FailedReleaseHeal{Revision: 2})))
