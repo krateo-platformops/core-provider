@@ -102,6 +102,13 @@ func TestCDReadyReasonTableIsCurrent(t *testing.T) {
 // of the cluster, or the blueprint's maintainers. An action that is not a wait names one of them.
 var actorPhrase = regexp.MustCompile(`(?i)\b(you|an admin|the blueprint's maintainers)\b`)
 
+// fieldName is an annotation key, a field path or a field name in an action (frontend, #667): the
+// portal shows those under Details, not in the sentence.
+var fieldName = regexp.MustCompile(`krateo\.io/|\bstatus\.|\bspec\.|\bmetadata\.|\bapiRef\b`)
+
+// offVocabulary are the words the portal does not use: it says blueprint, data source and resources.
+var offVocabulary = regexp.MustCompile(`(?i)\b(composition ?definitions?|definitions?|restactions?|children|child)\b`)
+
 // cliStep is a command line in an action, which is on-screen text for a person, not a runbook.
 var cliStep = regexp.MustCompile(`(?i)\bkubectl\b|\bhelm (rollback|upgrade|install|uninstall)\b`)
 
@@ -149,6 +156,12 @@ func TestEveryReasonHasItsAuthoredFields(t *testing.T) {
 		statusFieldExists("status.migratedValues.refused.fields") {
 		t.Fatal("control: the status resolver does not tell a CompositionDefinitionStatus field from another path")
 	}
+	var types []string
+	for _, r := range Table() {
+		types = append(types, regexp.QuoteMeta(string(r.Type())))
+	}
+	// A condition type named in an action (Ready, Synced, ...), or the Sync button, which only re-reads.
+	conditionTypes := regexp.MustCompile(`\b(` + strings.Join(append(types, "Sync"), "|") + `)\b`)
 	withAction, withDetail := 0, 0
 	for _, r := range Table() {
 		key := fmt.Sprintf("%s/%s/%s/%s", r.Type(), r.Status(), r, r.Writer())
@@ -171,6 +184,18 @@ func TestEveryReasonHasItsAuthoredFields(t *testing.T) {
 		}
 		if a := r.Action(); cliStep.MatchString(a) {
 			t.Errorf("%s: action %q has a command-line step", key, a)
+		}
+		if a := r.Action(); fieldName.MatchString(a) || conditionTypes.MatchString(a) {
+			t.Errorf("%s: action %q names an annotation, a field or a condition: plain words only (the annotation goes in Annotation)", key, a)
+		}
+		if a := r.Action(); offVocabulary.MatchString(a) {
+			t.Errorf("%s: action %q says %q: the portal's words are blueprint, data source and resources", key, a, offVocabulary.FindString(a))
+		}
+		if c := r.Control(); c != "" && (!portalControls[c] || !strings.Contains(r.Action(), c)) {
+			t.Errorf("%s: control %q is not one of %v, or the action does not name it", key, c, portalControls)
+		}
+		if a := r.Annotation(); a != nil && !strings.HasPrefix(a.Name, "krateo.io/") {
+			t.Errorf("%s: annotation %q is not a krateo.io/ key", key, a.Name)
 		}
 		if r.Action() != "" {
 			withAction++

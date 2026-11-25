@@ -33,9 +33,12 @@ package cdreason
 import (
 	"errors"
 
+	"github.com/krateo-platformops/core-provider/internal/tools/chart"
 	"github.com/krateo-platformops/core-provider/internal/tools/restactionrbac"
 	"github.com/krateo-platformops/plumbing/conditions"
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
+	prmeta "github.com/krateo-platformops/provider-runtime/pkg/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -128,6 +131,12 @@ type Doc struct {
 	// portal shows it as is, so changing it is a UI change. Required unless the reason is healthy or
 	// steady.
 	Action string
+	// Control is the portal control the person uses, by its on-screen label, when one exists: one of
+	// ControlResume and ControlClearCreatePending. agentiko's runAction reads it.
+	Control string
+	// Annotation is the annotation the person's step sets or removes, when it is one. The action never
+	// names it: the portal shows it under Details. Built from the constant the code reads it by.
+	Annotation *Annotation
 	// DetailFields are JSON paths of the CompositionDefinition status fields written with the reason,
 	// beyond the condition's own message. Each must be a field of CompositionDefinitionStatus.
 	DetailFields []string
@@ -144,6 +153,41 @@ func (r Reason) Action() string { return r.docOf().Action }
 
 // DetailFields are the status fields carrying its detail.
 func (r Reason) DetailFields() []string { return append([]string(nil), r.docOf().DetailFields...) }
+
+// Annotation is the annotation a person's step sets or removes (#667).
+type Annotation struct {
+	Name string
+	// Value is the value to set; nil when the step removes the annotation, or when the value is a
+	// choice the action names in words.
+	Value *string
+}
+
+// annotation is an Annotation with no value to set.
+func annotation(name string) *Annotation { return &Annotation{Name: name} }
+
+// annotationValue is an Annotation set to value.
+func annotationValue(name, value string) *Annotation { return &Annotation{Name: name, Value: &value} }
+
+// The portal's controls an action may name, by their on-screen label (portal main, 2026-11-25): the
+// composition page's Pause/Resume, which toggles krateo.io/paused, and the resource page's "Clear
+// create-pending annotation", which removes krateo.io/external-create-pending. The composition page's
+// Sync button only re-reads data and is never an action.
+const (
+	ControlResume             = "Resume"
+	ControlClearCreatePending = "Clear create-pending annotation"
+)
+
+// Control is the portal control the person uses, or "".
+func (r Reason) Control() string { return r.docOf().Control }
+
+// Annotation is the annotation the person's step sets or removes, or nil.
+func (r Reason) Annotation() *Annotation {
+	if a := r.docOf().Annotation; a != nil {
+		c := *a
+		return &c
+	}
+	return nil
+}
 
 // docOf is r's Doc, empty for the zero Reason.
 func (r Reason) docOf() Doc {
@@ -233,7 +277,7 @@ var (
 	RemoteChartUnreachable = ready(ReasonRemoteChartUnreachable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it",
 		Clearance{Indefinite, "until the chart's URL is one the remote target can fetch"},
-		Doc{Since: "2.6.0", Action: "An admin points the definition at a chart URL the remote cluster can reach."})
+		Doc{Since: "2.6.0", Action: "An admin points the blueprint at a chart URL the remote cluster can reach."})
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a `default` in the chart's values.schema.json that crdgen carries into the CRD fails its own subschema, so no CRD is generated; the message names each JSON pointer (plumbing#205). Nothing is applied, and a definition that worked before keeps serving its last CRD",
 		Clearance{Indefinite, "until the chart's values.schema.json is fixed"},
@@ -241,11 +285,11 @@ var (
 	ValuesSchemaMissing = ready(ReasonValuesSchemaMissing, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: the chart has no values.schema.json at its root, so no typed CRD can be generated and nothing is applied; the message names the chart (#566)",
 		Clearance{Indefinite, "until the chart ships a root values.schema.json, or the definition opts into an inferred schema"},
-		Doc{Since: "2.13.108", Action: "The blueprint's maintainers add a values.schema.json at the chart's root, or an admin opts the definition into an inferred schema with the krateo.io/values-schema: infer annotation."})
+		Doc{Since: "2.13.108", Action: "The blueprint's maintainers add a values.schema.json at the chart's root, or an admin lets the blueprint infer one from the chart's default values.", Annotation: annotationValue(chart.ValuesSchemaAnnotation, chart.ValuesSchemaInfer)})
 	DerivedNameTooLong = ready(ReasonDerivedNameTooLong, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a name derived from the chart's name and Chart.yaml version does not fit Kubernetes' limits: the CRD version is not a DNS-1035 label, the controller Deployment's name (also its selector label) is over 63 characters, or, with cdc.metrics.enabled, the controller Service's is; the message names each name, its length and the problem. Nothing is applied, and a definition that worked before keeps what it has (#588)",
 		Clearance{Indefinite, "until the chart's name and Chart.yaml version yield names that fit"},
-		Doc{Since: "2.13.114", Action: "The blueprint's maintainers shorten the chart's name or its Chart.yaml version: the message names each name that does not fit."})
+		Doc{Since: "2.13.114", Action: "The blueprint's maintainers shorten the chart's name or its version, then publish it again."})
 	Deleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterCoreProvider, Converging,
 		"Delete: the definition is being deleted",
 		Clearance{Indefinite, "until the deletion completes"},
@@ -301,7 +345,7 @@ var (
 	ControllerUnavailable = on(TypeControllerActive, rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider,
 		"0 replicas, and the definition did NOT opt into scale-to-zero, or, for a pool member, its ownership Lease has not been held by the pool for G or more (#653): nothing reconciles the Kind",
 		Clearance{Indefinite, "until the controller has replicas, the definition opts into scale-to-zero, or the pool holds the member's Lease"},
-		Doc{Since: "2.13.84", Action: "An admin gives the controller replicas, or opts the definition into scale-to-zero; for a pool member, an admin checks its pool."})
+		Doc{Since: "2.13.84", Action: "An admin gives the controller replicas, or lets the blueprint scale to zero; for a shared pool, an admin checks the pool."})
 	ControllerNotObserved = on(TypeControllerActive, rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterCoreProvider,
 		"the controller Deployment was not found or could not be read, or, for a pool member, core-provider has not listed the ownership Leases yet (#653)",
 		Clearance{NextPass, "the next Observe that can read the controller Deployment (or list the pool's Leases)"},
@@ -318,7 +362,7 @@ var (
 	SchemaEnforcedOwnedElsewhere = on(TypeSchemaFullyEnforced, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.68", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.68", Action: "You can see the blueprint the message names: its schema is the one in use.", DetailFields: []string{"status.owner"}})
 	SchemaInferred = on(TypeSchemaFullyEnforced, "SchemaInferred", metav1.ConditionUnknown, WriterCoreProvider,
 		"the spec schema was inferred (ValuesSchemaAuthored=False): it has no authored constraints, so True, which means authored constraints all enforced, cannot be claimed (#568 D6)",
 		Clearance{Steady, "while the spec schema is inferred (ValuesSchemaAuthored=False)"},
@@ -339,7 +383,7 @@ var (
 	SpecSchemaOwnedElsewhere = on(TypeSpecSchemaCurrent, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.104", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.104", Action: "You can see the blueprint the message names: its schema is the one in use.", DetailFields: []string{"status.owner"}})
 
 	ApiRefReadSetResolved = on(TypeApiRefRBACComplete, "ReadSetResolved", metav1.ConditionTrue, WriterCoreProvider,
 		"the apiRef's RESTAction read-set was resolved and its RBAC rendered",
@@ -366,7 +410,7 @@ var (
 	AuthnMappingMissing = on(TypeAuthnMappingApplied, "MappingMissing", metav1.ConditionFalse, WriterCoreProvider,
 		"read live on this pass: the cluster serves the mapping kind, and the controller's mapping or core-provider's own is absent or does not authorize its ServiceAccount; the message names which. Written again by the next pass that may write; it stays only while a policy withholds update (#642)",
 		Clearance{NextPass, "written again by the next pass that may write; stays only while a policy withholds update"},
-		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, an admin sets the krateo.io/management-policy annotation to allow update."})
+		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, an admin allows updates in the blueprint's management policy.", Annotation: annotation(managementpolicy.AnnotationKey)})
 	AuthnMappingNotObserved = on(TypeAuthnMappingApplied, "NotObserved", metav1.ConditionUnknown, WriterCoreProvider,
 		"a mapping could not be read on this pass, so it is not known to be there or to be missing; the message names which and the error, which is on Synced too, and the pass is retried (#642)",
 		Clearance{NextPass, "the pass is retried"},
@@ -383,7 +427,7 @@ var (
 	ValuesSchemaOwnedElsewhere = on(TypeValuesSchemaAuthored, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.117", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.117", Action: "You can see the blueprint the message names: its schema is the one in use.", DetailFields: []string{"status.owner"}})
 
 	MigratedValuesAllValid = on(TypeMigratedValuesValid, "AllValid", metav1.ConditionTrue, WriterCoreProvider,
 		"every instance on the served version passed a dry-run create through it after the last migration; nothing reopens this until the next migration",
@@ -405,19 +449,19 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseRESTActionNotFound: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionNotFound), metav1.ConditionFalse, WriterCoreProvider,
 		"snowplow says the RESTAction does not exist",
 		Clearance{Indefinite, "until the RESTAction exists; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "The blueprint's maintainers create the RESTAction the apiRef names, or fix the apiRef."}),
+		Doc{Since: "2.13.72", Action: "The data source this blueprint reads its details from doesn't exist. An admin creates it, or the blueprint stops referring to it."}),
 	restactionrbac.CauseRESTActionForbidden: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionForbidden), metav1.ConditionFalse, WriterCoreProvider,
 		"the caller may not read the RESTAction; it MAY ALSO NOT EXIST, so this never means missing",
 		Clearance{Indefinite, "until the caller may read the RESTAction (it may also not exist); retried on every pass"},
-		Doc{Since: "2.13.72", Action: "An admin grants read access to the RESTAction, and checks that it exists."}),
+		Doc{Since: "2.13.72", Action: "An admin lets the blueprint read the data source, and checks that it exists."}),
 	restactionrbac.CauseStageUnresolvable: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseStageUnresolvable), metav1.ConditionFalse, WriterCoreProvider,
 		"a stage cannot be enumerated without dispatching it",
 		Clearance{Indefinite, "until the RESTAction changes; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "The blueprint's maintainers change the RESTAction stage the message names so it can be resolved without running it."}),
+		Doc{Since: "2.13.72", Action: "The blueprint's maintainers change the data source step the message names so it can be resolved without running it."}),
 	restactionrbac.CauseInvalidApiRef: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseInvalidApiRef), metav1.ConditionFalse, WriterCoreProvider,
 		"snowplow refused the request itself, such as extras naming a reserved key",
 		Clearance{Indefinite, "until the request snowplow refused is fixed; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "The blueprint's maintainers fix the apiRef: the message says what snowplow refused."}),
+		Doc{Since: "2.13.72", Action: "The blueprint's maintainers fix its API reference: the message says what was refused."}),
 	restactionrbac.CauseUnauthorized: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseUnauthorized), metav1.ConditionFalse, WriterCoreProvider,
 		"no usable identity reached snowplow",
 		Clearance{Indefinite, "until a usable identity reaches snowplow; retried on every pass"},
@@ -433,7 +477,7 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseNotConfigured: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseNotConfigured), metav1.ConditionFalse, WriterCoreProvider,
 		"core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef",
 		Clearance{Indefinite, "until core-provider has a snowplow URL, or the apiRef is removed"},
-		Doc{Since: "2.13.72", Action: "An admin turns on apiRef RBAC in core-provider's chart, or the blueprint's maintainers remove the definition's apiRef."}),
+		Doc{Since: "2.13.72", Action: "An admin sets snowplow's address in core-provider's chart, or the blueprint's maintainers remove its API reference."}),
 }
 
 // ApiRefRBACFailure is the ApiRefRBACComplete=False reason for cause, and false for a cause this
@@ -469,11 +513,11 @@ var (
 	runtimeNotObserved = ready(rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterRuntime, Unevaluated,
 		"Connect or Observe returned an error not marked ReadyAssessed (for example, the controller Deployment could not be read); the error is on Synced",
 		Clearance{NextPass, "the next pass, after the retry backoff; persists while the error does"},
-		Doc{Since: "2.13.82", Action: "Wait: it is retried. If it lasts, the error is on Synced."})
+		Doc{Since: "2.13.82", Action: "Wait: it is retried. If it lasts, the sync error says why."})
 	runtimeCreating = ready(rtv1.ReasonCreating, metav1.ConditionFalse, WriterRuntime, Converging,
 		"the create path: written with every Create outcome, success or failure (the error, if any, is on Synced)",
 		Clearance{NextPass, "the next Observe reports the outcome; the error, if any, is on Synced"},
-		Doc{Since: "2.0.0", Action: "Wait: it clears on the next pass. If it lasts, the error is on Synced."})
+		Doc{Since: "2.0.0", Action: "Wait: it clears on the next pass. If it lasts, the sync error says why."})
 	runtimeDeleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterRuntime, Converging,
 		"the delete path, and an Observe error on a definition being deleted",
 		Clearance{Indefinite, "until the deletion completes"},
@@ -490,7 +534,7 @@ var (
 	runtimeSyncedPaused = on(rtv1.TypeSynced, rtv1.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/paused is set; Ready is left as it was",
 		Clearance{Steady, "until krateo.io/paused is removed"},
-		Doc{Since: "2.0.0", Action: "An admin removes the krateo.io/paused annotation from the definition to resume."})
+		Doc{Since: "2.0.0", Action: "An admin resumes the blueprint by removing its pause.", Annotation: annotation(prmeta.AnnotationKeyReconciliationPaused)})
 
 	// provider-runtime v1.21.0 (unstructured-runtime#110): the management policy reported on a
 	// CompositionDefinition that carries krateo.io/management-policy or krateo.io/deletion-policy. The
@@ -500,19 +544,19 @@ var (
 	runtimeCreateWithheld = ready(rtv1.ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterRuntime, Failed,
 		"the external resource (the CRD) is absent and krateo.io/management-policy withholds create, observe-only included; nothing is created until a human changes the policy (#110 D4)",
 		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create"},
-		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to allow create."})
+		Doc{Since: "2.13.120", Action: "An admin changes its management policy to allow create.", Annotation: annotation(managementpolicy.AnnotationKey)})
 	runtimeUpdateWithheld = ready(rtv1.ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterRuntime, Healthy,
 		"core-provider's Observe found drift and krateo.io/management-policy withholds update: replaces a healthy Ready only, so the definition works but is NOT brought to its desired state; an unhealthy Ready keeps its own reason, with \"updates are withheld by policy\" appended (#110 D4)",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update"},
-		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to allow update."})
+		Doc{Since: "2.13.120", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: annotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonManagementPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/management-policy does not parse: the reconciler acts on nothing (observe only); wins over the pass's own Synced outcome; paused and deferred passes keep theirs",
 		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"},
-		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to a value it can read."})
+		Doc{Since: "2.13.120", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: annotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedDeletionPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/deletion-policy is neither delete nor orphan, so the external resource is KEPT on delete; reported on every pass while set",
 		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"},
-		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/deletion-policy annotation to delete or orphan."})
+		Doc{Since: "2.13.120", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: annotation(managementpolicy.DeletionAnnotationKey)})
 )
 
 func ready(reason rtv1.ConditionReason, status metav1.ConditionStatus, writer Writer, verdict Verdict, meaning string, clears Clearance, doc Doc) Reason {
