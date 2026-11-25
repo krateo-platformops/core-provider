@@ -495,3 +495,5 @@ jobs:
           persist-credentials: false
       - name: Every uses is pinned by commit, with its version
         run: PYTHONDONTWRITEBYTECODE=1 python3 -I .github/scripts/check-pinned-uses.py .
+      - name: Every publishing job in release-tag.yaml waits for every gate job (#680)
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -I .github/scripts/check-release-gate.py .
