@@ -268,9 +268,10 @@ func PoolMemberVersions(ctx context.Context, dyn dynamic.Interface, namespace, g
 var ErrPoolMemberNotDrained = errors.New("the pool's controller has not released its ownership Lease")
 
 // leaseQuiet is how long a Lease must stay unheld before its controller counts as stopped: longer than
-// the elector's retry period (2s), so a second pool pod (a rolling update), or a member that had only
-// been waiting, has seen the key leave the index rather than taken the Lease in between.
-const leaseQuiet = 3 * time.Second
+// the elector's longest wait between attempts (a 2s retry period jittered to 4.4s), so a second pool pod
+// (a rolling update), or a member that had only been waiting, has either taken it by then, and is waited
+// for in turn, or has seen the key leave the index.
+const leaseQuiet = 5 * time.Second
 
 // releasePoolMember stops gvr's controller in every pool of namespace that runs it, except keep, and
 // waits until it has stopped: the mark, the index, then the Lease (see the top of this file). left is

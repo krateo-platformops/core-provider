@@ -43,7 +43,7 @@ import (
 const (
 	ns652   = self642NS
 	group   = "composition.krateo.io"
-	grace52 = 8 * time.Second // deploy.MemberDrainTimeout here
+	grace52 = 14 * time.Second // deploy.MemberDrainTimeout here
 )
 
 var (

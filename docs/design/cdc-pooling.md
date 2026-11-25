@@ -299,9 +299,10 @@ from a new LIST. A member is granted its env ConfigMap before the index names it
 **Leaving is stop-before-revoke**, the pool's form of #263: a retired version, a definition being
 deleted, one that stops naming `<p>` or names another pool. The env ConfigMap is annotated
 `krateo.io/cdc-pool-draining` (a restarted core-provider still knows), the key leaves the index, and
-core-provider waits until the controller's ownership Lease has been unheld for 3s, for at most 60s.
-Only then is the ConfigMap, the RBAC or the Lease grant removed or given to another identity. A Lease
-whose record does not change for its own duration belongs to a process that died, and counts as unheld:
+core-provider waits until the controller's ownership Lease has been unheld for 5s (longer than the
+elector's longest wait between attempts), for at most 60s. Only then is the ConfigMap, the RBAC or the
+Lease grant removed or given to another identity. A Lease whose record does not change for its own
+duration belongs to a process that died, and counts as unheld:
 client-go's rule, measured on core-provider's clock from when it first saw the record, so no two clocks
 are compared. **At the bound nothing is revoked**: the Update or Delete fails, naming the Lease's holder
 in `Synced`, and is retried. Retirement still precedes the instances' migration, so between a key's

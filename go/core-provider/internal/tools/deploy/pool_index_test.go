@@ -319,7 +319,7 @@ func TestWaitLeaseReleased(t *testing.T) {
 			n++ // a renewal
 			return true, lease(v1, "cdc-pool-web-0", fmt.Sprint(n), 1), nil
 		})
-		err := wait(dyn, 6*time.Second) // longer than its 1s duration and leaseQuiet
+		err := wait(dyn, 8*time.Second) // longer than its 1s duration and leaseQuiet
 		if !errors.Is(err, ErrPoolMemberNotDrained) || !strings.Contains(err.Error(), "cdc-pool-web-0") {
 			t.Errorf("err = %v", err)
 		}
@@ -334,7 +334,7 @@ func TestWaitLeaseReleased(t *testing.T) {
 			}
 			return true, lease(v1, "the-new-pod", fmt.Sprint(time.Now().UnixNano()), 15), nil
 		})
-		if err := wait(dyn, 5*time.Second); !errors.Is(err, ErrPoolMemberNotDrained) {
+		if err := wait(dyn, 8*time.Second); !errors.Is(err, ErrPoolMemberNotDrained) {
 			t.Errorf("err = %v, want ErrPoolMemberNotDrained", err)
 		}
 	})
