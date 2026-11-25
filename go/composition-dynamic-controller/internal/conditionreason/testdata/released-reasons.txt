@@ -3,7 +3,7 @@
 # A line is never removed: a reason that leaves Table must be named in Deprecated, because consumers
 # key on the reason string and a rename or removal is breaking for them.
 # The release that ships an unreleased reason replaces its Since with the tag and appends it here:
-# RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
+# RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
 # (docs/release.md). release-tag.yaml refuses a tag while any reason is unreleased or missing here.
 ApiResolved/False/(authn's reason)/composition-dynamic-controller	2.13.44
 ApiResolved/False/ApiEmpty/composition-dynamic-controller	2.13.44

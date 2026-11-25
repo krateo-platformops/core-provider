@@ -59,10 +59,12 @@ jobs:
 
   # #667. The reason tables (docs/ready-reasons.json, docs/cd-ready-reasons.json) publish each
   # reason's sinceVersion; a tag must not ship one that says "unreleased", or a reason the
-  # registry's testdata/released-reasons.txt does not record. TestReasonTablesAreReleaseReady runs
-  # only with RELEASE_TAG set, and component-go-checks has no input to set an environment variable
-  # (test_args is appended to `go test` verbatim), so the gate is its own job, beside the module
-  # tests and in build's `needs:` with them. The step for the releaser is in docs/release.md.
+  # registry's testdata/released-reasons.txt does not record. TestReasonTablesAreReleaseReady is
+  # compiled only with -tags releasegate (a skip would red the envtest jobs, which fail on any
+  # `--- SKIP`) and fails without RELEASE_TAG; component-go-checks has no input to set an
+  # environment variable (test_args is appended to `go test` verbatim), so the gate is its own job,
+  # beside the module tests and in build's `needs:` with them. The releaser's step is in
+  # docs/release.md.
   release-ready-reasons:
     runs-on: ubuntu-latest
     permissions:
@@ -70,11 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - module: go/core-provider
-            package: ./internal/cdreason/
-          - module: go/composition-dynamic-controller
-            package: ./internal/conditionreason/
+        module: [go/core-provider, go/composition-dynamic-controller]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -87,15 +85,15 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-          PACKAGE: ${{ matrix.package }}
+          MODULE: ${{ matrix.module }}
         run: |
           set -uo pipefail
-          go test -count=1 -v -run '^TestReasonTablesAreReleaseReady$' "$PACKAGE" 2>&1 | tee "$RUNNER_TEMP/release-ready.log"
+          go test -tags releasegate -count=1 -v -run '^TestReasonTablesAreReleaseReady$' ./internal/... 2>&1 | tee "$RUNNER_TEMP/release-ready.log"
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then exit "$status"; fi
-          # A -run that matches nothing exits 0, and so does a skip: require the gate to have PASSED.
+          # A -run that matches nothing exits 0: require the gate to have PASSED.
           if ! grep -q -- '--- PASS: TestReasonTablesAreReleaseReady' "$RUNNER_TEMP/release-ready.log"; then
-            echo "::error::TestReasonTablesAreReleaseReady did not run and pass in $PACKAGE (skipped, or no test matched)" >&2
+            echo "::error::TestReasonTablesAreReleaseReady did not run and pass in $MODULE (no test matched)" >&2
             exit 1
           fi
 

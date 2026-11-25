@@ -132,7 +132,7 @@ jobs:
           rc=0
           n=0
           for m in go/core-provider go/composition-dynamic-controller go/chart-inspector go/testprovider; do
-            for tag in default integration e2e envtest; do
+            for tag in default integration e2e envtest releasegate; do
               if [ "$tag" = default ]; then args=""; else args="-tags $tag"; fi
               echo "::group::$m ($tag)"
               if ! (cd "$m" && go vet $args ./...); then
@@ -145,11 +145,12 @@ jobs:
           done
           # A loop that examined nothing would exit 0 and look identical to success — the exact
           # failure mode this job exists to catch, so it must not have it.
-          # 16 = 4 modules x 4 tags. go/testprovider joined the list when the #310 verification
+          # 20 = 4 modules x 5 tags. go/testprovider joined the list when the #310 verification
           # provider was added; it is built from inside an envtest test, so a compile break there
           # would otherwise first surface as that test failing and point at the wrong file.
-          if [ "$n" -ne 16 ]; then
-            echo "::error::checked $n module/tag combinations, expected 16 - this job proved nothing"
+          # releasegate (#667) is the release-time reason-table gate, compiled only by release-tag.yaml.
+          if [ "$n" -ne 20 ]; then
+            echo "::error::checked $n module/tag combinations, expected 20 - this job proved nothing"
             exit 1
           fi
           echo "compiled $n module/tag combinations"

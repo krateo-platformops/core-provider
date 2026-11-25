@@ -34,10 +34,10 @@ see the history note in `helm/core-provider/values.yaml`).
 
    ```sh
    cd go/composition-dynamic-controller
-   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
+   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
    UPDATE_READY_REASONS=1 go test ./internal/composition/ -run TestReadyReasonTableIsCurrent
    cd ../core-provider
-   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$'
+   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$'
    UPDATE_READY_REASONS=1 go test ./internal/cdreason/ -run TestCDReadyReasonTableIsCurrent
    ```
 

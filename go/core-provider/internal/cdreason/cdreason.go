@@ -111,7 +111,7 @@ type Clearance struct {
 
 // Unreleased is the Since of a reason no release carries yet; write it as `Since: Unreleased`. The
 // release that ships it replaces it with its own tag and appends the reason to
-// testdata/released-reasons.txt, both done by RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test
+// testdata/released-reasons.txt, both done by RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate
 // ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$' (docs/release.md); release-tag.yaml
 // runs the same test without UPDATE and refuses a tag that still has one.
 const Unreleased = "unreleased"
@@ -229,23 +229,23 @@ var (
 	Unavailable = ready(rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: the chart cannot be read, the controller has 0 replicas without opting into scale-to-zero, the controller Deployment gave up its rollout (ProgressDeadlineExceeded) or lost availability after a completed one, a pool member's controller is not running in its pool (its ownership Lease not held by the pool for G or more, #653), or adding the served version is refused (a held version, no room); the message says which, and for lost availability ends with the first not-ready pod's cause, e.g. \"; pod <name>: restarting (last exit: Error)\" (#559)",
 		Clearance{Indefinite, "until the cause the message names is fixed"},
-		Doc{Since: "2.0.0", Action: "Fix what the message names: the chart, the controller's replicas or rollout, or the served version that cannot be added."})
+		Doc{Since: "2.0.0", Action: "An admin fixes the cause the message names (the controller's replicas or rollout, or the served version that cannot be added); a chart that cannot be read goes to the blueprint's maintainers."})
 	RemoteChartUnreachable = ready(ReasonRemoteChartUnreachable, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"remote seed: the chart's URL is cluster-local to the management cluster, so the remote target cannot fetch it",
 		Clearance{Indefinite, "until the chart's URL is one the remote target can fetch"},
-		Doc{Since: "2.6.0", Action: "Point the definition at a chart URL the remote cluster can reach."})
+		Doc{Since: "2.6.0", Action: "An admin points the definition at a chart URL the remote cluster can reach."})
 	SchemaDefaultContradiction = ready(ReasonSchemaDefaultContradiction, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a `default` in the chart's values.schema.json that crdgen carries into the CRD fails its own subschema, so no CRD is generated; the message names each JSON pointer (plumbing#205). Nothing is applied, and a definition that worked before keeps serving its last CRD",
 		Clearance{Indefinite, "until the chart's values.schema.json is fixed"},
-		Doc{Since: "2.13.108", Action: "Fix each default the message names in the chart's values.schema.json, then use that chart version."})
+		Doc{Since: "2.13.108", Action: "The blueprint's maintainers fix each default the message names in the chart's values.schema.json and publish that chart version."})
 	ValuesSchemaMissing = ready(ReasonValuesSchemaMissing, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: the chart has no values.schema.json at its root, so no typed CRD can be generated and nothing is applied; the message names the chart (#566)",
 		Clearance{Indefinite, "until the chart ships a root values.schema.json, or the definition opts into an inferred schema"},
-		Doc{Since: "2.13.108", Action: "Add a values.schema.json at the chart's root, or opt the definition into an inferred schema with the krateo.io/values-schema: infer annotation."})
+		Doc{Since: "2.13.108", Action: "The blueprint's maintainers add a values.schema.json at the chart's root, or an admin opts the definition into an inferred schema with the krateo.io/values-schema: infer annotation."})
 	DerivedNameTooLong = ready(ReasonDerivedNameTooLong, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a name derived from the chart's name and Chart.yaml version does not fit Kubernetes' limits: the CRD version is not a DNS-1035 label, the controller Deployment's name (also its selector label) is over 63 characters, or, with cdc.metrics.enabled, the controller Service's is; the message names each name, its length and the problem. Nothing is applied, and a definition that worked before keeps what it has (#588)",
 		Clearance{Indefinite, "until the chart's name and Chart.yaml version yield names that fit"},
-		Doc{Since: "2.13.114", Action: "Shorten the chart's name or its Chart.yaml version: the message names each name that does not fit."})
+		Doc{Since: "2.13.114", Action: "The blueprint's maintainers shorten the chart's name or its Chart.yaml version: the message names each name that does not fit."})
 	Deleting = ready(rtv1.ReasonDeleting, metav1.ConditionFalse, WriterCoreProvider, Converging,
 		"Delete: the definition is being deleted",
 		Clearance{Indefinite, "until the deletion completes"},
@@ -301,7 +301,7 @@ var (
 	ControllerUnavailable = on(TypeControllerActive, rtv1.ReasonUnavailable, metav1.ConditionFalse, WriterCoreProvider,
 		"0 replicas, and the definition did NOT opt into scale-to-zero, or, for a pool member, its ownership Lease has not been held by the pool for G or more (#653): nothing reconciles the Kind",
 		Clearance{Indefinite, "until the controller has replicas, the definition opts into scale-to-zero, or the pool holds the member's Lease"},
-		Doc{Since: "2.13.84", Action: "Give the controller replicas, or opt the definition into scale-to-zero; for a pool member, an admin checks its pool."})
+		Doc{Since: "2.13.84", Action: "An admin gives the controller replicas, or opts the definition into scale-to-zero; for a pool member, an admin checks its pool."})
 	ControllerNotObserved = on(TypeControllerActive, rtv1.ReasonNotObserved, metav1.ConditionUnknown, WriterCoreProvider,
 		"the controller Deployment was not found or could not be read, or, for a pool member, core-provider has not listed the ownership Leases yet (#653)",
 		Clearance{NextPass, "the next Observe that can read the controller Deployment (or list the pool's Leases)"},
@@ -314,15 +314,15 @@ var (
 	SchemaConstraintsNotEnforced = on(TypeSchemaFullyEnforced, "ConstraintsNotEnforced", metav1.ConditionFalse, WriterCoreProvider,
 		"crdgen could not express some constraints, so the cluster accepts values the schema rejects; the message names them (recomputed on every Observe)",
 		Clearance{Indefinite, "until the chart's schema or crdgen changes; recomputed on every Observe"},
-		Doc{Since: "2.13.68", Action: "Review the constraints the message names: the cluster does not enforce them, so values that break them are accepted."})
+		Doc{Since: "2.13.68", Action: "The blueprint's maintainers review the constraints the message names: the cluster does not enforce them, so values that break them are accepted."})
 	SchemaEnforcedOwnedElsewhere = on(TypeSchemaFullyEnforced, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.68", Action: "Read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.68", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
 	SchemaInferred = on(TypeSchemaFullyEnforced, "SchemaInferred", metav1.ConditionUnknown, WriterCoreProvider,
 		"the spec schema was inferred (ValuesSchemaAuthored=False): it has no authored constraints, so True, which means authored constraints all enforced, cannot be claimed (#568 D6)",
 		Clearance{Steady, "while the spec schema is inferred (ValuesSchemaAuthored=False)"},
-		Doc{Since: "2.13.117", Action: "To have constraints enforced, ship a values.schema.json at the chart's root."})
+		Doc{Since: "2.13.117", Action: "The blueprint's maintainers ship a values.schema.json at the chart's root to have constraints enforced."})
 
 	SpecSchemaCurrent = on(TypeSpecSchemaCurrent, "Current", metav1.ConditionTrue, WriterCoreProvider,
 		"the served and generated spec schemas are identical",
@@ -335,11 +335,11 @@ var (
 	SpecSchemaNotLooser = on(TypeSpecSchemaCurrent, "GeneratedSchemaNotLooser", metav1.ConditionFalse, WriterCoreProvider,
 		"until the chart version changes: the generated schema differs in a way not provably looser, so the served one is kept rather than risk refusing stored values",
 		Clearance{Indefinite, "until the chart version changes"},
-		Doc{Since: "2.13.104", Action: "Publish the schema change under a new chart version: the served schema is kept until the version changes."})
+		Doc{Since: "2.13.104", Action: "The blueprint's maintainers publish the schema change under a new chart version: the served schema is kept until the version changes."})
 	SpecSchemaOwnedElsewhere = on(TypeSpecSchemaCurrent, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.104", Action: "Read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.104", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
 
 	ApiRefReadSetResolved = on(TypeApiRefRBACComplete, "ReadSetResolved", metav1.ConditionTrue, WriterCoreProvider,
 		"the apiRef's RESTAction read-set was resolved and its RBAC rendered",
@@ -366,7 +366,7 @@ var (
 	AuthnMappingMissing = on(TypeAuthnMappingApplied, "MappingMissing", metav1.ConditionFalse, WriterCoreProvider,
 		"read live on this pass: the cluster serves the mapping kind, and the controller's mapping or core-provider's own is absent or does not authorize its ServiceAccount; the message names which. Written again by the next pass that may write; it stays only while a policy withholds update (#642)",
 		Clearance{NextPass, "written again by the next pass that may write; stays only while a policy withholds update"},
-		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, allow update in the krateo.io/management-policy annotation."})
+		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, an admin sets the krateo.io/management-policy annotation to allow update."})
 	AuthnMappingNotObserved = on(TypeAuthnMappingApplied, "NotObserved", metav1.ConditionUnknown, WriterCoreProvider,
 		"a mapping could not be read on this pass, so it is not known to be there or to be missing; the message names which and the error, which is on Synced too, and the pass is retried (#642)",
 		Clearance{NextPass, "the pass is retried"},
@@ -379,11 +379,11 @@ var (
 	ValuesSchemaInferred = on(TypeValuesSchemaAuthored, "InferredFromValues", metav1.ConditionFalse, WriterCoreProvider,
 		"the chart ships no values.schema.json and the definition opted in (krateo.io/values-schema: infer): the schema is inferred from values.yaml, typed-open, with no authored constraints; the message gives the rules version and the untyped paths",
 		Clearance{Steady, "while the chart ships no values.schema.json and the definition opts into inference"},
-		Doc{Since: "2.13.117", Action: "To have an authored schema, ship a values.schema.json at the chart's root."})
+		Doc{Since: "2.13.117", Action: "The blueprint's maintainers ship a values.schema.json at the chart's root to have an authored schema."})
 	ValuesSchemaOwnedElsewhere = on(TypeValuesSchemaAuthored, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: "2.13.117", Action: "Read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.117", Action: "You read this on the definition the message names: it generates the CRD.", DetailFields: []string{"status.owner"}})
 
 	MigratedValuesAllValid = on(TypeMigratedValuesValid, "AllValid", metav1.ConditionTrue, WriterCoreProvider,
 		"every instance on the served version passed a dry-run create through it after the last migration; nothing reopens this until the next migration",
@@ -392,7 +392,7 @@ var (
 	MigratedValuesRefused = on(TypeMigratedValuesValid, "ValuesRefusedByNewVersion", metav1.ConditionFalse, WriterCoreProvider,
 		"some instances hold values the served version refuses (validation ratcheting let the migration through); the message names them and the fields, and a write that changes those fields will be refused until they satisfy the new schema; rechecked on every Observe until all pass",
 		Clearance{Indefinite, "until the named instances satisfy the served version's schema; rechecked on every Observe"},
-		Doc{Since: "2.13.125", Action: "Edit the named compositions' values so they satisfy the new version's schema.", DetailFields: []string{"status.migratedValues.version", "status.migratedValues.refusedCount", "status.migratedValues.refused"}})
+		Doc{Since: "2.13.125", Action: "You edit the named compositions' values so they satisfy the new version's schema.", DetailFields: []string{"status.migratedValues.version", "status.migratedValues.refusedCount", "status.migratedValues.refused"}})
 	MigratedValuesUnchecked = on(TypeMigratedValuesValid, "ValidationIncomplete", metav1.ConditionUnknown, WriterCoreProvider,
 		"no instance was refused, but some could not be judged (the dry run failed for a reason that is not a spec validation error); the message names them; rechecked on every Observe",
 		Clearance{NextPass, "rechecked on every Observe"},
@@ -405,7 +405,7 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseRESTActionNotFound: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionNotFound), metav1.ConditionFalse, WriterCoreProvider,
 		"snowplow says the RESTAction does not exist",
 		Clearance{Indefinite, "until the RESTAction exists; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "Create the RESTAction the apiRef names, or fix the apiRef."}),
+		Doc{Since: "2.13.72", Action: "The blueprint's maintainers create the RESTAction the apiRef names, or fix the apiRef."}),
 	restactionrbac.CauseRESTActionForbidden: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseRESTActionForbidden), metav1.ConditionFalse, WriterCoreProvider,
 		"the caller may not read the RESTAction; it MAY ALSO NOT EXIST, so this never means missing",
 		Clearance{Indefinite, "until the caller may read the RESTAction (it may also not exist); retried on every pass"},
@@ -413,11 +413,11 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseStageUnresolvable: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseStageUnresolvable), metav1.ConditionFalse, WriterCoreProvider,
 		"a stage cannot be enumerated without dispatching it",
 		Clearance{Indefinite, "until the RESTAction changes; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "Change the RESTAction stage the message names so it can be resolved without running it."}),
+		Doc{Since: "2.13.72", Action: "The blueprint's maintainers change the RESTAction stage the message names so it can be resolved without running it."}),
 	restactionrbac.CauseInvalidApiRef: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseInvalidApiRef), metav1.ConditionFalse, WriterCoreProvider,
 		"snowplow refused the request itself, such as extras naming a reserved key",
 		Clearance{Indefinite, "until the request snowplow refused is fixed; retried on every pass"},
-		Doc{Since: "2.13.72", Action: "Fix the apiRef: the message says what snowplow refused."}),
+		Doc{Since: "2.13.72", Action: "The blueprint's maintainers fix the apiRef: the message says what snowplow refused."}),
 	restactionrbac.CauseUnauthorized: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseUnauthorized), metav1.ConditionFalse, WriterCoreProvider,
 		"no usable identity reached snowplow",
 		Clearance{Indefinite, "until a usable identity reaches snowplow; retried on every pass"},
@@ -433,7 +433,7 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseNotConfigured: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseNotConfigured), metav1.ConditionFalse, WriterCoreProvider,
 		"core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef",
 		Clearance{Indefinite, "until core-provider has a snowplow URL, or the apiRef is removed"},
-		Doc{Since: "2.13.72", Action: "An admin turns on apiRef RBAC in core-provider's chart, or the definition's apiRef is removed."}),
+		Doc{Since: "2.13.72", Action: "An admin turns on apiRef RBAC in core-provider's chart, or the blueprint's maintainers remove the definition's apiRef."}),
 }
 
 // ApiRefRBACFailure is the ApiRefRBACComplete=False reason for cause, and false for a cause this
@@ -486,11 +486,11 @@ var (
 	runtimeSyncedError = on(rtv1.TypeSynced, rtv1.ReasonReconcileError, metav1.ConditionFalse, WriterRuntime,
 		"the pass failed (message: the error); with Ready=False/SchemaDefaultContradiction it reads \"observe failed: \" followed by Ready's message",
 		Clearance{NextPass, "retried with backoff; persists while the cause does"},
-		Doc{Since: "2.0.0", Action: "Wait: the pass is retried. If it lasts, fix the error the message names."})
+		Doc{Since: "2.0.0", Action: "Wait: the pass is retried. If it lasts, an admin fixes the error the message names."})
 	runtimeSyncedPaused = on(rtv1.TypeSynced, rtv1.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/paused is set; Ready is left as it was",
 		Clearance{Steady, "until krateo.io/paused is removed"},
-		Doc{Since: "2.0.0", Action: "To resume, remove the krateo.io/paused annotation."})
+		Doc{Since: "2.0.0", Action: "An admin removes the krateo.io/paused annotation from the definition to resume."})
 
 	// provider-runtime v1.21.0 (unstructured-runtime#110): the management policy reported on a
 	// CompositionDefinition that carries krateo.io/management-policy or krateo.io/deletion-policy. The
@@ -500,19 +500,19 @@ var (
 	runtimeCreateWithheld = ready(rtv1.ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterRuntime, Failed,
 		"the external resource (the CRD) is absent and krateo.io/management-policy withholds create, observe-only included; nothing is created until a human changes the policy (#110 D4)",
 		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create"},
-		Doc{Since: "2.13.120", Action: "To create it, change the krateo.io/management-policy annotation to allow create."})
+		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to allow create."})
 	runtimeUpdateWithheld = ready(rtv1.ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterRuntime, Healthy,
 		"core-provider's Observe found drift and krateo.io/management-policy withholds update: replaces a healthy Ready only, so the definition works but is NOT brought to its desired state; an unhealthy Ready keeps its own reason, with \"updates are withheld by policy\" appended (#110 D4)",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update"},
-		Doc{Since: "2.13.120", Action: "To apply changes, change the krateo.io/management-policy annotation to allow update."})
+		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to allow update."})
 	runtimeSyncedPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonManagementPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/management-policy does not parse: the reconciler acts on nothing (observe only); wins over the pass's own Synced outcome; paused and deferred passes keep theirs",
 		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"},
-		Doc{Since: "2.13.120", Action: "Fix the krateo.io/management-policy annotation: the message names the value it cannot read."})
+		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/management-policy annotation to a value it can read."})
 	runtimeSyncedDeletionPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/deletion-policy is neither delete nor orphan, so the external resource is KEPT on delete; reported on every pass while set",
 		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"},
-		Doc{Since: "2.13.120", Action: "Set the krateo.io/deletion-policy annotation to delete or orphan."})
+		Doc{Since: "2.13.120", Action: "An admin sets the krateo.io/deletion-policy annotation to delete or orphan."})
 )
 
 func ready(reason rtv1.ConditionReason, status metav1.ConditionStatus, writer Writer, verdict Verdict, meaning string, clears Clearance, doc Doc) Reason {
