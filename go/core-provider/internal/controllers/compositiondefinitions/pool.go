@@ -2,14 +2,11 @@ package compositiondefinitions
 
 import (
 	"context"
-	"fmt"
-	"sort"
+	"slices"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/tools/clusterkube"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -21,120 +18,62 @@ func poolOf(cd *compositiondefinitionsv1alpha1.CompositionDefinition) string {
 	return *cd.Spec.Controller.Pool
 }
 
-// poolMembers is pool p's membership (docs/design/cdc-pooling.md §5c), a pure function of the
-// definitions, recomputed on every reconcile of one of them, so there is no count to drift.
-//
-// A member is a Kind x version CONTROLLER, not a definition. Two definitions on one Kind x version
-// share one controller, run by its owner (electControllerOwner); a follower runs none. So a controller
-// is in p exactly when its OWNER names p, and a follower's own pool field changes nothing. Live local
-// definitions only (a remote pool is refused at admission), with a served version in status: a
-// definition that has not reconciled yet has no controller to pool.
-func poolMembers(pool string, all []compositiondefinitionsv1alpha1.CompositionDefinition) []schema.GroupVersionResource {
-	seen := map[schema.GroupVersionResource]bool{}
-	var out []schema.GroupVersionResource
-	for i := range all {
-		cd := &all[i]
-		if poolOf(cd) != pool || cd.GetDeletionTimestamp() != nil || clusterkube.IsRemote(cd.Spec.Deploy) {
-			continue
-		}
-		gvr, ok := statusGVR(cd)
-		if !ok || seen[gvr] {
-			continue
-		}
-		gvk := cd.Status.CurrentGVK()
-		chart := chartRefOf(cd.Spec.Chart)
-		var sameVersion []compositiondefinitionsv1alpha1.CompositionDefinition
-		for j := range all {
-			if targetsVersion(&all[j], gvk, chart) {
-				sameVersion = append(sameVersion, all[j])
-			}
-		}
-		if electControllerOwner(cd, sameVersion) != nil {
-			continue // a follower: its owner decides where the controller runs
-		}
-		seen[gvr] = true
-		out = append(out, gvr)
-	}
-	sort.Slice(out, func(a, b int) bool { return out[a].String() < out[b].String() })
-	return out
-}
-
-var configMapsGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
-
-// reconcilePools brings every pool this definition's controller touches to its membership (docs/
-// design/cdc-pooling.md §5c, "Lifecycle, ref-counted by recomputation"): the pool it names now, and
-// any pool whose index still lists its controller (so leaving one, or moving between two, removes it).
-// Each is recomputed from the live definitions: ensured with its members, or, when none is left,
-// deleted by this last leaver.
-//
-// "Could not determine" is never "empty": a failed list, or a member whose env ConfigMap cannot be
-// read, returns an error and changes nothing, so a transient read failure cannot delete a pool that
-// still has members (the rule every teardown path here follows).
-func (e *external) reconcilePools(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) error {
-	ns := controllerNamespace(cr)
-	pools := map[string]bool{}
-	if p := poolOf(cr); p != "" {
-		pools[p] = true
-	}
-	indexes, err := e.mgmtDynamic.Resource(configMapsGVR).Namespace(ns).List(ctx, metav1.ListOptions{LabelSelector: deploy.PoolLabel})
-	if err != nil {
-		return fmt.Errorf("listing pool indexes in %s: %w", ns, err)
-	}
-	key := deploy.MemberKey(gvr)
-	for _, idx := range indexes.Items {
-		p := idx.GetLabels()[deploy.PoolLabel]
-		if p == "" || idx.GetName() != deploy.PoolNames(p).Index {
-			continue // the pool's other labelled objects, not its index
-		}
-		if data, _, _ := unstructured.NestedStringMap(idx.Object, "data"); data[key] != "" {
-			pools[p] = true
-		}
-	}
-	if len(pools) == 0 {
+// poolOptions are the pools of the namespace this definition's controller runs in, or nil for a remote
+// definition, whose controller runs on its spoke: a pool is local only (docs/design/cdc-pooling.md §5c).
+func (e *external) poolOptions(cr *compositiondefinitionsv1alpha1.CompositionDefinition) *deploy.PoolOptions {
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
 		return nil
 	}
+	return &deploy.PoolOptions{
+		Namespace: controllerNamespace(cr), DynClient: e.mgmtDynamic, KubeClient: e.mgmt,
+		Assets: deploy.PoolAssets{
+			SizingPath: PoolSizingPath, ConfigmapTemplatePath: PoolConfigmapTemplatePath,
+			DeploymentTemplatePath: PoolDeploymentTemplatePath, AuthnURL: AuthnURL,
+		},
+	}
+}
 
-	all := &compositiondefinitionsv1alpha1.CompositionDefinitionList{}
-	if err := e.kube.List(ctx, all); err != nil {
-		return fmt.Errorf("listing CompositionDefinitions to recompute pool membership: %w", err)
+// poolsOfKind are the pools that run a controller of cr's Kind now, for reconcilePools once it has left
+// one of them.
+func (e *external) poolsOfKind(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource) (map[string]bool, error) {
+	opts := e.poolOptions(cr)
+	if opts == nil {
+		return nil, nil
 	}
-	names := make([]string, 0, len(pools))
-	for p := range pools {
-		names = append(names, p)
+	return deploy.PoolsOfKind(ctx, opts.DynClient, opts.Namespace, gvr.Group, gvr.Resource)
+}
+
+// reconcilePools is the last step of a local definition's Create, Update and Delete (docs/design/
+// cdc-pooling.md §5c, Lifecycle): the pool it names, and those in were (poolsOfKind, before this pass
+// moved anything), are brought to their members, and a pool with none left is deleted by this last
+// leaver. Membership itself is not decided here: it is the live env ConfigMaps (deploy, pool_index.go),
+// so a controller that joined or left during this pass is already in, or out of, its index.
+//
+// "Could not determine" is never "empty": a failed list returns an error and changes nothing, so a
+// transient read failure cannot delete a pool that still has members (the rule every teardown path here
+// follows).
+func (e *external) reconcilePools(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, were map[string]bool) error {
+	opts := e.poolOptions(cr)
+	if opts == nil {
+		return nil
 	}
-	sort.Strings(names)
-	for _, p := range names {
-		members := poolMembers(p, all.Items)
-		if len(members) == 0 {
-			if err := deploy.DeletePool(ctx, e.mgmtDynamic, p, ns); err != nil {
-				return err
-			}
-			continue
-		}
-		rendered := make([]deploy.PoolMember, 0, len(members))
-		for _, m := range members {
-			cm, err := e.mgmtDynamic.Resource(configMapsGVR).Namespace(ns).Get(ctx, deploy.MemberEnvConfigMapName(m), metav1.GetOptions{})
-			if err != nil {
-				// Including NotFound: a member whose env ConfigMap is not there yet has not finished its
-				// own deploy, and indexing it without one would start nothing. Retried on the next pass.
-				return fmt.Errorf("pool %s: reading member %s's env ConfigMap: %w", p, m, err)
-			}
-			data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
-			rendered = append(rendered, deploy.PoolMember{GVR: m, EnvConfig: data})
-		}
-		sizing, err := deploy.LoadPoolSizing(PoolSizingPath, p)
-		if err != nil {
-			return err
-		}
-		if err := deploy.EnsurePool(ctx, deploy.PoolOptions{
-			Pool: p, Namespace: ns, Members: rendered, Sizing: sizing,
-			ConfigmapTemplatePath: PoolConfigmapTemplatePath, DeploymentTemplatePath: PoolDeploymentTemplatePath,
-			AuthnURL: AuthnURL, DynClient: e.mgmtDynamic,
-		}); err != nil {
-			return err
-		}
+	touched := map[string]bool{}
+	for p := range were {
+		touched[p] = true
 	}
-	return nil
+	if p := poolOf(cr); p != "" && cr.GetDeletionTimestamp() == nil {
+		touched[p] = true
+	}
+	return deploy.ReconcilePools(ctx, *opts, touched)
+}
+
+// runsInPool reports whether a pool runs the controller for gvr in namespace, or is still draining it.
+func (e *external) runsInPool(ctx context.Context, namespace string, gvr schema.GroupVersionResource) (bool, error) {
+	versions, err := deploy.PoolMemberVersions(ctx, e.mgmtDynamic, namespace, gvr.Group, gvr.Resource)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(versions, gvr.Version), nil
 }
 
 // controllerPlacement is where the controller for gvr runs, decided by runner: the definition that

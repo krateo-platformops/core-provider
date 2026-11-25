@@ -264,8 +264,8 @@ member's configuration (chart inspection, status projections, apiRef), which cor
 derives and renders as the member's env ConfigMap. So the pool consumes core-provider's output, not
 its input:
 
-- core-provider writes `cdc-pool-<p>-members` as a pure function of the live local definitions
-  naming `<p>`, recomputed on every member reconcile. There is no increment or decrement to drift.
+- core-provider writes `cdc-pool-<p>-members` as a pure function of the live member env ConfigMaps
+  (below), recomputed on every member's write. There is no increment or decrement to drift.
 - The pool **watches** that one ConfigMap by name, and reads each member's env ConfigMap. A key
   added starts that member. A key removed stops it (drain, then release its Lease). A member's env
   ConfigMap changing restarts that member only. Nothing restarts the process.
@@ -274,18 +274,62 @@ its input:
   krateo-system, which RBAC cannot narrow by label. core-provider rewrites the Role as members join
   and leave.
 
+### Membership, as built (#652)
+A member is **a live env ConfigMap** (`<resource>-<version>-configmap`) labelled `krateo.io/cdc-pool:
+<p>`, and the index is computed from one LIST of them. Deploy writes that ConfigMap before its
+controller runs, and Undeploy removes it after the controller has stopped, so it says exactly what the
+index must: which Kind x versions have a controller due in this pool. Neither of the other two sources
+can:
+
+- A definition's **status** is written only after the reconcile that deploys has returned. During a
+  bump it still names the old version, and after a Create it names none. An index computed from it
+  re-listed the old version and dropped the new one (#652).
+- Its **spec** names the version it wants, not the older ones still running beside it (`upgradePolicy`
+  Manual or Paused keeps the old version's instances, and so its controller).
+
+Every version from its first deploy to its retirement is therefore a member: a new version from its
+bump, a definition created in a pool from its Create, an old version as long as it is kept, a paused
+definition's, and a definition whose status was never written because core-provider stopped first. Only
+the Kind x version's owner deploys, so a follower's own `pool` still changes nothing.
+
+**Writes are serialised and never replayed.** Writes to one pool take one lock in the process, and the
+index is updated at the resourceVersion of the LIST it was computed from. A refused write starts again
+from a new LIST. A member is granted its env ConfigMap before the index names it.
+
+**Leaving is stop-before-revoke**, the pool's form of #263: a retired version, a definition being
+deleted, one that stops naming `<p>` or names another pool. The env ConfigMap is annotated
+`krateo.io/cdc-pool-draining` (a restarted core-provider still knows), the key leaves the index, and
+core-provider waits until the controller's ownership Lease has been unheld for 5s (longer than the
+elector's longest wait between attempts), for at most 60s. Only then is the ConfigMap, the RBAC or the
+Lease grant removed or given to another identity. A Lease whose record does not change for its own
+duration belongs to a process that died, and counts as unheld:
+client-go's rule, measured on core-provider's clock from when it first saw the record, so no two clocks
+are compared. **At the bound nothing is revoked**: the Update or Delete fails, naming the Lease's holder
+in `Synced`, and is retried. Retirement still precedes the instances' migration, so between a key's
+leaving and the relabelling they have no controller, exactly as with a dedicated one.
+
+**Observe compares.** A pool is in no definition's digest (a member's digest stops at its own objects),
+so an entry lost from the index, or a release that changed only the pool's image or `cdc.pool` sizing,
+stayed as it was until some member's next Update. Every pass of a member now compares its own entry and
+the mark on its env ConfigMap, that no other pool lists it, and the pool's index, Role, RoleBinding,
+ServiceAccount, process ConfigMap and Deployment (through a server dry run, like a dedicated one), and
+reports not up to date with what differs. Update repairs all of it.
+
 ### Lifecycle, ref-counted by recomputation
 On each reconcile of a definition naming `<p>`, core-provider applies the pool objects (idempotent),
 labels and binds the member, and recomputes the index. A definition that stops naming `<p>`, or is
-deleted, is removed from the index. When the recomputed set is empty, the **last leaver** deletes
-the pool's objects. A failed list removes nothing (the rule the teardown paths already follow).
+deleted, is removed from the index. When no env ConfigMap is left in it, a draining one included, the
+**last leaver** deletes the pool's objects: the Deployment first, its pods waited for, then the RBAC,
+and the ConfigMaps an unfinished deletion is found by last. A failed list removes nothing (the rule the
+teardown paths already follow).
 
 ### Cutover, stop-before-start, by step 2's Lease
 Joining a pool and leaving a dedicated controller are one reconcile. core-provider adds the member
-to the index and deletes its dedicated Deployment. The pool's member starts its informer at once
+to the index and then deletes its dedicated Deployment (a controller deployed before step 2, which
+holds no Lease, is deleted first). The pool's member starts its informer at once
 (so readiness keeps meaning "can see its resource"), but its workers start only on the Lease. The
 dedicated controller releases the Lease after its drain. There is never a second writer, and
-nothing else needs to coordinate. Leaving a pool is the mirror image.
+nothing else needs to coordinate. Leaving a pool is the mirror image, waiting for the Lease as above.
 
 ### Failure isolation, which step 4 left provisional
 Step 4 stops the whole process when a member fails, a lost Lease included. In a pool that would
@@ -329,6 +373,80 @@ an install or upgrade returns on cancellation but leaves its own goroutine writi
 can reconcile a release the abandoned operation is still writing, and that operation's slot of the pool's
 total stays taken if its handler has not returned. The same holds after a lost Lease, whose restart also
 does not wait. Not closed here: the pool cannot see a reconcile the runtime has abandoned.
+
+### Per-member readiness, by its Lease (#653): proposed, not built
+Diego decided on 2026-11-24 that a member's state is read from its ownership Lease. Today one member that
+fails, or a same-key replacement slower than about 15s, fails the pool pod's `/readyz`, and every member's
+definition reads `Ready=False`/`Unavailable` through the shared pool Deployment.
+
+**Two halves.**
+1. *The pool's `/readyz` becomes process-level.* It is ready once the index has been listed and every
+   member it named at that point has synced once. That is latched: a later failure, a drain or a join
+   does not fail it. The pod's readiness then means "this process runs", and no member can flip another.
+2. *core-provider reads each member's Lease*, `templates.ControllerLeaseName` (`<version>.<plural>.<group>`)
+   in the management namespace. The holder is a pod name, and the elector's timings are 15s duration,
+   10s renew deadline and 2s retry.
+
+**States and text.** These apply only when the pool Deployment has rolled out. A Deployment rolling
+out, given up or unavailable keeps today's rows for every member, because then the process is the
+problem. `G` is 20s: longer than a same-key replacement leaves the Lease unheld (it is held through the
+drain, then retaken within 4.4s), so a bump does not flip anyone.
+
+| member | Ready | ControllerActive |
+|---|---|---|
+| Lease held by a pod of `cdc-pool-<p>`, and fresh | `Available` (no message) | `True`/`Running` "controller running in pool <p>" |
+| in the index for less than `G`, Lease not yet held by the pool | `False`/`Creating` "the controller for <gvr> is starting in pool <p>" | `True`/`Running` (same) |
+| Lease held by someone else (the dedicated pod during cutover, or another pool) | `False`/`Creating` "the controller for <gvr> is taking over from <holder>" | `True`/`Running` |
+| Lease unheld or stale for `G` or more | `False`/`Unavailable` "the controller for <gvr> is not running in pool <p>: its ownership Lease <name> has not been held since <time>" | `False`/`Unavailable` (same message) |
+| Lease unreadable | Observe errors (runtime `Unknown`/`NotObserved`, the error on `Synced`) | `Unknown`/`NotObserved` "the ownership Lease <name> could not be read: <error>" |
+
+`<time>` is when this process first saw the Lease unheld. It changes only on a transition, so every
+message stays stable while its state does (the 2026-11-11 rule).
+
+**No new reason.** Every literal exists: Ready `Available`, `Creating` (parent verdict converging) and
+`Unavailable` (failed); ControllerActive `Running`, `Unavailable` and `NotObserved`. No new `Unknown`
+reason ships, so installer's gate is unaffected. What changes is the *meaning* column of five rows:
+Ready `Creating` and `Unavailable`, and ControllerActive `Running`, `Unavailable` and `NotObserved`. Today
+they say "the controller Deployment". `cd-ready-reasons.md` is regenerated from them, so installer and
+frontend are told when that merges. A member that does not run is failed, not converging. Nothing makes
+it run again by itself except its own restart, and the message says which Lease to look at.
+
+**Freshness without comparing clocks.** `renewTime` is the pool's clock. "Fresh" is decided on
+core-provider's clock instead: an informer on Leases records, per Lease, the local time of the last
+update it saw. An update is a renewal, every 2s while held. A Lease is fresh while a holder is named and
+the last renewal was seen less than its `leaseDurationSeconds` ago, which is client-go's own rule. After a
+core-provider restart, a Lease seen for less than its duration has no local history yet. For that window
+only (15s), it is judged on `now - renewTime < 2 x leaseDurationSeconds`. That is wrong only with more
+than 15s of skew, and then only during those 15s after a restart.
+
+**Wake-ups.**
+- The pool Deployment's rollout events, mapped by `krateo.io/cdc-pool` to the definitions whose
+  `status.controller.pool` names it (#580). Today a pool Deployment wakes nobody: the watch's predicate
+  needs the per-version labels it does not carry.
+- Lease events, filtered to a changed `holderIdentity` and to create/delete. A renewal changes neither,
+  so 15 members renewing every 2s wake nothing. The informer still sees the renewals, which is how
+  freshness is measured.
+- Residual: a member that dies inside a live process without releasing its Lease leaves no event. Its
+  definition reads `Unavailable` at its next poll, up to 3m later. A requeue after `G` for a pool member
+  closes that, at 15 requeues per 20s per pool; I would ship without it and measure first.
+
+**RBAC.** core-provider needs `list`/`watch` on `coordination.k8s.io` leases regardless of leader
+election (#652 added `get`).
+
+**Remote pools:** none, because CEL refuses `pool` on a remote definition.
+
+**The abandoned-reconcile overlap** (measured in pool_drain_envtest_test.go: peak 2 reconciles of one
+composition in one process). At the grace, unstructured-runtime's `Run` cancels and returns, and it
+releases the Lease, while a handler that ignores its context (helm's uninstall) still writes. A runtime
+hook would need:
+1. a channel closed when every worker of a `Run` has returned (its `wg.Wait`), exposed to the caller;
+2. for a pool, the Lease kept, and renewed, until then, not released at the grace. This makes it
+   stop-before-start across pods too, and the per-member state above then reports the key as not
+   running for as long as it lasts, on that definition alone;
+3. the pool's successor for the key started only after (1), bounded by `helmTimeout`. At the bound it
+   is reported, not started.
+
+A dedicated controller needs none of this, because its process exits after `Run`.
 
 ### Sizing and workers
 Workers are capped **pool-wide**: the pool's `workers` is the process total, and no member takes
@@ -376,6 +494,10 @@ on a ServiceAccount it has a mapping for.
 - **Unit:** the index is a pure function of the definitions (join, leave, rename, delete, a failed
   list removes nothing); the Role's `resourceNames` track the index; the CEL rules refuse a remote
   pool and `pool` with `scaleToZero`.
+- **Envtest, core-provider (#652):** `pool_652_envtest_test.go`, through the real reconciler, with an
+  invariant replayed over every persisted state: a controller is in at most one index; a version with
+  an instance has a Deployment or exactly one index entry, unless it is being retired; whatever an
+  index names has its env ConfigMap, its Lease grant and the pool's permission to read it.
 - **Envtest:** a pool hosting two members; a member added and removed at runtime without the process
   restarting; a member that loses its Lease is restarted alone while the other keeps reconciling.
 - **Drains:** `pool_drain_test.go` (fake controllers whose drain the test holds) and

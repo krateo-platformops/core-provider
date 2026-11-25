@@ -36,7 +36,7 @@ The input: "serve this chart as a Kubernetes API".
 | `controller.{workers,resyncInterval}` | int / duration | Per-Kind CDC tuning; overrides the chart-global `cdc.workers`/`cdc.resyncInterval` without restarting other controllers. |
 | `controller.scaleToZero` | bool | Run this Kind's controller at 0 replicas while it has no instances, and wake it on the first one (#393). Off when unset. **Local definitions only:** set together with a remote `deploy.targetRef` it is rejected at admission (remote is #442). A controller **shared** by several definitions of the same Kind and version scales to zero only when every one of them opts in. Costs one metadata-only watch on the Kind's instances. |
 | `controller.scaleToZeroHoldDown` | duration (default `10m`) | How long the Kind must have no instances before its controller goes to 0, counted from the first time core-provider sees it empty, so a delete followed by a re-create doesn't bounce it. |
-| `controller.pool` | string (DNS-1123 label) | **Inert in this release: accepted, validated, and ignored.** Reserves the name of a shared controller pool this Kind's controller will run in; set or absent, the Kind keeps its dedicated controller, unchanged. See [the pool design](design/cdc-pooling.md). |
+| `controller.pool` | string (DNS-1123 label) | The shared controller pool this Kind's controller runs in (`cdc-pool-<pool>`), instead of a Deployment of its own. Local definitions only, and not with `scaleToZero`. Absent: a dedicated controller. See [the pool design](design/cdc-pooling.md). |
 
 ### `status`
 

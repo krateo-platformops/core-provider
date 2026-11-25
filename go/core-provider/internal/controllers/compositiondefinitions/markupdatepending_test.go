@@ -94,9 +94,10 @@ func TestEveryDriftReturnInObserveMarksUpdatePending(t *testing.T) {
 	})
 	// 8 since core-provider#534: the served version's spec schema is looser in today's render, so
 	// Observe routes to Update, whose ProjectWrite writes it. 9 since core-provider#642: the controller's
-	// authn mapping is missing, so Observe routes to Update, which writes it.
-	if len(drift) != 9 {
-		t.Errorf("found %d drift returns in Observe (lines %v), want 9; update this count deliberately", len(drift), drift)
+	// authn mapping is missing, so Observe routes to Update, which writes it. 10 since core-provider#652:
+	// the controller's pool is not current.
+	if len(drift) != 10 {
+		t.Errorf("found %d drift returns in Observe (lines %v), want 10; update this count deliberately", len(drift), drift)
 	}
 	if len(unmarked) > 0 {
 		t.Errorf("drift returns without markUpdatePending in their block: lines %v", unmarked)

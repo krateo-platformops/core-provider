@@ -71,8 +71,10 @@ func TestReconcilePoolsDoesNotSeeTheTemplateConfigMaps(t *testing.T) {
 	ManagementNamespace = ns
 	t.Cleanup(func() { ManagementNamespace = old })
 	sc := runtime.NewScheme()
-	if err := apis.AddToScheme(sc); err != nil {
-		t.Fatal(err)
+	for _, add := range []func(*runtime.Scheme) error{apis.AddToScheme, corev1.AddToScheme} {
+		if err := add(sc); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx := contexttools.CtxWithLogger(context.Background(), logging.NewNopLogger())
 	leaver := poolCD("team-a", "page", 1, "v1-0-0", "")
@@ -84,8 +86,9 @@ func TestReconcilePoolsDoesNotSeeTheTemplateConfigMaps(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		e := &external{kube: clientfake.NewClientBuilder().WithScheme(sc).WithObjects(leaver.DeepCopy()).Build(), mgmtDynamic: hub}
-		if err := e.reconcilePools(ctx, leaver.DeepCopy(), schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "pages"}); err != nil {
+		kube := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(leaver.DeepCopy()).Build()
+		e := &external{mgmt: kube, kube: kube, mgmtDynamic: hub}
+		if err := e.reconcilePools(ctx, leaver.DeepCopy(), map[string]bool{"general": true}); err != nil {
 			t.Fatal(err)
 		}
 		if idx, dep := poolObjectsLeft(t, hub, ns); idx || dep {
@@ -127,8 +130,9 @@ func noConfigMaps(t *testing.T, b *clientfake.ClientBuilder) client.Client {
 	}).Build()
 }
 
-// Path: the leaked-controller search, which matches names by prefix and suffix, matches Deployments only.
-// What it finds is torn down by deploy.Undeploy (covered there).
+// Path: the leaked-controller search, which matches names by prefix and suffix, matches Deployments, and
+// the pool members' env ConfigMaps by the pool label (#652), never by name. What it finds is torn down by
+// deploy.Undeploy (covered there).
 func TestFindLeakedControllersReadsNoConfigMap(t *testing.T) {
 	e := leakExternal(t, leakCRD("v0-3-484", "vacuum"), nil, leakComposition("installer", "v0-3-484"))
 	kube := noConfigMaps(t, clientfake.NewClientBuilder().WithScheme(leakScheme(t)).
@@ -138,6 +142,37 @@ func TestFindLeakedControllersReadsNoConfigMap(t *testing.T) {
 	if err != nil || len(leaked) != 1 {
 		t.Fatalf("leaked = %v, %v; want the one leaked controller, or nothing was shown", leaked, err)
 	}
+}
+
+// The label half: with the templates in the management namespace it finds the pool member a pool leaked
+// and nothing else.
+func TestFindLeakedControllersSeesNoTemplateConfigMap(t *testing.T) {
+	old := ManagementNamespace
+	ManagementNamespace = leakNS
+	t.Cleanup(func() { ManagementNamespace = old })
+	forEachTemplateRendering(t, func(t *testing.T, cms []*unstructured.Unstructured) {
+		hub := poolHub(t, leakNS)
+		gvr := leakGVR()
+		member := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": gvr.Resource + "-v0-3-480-configmap", "namespace": leakNS, "labels": map[string]any{deploy.PoolLabel: "general"}},
+			"data": map[string]any{"COMPOSITION_CONTROLLER_GROUP": gvr.Group, "COMPOSITION_CONTROLLER_VERSION": "v0-3-480",
+				"COMPOSITION_CONTROLLER_RESOURCE": gvr.Resource},
+		}}
+		for _, cm := range append([]*unstructured.Unstructured{member}, cms...) {
+			cm = cm.DeepCopy()
+			cm.SetNamespace(leakNS)
+			if err := hub.Tracker().Add(cm); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e := leakExternal(t, leakCRD("v0-3-484", "vacuum"), nil, leakComposition("installer", "v0-3-484"))
+		e.mgmtDynamic = hub
+		leaked, _, err := e.findLeakedControllers(context.Background(), leakGVK("v0-3-484"), leakGVR(), "installer", leakNS, []string{leakNS})
+		if err != nil || len(leaked) != 1 || leaked[0].Version != "v0-3-480" || leaked[0].Name != member.GetName() {
+			t.Fatalf("leaked = %v, %v; want only the pool member at v0-3-480", leaked, err)
+		}
+	})
 }
 
 // Path: scale-to-zero's reading of the controller, and its pods.

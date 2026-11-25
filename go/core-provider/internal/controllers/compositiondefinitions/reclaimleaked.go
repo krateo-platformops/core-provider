@@ -12,6 +12,7 @@ import (
 
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 )
 
 // A per-version controller Deployment is named "<resource>-<version>-controller" by
@@ -22,7 +23,8 @@ const (
 	leakedControllerSuffix = "-controller"
 )
 
-// leakedController is a cdc Deployment that core-provider created and then failed to retire.
+// leakedController is a controller that core-provider created and then failed to retire: a cdc
+// Deployment, or a pool member, named by its env ConfigMap.
 type leakedController struct {
 	Name    string
 	Version string
@@ -101,6 +103,7 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 
 	prefix := gvr.Resource + "-"
 	seen := map[string]bool{}
+	var found []leakedController // one per version, before the checks that decide it
 	for i := range candidates {
 		name := candidates[i].Name
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, leakedControllerSuffix) {
@@ -126,6 +129,26 @@ func (e *external) findLeakedControllers(ctx context.Context, gvk schema.GroupVe
 			continue
 		}
 		seen[version] = true
+		found = append(found, leakedController{Name: name, Version: version})
+	}
+	// A controller a pool runs has no Deployment: what shows it is its env ConfigMap (#652). One left
+	// behind for a version the CRD no longer carries is not inert as a dedicated one is. Its list fails,
+	// and the pool's readiness with it.
+	if !e.remote && e.mgmtDynamic != nil {
+		pooled, perr := deploy.PoolMemberVersions(ctx, e.mgmtDynamic, ManagementNamespace, gvr.Group, gvr.Resource)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		for _, version := range pooled {
+			if !seen[version] {
+				seen[version] = true
+				found = append(found, leakedController{Name: deploy.MemberEnvConfigMapName(schema.GroupVersionResource{Group: gvr.Group, Version: version, Resource: gvr.Resource}), Version: version})
+			}
+		}
+	}
+
+	for _, f := range found {
+		name, version := f.Name, f.Version
 		if version == gvk.Version {
 			kept = append(kept, version+":is-current")
 			continue

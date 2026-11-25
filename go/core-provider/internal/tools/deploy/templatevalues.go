@@ -100,29 +100,29 @@ func (m authnMapping) values() []any {
 }
 
 // poolConfigMapValues: a pool's process ConfigMap (assets/cdc/pool-configmap.yaml).
-func poolConfigMapValues(o PoolOptions) []any {
-	names, sa := PoolNames(o.Pool), PoolServiceAccount(o.Pool, o.Namespace)
+func poolConfigMapValues(o PoolOptions, pool string, sizing PoolSizing) []any {
+	names, sa := PoolNames(pool), PoolServiceAccount(pool, o.Namespace)
 	return []any{
-		"pool", o.Pool,
+		"pool", pool,
 		"poolConfigMap", names.EnvConfigMap,
 		"poolDeployment", names.Workload,
 		"poolIndex", names.Index,
-		"poolWorkers", o.Sizing.Workers,
+		"poolWorkers", sizing.Workers,
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
-		"authn_url", o.AuthnURL,
+		"authn_url", o.Assets.AuthnURL,
 	}
 }
 
 // poolDeploymentValues: a pool's Deployment (assets/cdc/pool-deployment.yaml). resources is JSON;
 // processEnv is the pool's process ConfigMap data, whose checksum rolls the pod.
-func poolDeploymentValues(o PoolOptions, resources string, processEnv map[string]string) []any {
-	names := PoolNames(o.Pool)
+func poolDeploymentValues(o PoolOptions, pool, resources string, processEnv map[string]string) []any {
+	names := PoolNames(pool)
 	return []any{
-		"pool", o.Pool,
+		"pool", pool,
 		"poolDeployment", names.Workload,
 		"poolConfigMap", names.EnvConfigMap,
-		"poolServiceAccount", PoolServiceAccount(o.Pool, o.Namespace).Name,
+		"poolServiceAccount", PoolServiceAccount(pool, o.Namespace).Name,
 		"poolResources", resources,
 		"config_checksum", configChecksum(processEnv),
 	}

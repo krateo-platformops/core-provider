@@ -104,6 +104,16 @@ the upstream roadmap and set the direction for everything below.
   `Ready=False`/`RemoteChartUnreachable`, on a bump of a definition that worked before too (its status still
   names the version it serves), until the chart moves somewhere the spoke reaches.
 
+## Controller pools: the index, before the first cluster uses one (2026-11)
+
+- **A pool's index is its members' live env ConfigMaps** (#652). It was computed from the definitions'
+  status, which is written only after the reconcile that deploys returns, so a member's bump never reached
+  it: the new version had no controller, the old one lost its grants while the pool still ran it, and every
+  member read `Unavailable`. Found by reading, before any definition named a pool. Leaving a pool now
+  waits for the controller's ownership Lease before anything is revoked, and every pass of a member
+  compares the pool, so a release that changes only the pool's image or sizing reaches it
+  ([design](./design/cdc-pooling.md), §5c).
+
 ## A core-provider renders only the templates it was deployed with (2026-11)
 
 - **Content-addressed template ConfigMaps** (#651): the kubelet refreshed the mounted templates in the

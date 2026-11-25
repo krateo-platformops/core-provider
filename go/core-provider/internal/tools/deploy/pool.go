@@ -53,8 +53,8 @@ func MemberEnvConfigMapName(gvr schema.GroupVersionResource) string {
 	return getCDCConfigmapNN(types.NamespacedName{Name: MemberKey(gvr)}).Name
 }
 
-// PoolMember is one member as the index records it: its Kind x version, and the data of its env
-// ConfigMap as rendered, whose checksum the index carries.
+// PoolMember is one member as the index records it: its Kind x version, and the live data of its env
+// ConfigMap, whose checksum the index carries.
 type PoolMember struct {
 	GVR       schema.GroupVersionResource
 	EnvConfig map[string]string
@@ -70,7 +70,7 @@ type PoolIndexEntry struct {
 
 // RenderPoolIndex is the membership index: one key per member (MemberKey), valued with its
 // PoolIndexEntry as JSON. It is a pure function of the members, so rewriting it on every member
-// reconcile cannot drift, and an empty pool renders an empty index (the caller deletes the pool).
+// reconcile cannot drift. No member renders an empty index: the pool's last controller is draining.
 func RenderPoolIndex(pool, namespace string, members []PoolMember) (corev1.ConfigMap, error) {
 	names := PoolNames(pool)
 	data := make(map[string]string, len(members))

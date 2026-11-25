@@ -89,12 +89,9 @@ func shippedContainers(t *testing.T) map[string]corev1.Container {
 	for _, c := range dep.Spec.Template.Spec.Containers {
 		out["per-version controller/"+c.Name] = c
 	}
-	sizing, err := LoadPoolSizing(mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"), "general")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool, err := renderPoolDeployment(PoolOptions{Pool: "general", Namespace: "krateo-system", Sizing: sizing,
-		DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml")}, map[string]string{})
+	pool, err := renderPoolDeployment(PoolOptions{Namespace: "krateo-system", Assets: PoolAssets{
+		SizingPath:             mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"),
+		DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml")}}, "general", map[string]string{})
 	if err != nil {
 		t.Fatal(err)
 	}

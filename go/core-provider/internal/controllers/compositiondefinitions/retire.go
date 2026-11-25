@@ -17,8 +17,8 @@ import (
 )
 
 // retireController removes the per-version controller for `retired` and then moves every derived
-// binding that names its ServiceAccount onto the current controller's (`current`, running in
-// currentNamespace).
+// binding that names its ServiceAccount onto the current controller's (`current`, run by owner, or by
+// this definition when owner is nil).
 //
 // It is the ONE retirement sequence. The version-change path and the leaked-controller reclaim
 // (#327) both call it, so neither can delete an identity without moving the bindings that name it.
@@ -31,8 +31,10 @@ import (
 // definition's current chart, passed for a version whose own chart is no longer recorded, can at
 // worst miss that pair. It can never reach the current version's.
 func (e *external) retireController(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition,
-	spec *compositiondefinitionsv1alpha1.ChartInfo, retired, current schema.GroupVersionResource, currentNamespace string,
+	spec *compositiondefinitionsv1alpha1.ChartInfo, retired, current schema.GroupVersionResource, owner *compositiondefinitionsv1alpha1.CompositionDefinition,
 	log logging.Logger) error {
+	currentNamespace := currentControllerNamespace(cr, owner)
+	currentSA := currentControllerServiceAccount(cr, owner)
 	// The retired version's controller may live in two places (#313: an old version is not relocated,
 	// so it may still be in the definition's namespace). Both are retired here, in this one routine,
 	// and the re-subject below runs after both (#166).
@@ -55,6 +57,8 @@ func (e *external) retireController(ctx context.Context, cr *compositiondefiniti
 		NewNamespace:  currentNamespace,
 		OldGVR:        retired,
 		NewGVR:        current,
+
+		NewServiceAccount: currentSA,
 	})
 	if err != nil {
 		return fmt.Errorf("error re-subjecting derived RBAC from %s to %s: %w", retired.Version, current.Version, err)
@@ -62,7 +66,7 @@ func (e *external) retireController(ctx context.Context, cr *compositiondefiniti
 	if legacy := legacyControllerNamespace(cr); legacy != "" {
 		n, err := deploy.ResubjectDerivedRBAC(ctx, deploy.ResubjectOptions{
 			DynamicClient: e.dynamic, Namespace: legacy, NewNamespace: currentNamespace,
-			OldGVR: retired, NewGVR: current,
+			OldGVR: retired, NewGVR: current, NewServiceAccount: currentSA,
 		})
 		if err != nil {
 			return fmt.Errorf("error re-subjecting derived RBAC from %s in %s: %w", retired.Version, legacy, err)
@@ -83,6 +87,21 @@ func currentControllerNamespace(cr *compositiondefinitionsv1alpha1.CompositionDe
 		return controllerNamespace(owner)
 	}
 	return controllerNamespace(cr)
+}
+
+// currentControllerServiceAccount is the identity this definition's current-version controller runs as
+// when that is not its own per-version one: its pool's, when it runs in one. Without it, a version
+// retired in the same pass as its definition joins a pool would leave its derived bindings naming
+// <resource>-<version>, which a pool member does not have.
+func currentControllerServiceAccount(cr *compositiondefinitionsv1alpha1.CompositionDefinition, owner *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	runner := cr
+	if owner != nil {
+		runner = owner
+	}
+	if p := poolOf(runner); p != "" && !clusterkube.IsRemote(runner.Spec.Deploy) {
+		return deploy.PoolServiceAccount(p, controllerNamespace(runner)).Name
+	}
+	return ""
 }
 
 // reclaimLeakedControllers retires, through retire, every controller findLeakedControllers reports
@@ -149,6 +168,7 @@ func (e *external) retiredUndeployOptions(cr *compositiondefinitionsv1alpha1.Com
 		ControllerNamespace:    controllerNS,
 		SkipCRD:                true,
 		AuthnNamespace:         AuthnNamespace,
+		LocalPools:             !clusterkube.IsRemote(cr.Spec.Deploy),
 	}
 }
 

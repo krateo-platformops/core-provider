@@ -196,7 +196,7 @@ func TestTemplatesSurvivePoolDeletion(t *testing.T) {
 		p := PoolNames("general")
 		dyn := hubWith(cmObj(templatesNS, p.Index), cmObj(templatesNS, p.EnvConfigMap))
 		survived := seedTemplates(t, dyn, names)
-		if err := DeletePool(context.Background(), dyn, "general", templatesNS); err != nil {
+		if err := DeletePool(context.Background(), PoolOptions{Namespace: templatesNS, DynClient: dyn}, "general"); err != nil {
 			t.Fatal(err)
 		}
 		for _, n := range []string{p.Index, p.EnvConfigMap} {

@@ -366,12 +366,16 @@ func referencesKind(ctx context.Context, self *compositiondefinitionsv1alpha1.Co
 	return keepReason{}, nil
 }
 
-// controllerDeployedIn reports whether namespace holds a controller Deployment for gvr.
+// controllerDeployedIn reports whether namespace holds a controller for gvr: its own Deployment, or, in
+// the management namespace, a pool that runs it or has not finished draining it.
 func (e *external) controllerDeployedIn(ctx context.Context, namespace string, gvr schema.GroupVersionResource) (bool, error) {
 	var dep appsv1.Deployment
 	err := e.kube.Get(ctx, deploy.ControllerDeploymentKey(namespace, gvr), &dep)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		if namespace != ManagementNamespace || e.remote {
+			return false, nil
+		}
+		return e.runsInPool(ctx, namespace, gvr)
 	}
 	if err != nil {
 		return false, fmt.Errorf("error looking up controller deployment for %s in %s: %w", gvr.String(), namespace, err)

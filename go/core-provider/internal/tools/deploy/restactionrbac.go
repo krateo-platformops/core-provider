@@ -52,7 +52,16 @@ func authnClientFor(server string) *authn.Client {
 
 const restActionRBACSuffix = "-restaction"
 
-func restActionRBACName(saName string) string { return saName + restActionRBACSuffix }
+func restActionRBACName(controller string) string { return controller + restActionRBACSuffix }
+
+// restActionRBACNameOf names the apiRef RBAC of opts' Kind x version: <resource>-<version>-restaction,
+// which for a dedicated controller is its ServiceAccount's name, and is what Undeploy removes. In a pool
+// the ServiceAccount, and so the GROUP bound below, is every member's, so a name derived from it would
+// be one ClusterRole that each member's own read-set replaces in turn: every other member's reads go,
+// each member's digest sees the others', and they redeploy one another for ever.
+func restActionRBACNameOf(opts DeployOptions) string {
+	return restActionRBACName(resourceNamer(opts.GVR.Resource, opts.GVR.Version))
+}
 
 // decodeExtras parses the JSON-serialized apiRef.extras into the map the /rbac client expects.
 func decodeExtras(s string) (map[string]any, error) {
@@ -142,11 +151,11 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 			"count", d.Count, "rows", d.Resources)
 	}
 
-	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACName(saName))
+	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACNameOf(opts))
 	if cr == nil || crb == nil {
 		// Every row was non-read, so there is nothing to grant. Emitting a binding to an empty role
 		// would read as an intended grant someone had broken.
-		log.Info("apiRef RBAC: no grantable rows in the read-set; no ClusterRole emitted", "name", restActionRBACName(saName))
+		log.Info("apiRef RBAC: no grantable rows in the read-set; no ClusterRole emitted", "name", restActionRBACNameOf(opts))
 		return nil
 	}
 
@@ -166,12 +175,12 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 // lookupRestActionRBAC contributes the LIVE apiRef ClusterRole + binding to the digest, mirroring
 // lookupRBACResources: a not-found object hashes as empty, so a deleted/missing grant shows as
 // drift. No-op without apiRef. Unlike Deploy, it makes no snowplow call.
-func lookupRestActionRBAC(ctx context.Context, kube client.Client, opts DeployOptions, saName string, hsh *hasher.ObjectHash) error {
+func lookupRestActionRBAC(ctx context.Context, kube client.Client, opts DeployOptions, hsh *hasher.ObjectHash) error {
 	if opts.ApiRefName == "" {
 		return nil
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-	name := restActionRBACName(saName)
+	name := restActionRBACNameOf(opts)
 
 	cr := &rbacv1.ClusterRole{}
 	if err := kube.Get(ctx, client.ObjectKey{Name: name}, cr); err != nil {

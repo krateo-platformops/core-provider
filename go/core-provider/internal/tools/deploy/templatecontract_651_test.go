@@ -101,7 +101,7 @@ func templateCallSites(t *testing.T) map[string]map[string][]any {
 	}
 	none := map[string][]any{"every caller": nil}
 	binding := map[string][]any{"Deploy, Lookup and Undeploy": bindingValues("sa", "ns")}
-	pool := PoolOptions{Pool: "general", Namespace: "ns", Sizing: PoolSizing{Workers: 4}, AuthnURL: "http://authn"}
+	pool := PoolOptions{Namespace: "ns", Assets: PoolAssets{AuthnURL: "http://authn"}}
 	return map[string]map[string][]any{
 		"serviceaccount.yaml":                      none,
 		"clusterrole.yaml":                         none,
@@ -130,8 +130,8 @@ func templateCallSites(t *testing.T) map[string]map[string][]any {
 			"Lookup":        deploymentIdentityValues("sa", "api"),
 			"Undeploy":      deploymentIdentityValues("sa", ""),
 		},
-		"pool-configmap.yaml":  {"EnsurePool": poolConfigMapValues(pool)},
-		"pool-deployment.yaml": {"EnsurePool": poolDeploymentValues(pool, `{"limits":{}}`, map[string]string{"A": "b"})},
+		"pool-configmap.yaml":  {"EnsurePool": poolConfigMapValues(pool, "general", PoolSizing{Workers: 4})},
+		"pool-deployment.yaml": {"EnsurePool": poolDeploymentValues(pool, "general", `{"limits":{}}`, map[string]string{"A": "b"})},
 	}
 }
 

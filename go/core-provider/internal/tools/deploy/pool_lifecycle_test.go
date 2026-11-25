@@ -93,7 +93,7 @@ func TestPoolRBAC_OnlyTheIndexAndTheMembersEnv(t *testing.T) {
 		{GVR: schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-2-0", Resource: "portals"}},
 		{GVR: schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v0-3-28", Resource: "mariadbs"}},
 	}
-	role, binding := PoolRBAC("general", "krateo-system", members)
+	role, binding := PoolRBAC("general", "krateo-system", poolView{members: members}.envNames())
 	names := PoolNames("general")
 
 	want := []rbacv1.PolicyRule{
@@ -109,5 +109,9 @@ func TestPoolRBAC_OnlyTheIndexAndTheMembersEnv(t *testing.T) {
 	if len(binding.Subjects) != 1 || binding.Subjects[0].Name != sa.Name || binding.Subjects[0].Namespace != sa.Namespace ||
 		binding.RoleRef.Name != role.Name || role.Namespace != "krateo-system" {
 		t.Errorf("binding %+v does not bind role %s to the pool's ServiceAccount %s", binding, role.Name, sa)
+	}
+	// No member: no env rule at all. One with no resourceNames would grant every ConfigMap here.
+	if role, _ := PoolRBAC("general", "krateo-system", nil); len(role.Rules) != 1 {
+		t.Errorf("an empty pool's rules = %+v, want only the index's", role.Rules)
 	}
 }

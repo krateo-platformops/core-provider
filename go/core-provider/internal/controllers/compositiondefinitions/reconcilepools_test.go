@@ -3,22 +3,26 @@ package compositiondefinitions
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/krateo-platformops/core-provider/apis"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
 	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynfake "k8s.io/client-go/dynamic/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	clienttesting "k8s.io/client-go/testing"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+var configMapsGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
 
 // poolHub is a management cluster holding pool "general": its index listing the Page v1-0-0
 // controller, and its Deployment.
@@ -34,6 +38,7 @@ func poolHub(t *testing.T, ns string) *dynfake.FakeDynamicClient {
 	dep := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apps/v1", "kind": "Deployment",
 		"metadata": map[string]any{"name": names.Workload, "namespace": ns, "labels": map[string]any{deploy.PoolLabel: "general"}},
+		"spec":     map[string]any{"selector": map[string]any{"matchLabels": map[string]any{"app.kubernetes.io/name": names.Workload}}},
 	}}
 	return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		configMapsGVR: "ConfigMapList",
@@ -52,10 +57,23 @@ func poolObjectsLeft(t *testing.T, hub *dynfake.FakeDynamicClient, ns string) (i
 	return ierr == nil, derr == nil
 }
 
-// The pool's teardown arm, by input state. The last leaver deletes the pool; and "could not
-// determine the membership" is never "empty": a failed list, or a remaining member whose env
-// ConfigMap cannot be read, returns an error and deletes nothing (the plausible value is the
-// destructive one).
+// memberEnv is a Page controller's env ConfigMap as Deploy leaves it in pool "general".
+func memberEnv(ns, version string, draining bool) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "pages-" + version + "-configmap", "namespace": ns, "labels": map[string]any{deploy.PoolLabel: "general"}},
+		"data": map[string]any{"COMPOSITION_CONTROLLER_GROUP": "composition.krateo.io", "COMPOSITION_CONTROLLER_VERSION": version,
+			"COMPOSITION_CONTROLLER_RESOURCE": "pages"},
+	}}
+	if draining {
+		u.SetAnnotations(map[string]string{deploy.PoolDrainingAnnotation: "true"})
+	}
+	return u
+}
+
+// The pool's teardown arm, by input state. The last leaver deletes the pool; and "could not determine
+// the membership" is never "empty": a failed list, or a remaining member, returns an error or keeps the
+// pool, and deletes nothing (the plausible value is the destructive one).
 func TestReconcilePools_TeardownOnlyOnAKnownEmptyMembership(t *testing.T) {
 	ns := ManagementNamespace
 	if ns == "" {
@@ -63,59 +81,112 @@ func TestReconcilePools_TeardownOnlyOnAKnownEmptyMembership(t *testing.T) {
 		ManagementNamespace = ns
 		t.Cleanup(func() { ManagementNamespace = "" })
 	}
-	sc := runtime.NewScheme()
-	if err := apis.AddToScheme(sc); err != nil {
-		t.Fatal(err)
-	}
 	ctx := contexttools.CtxWithLogger(context.Background(), logging.NewNopLogger())
-	pages := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-0", Resource: "pages"}
+	sizing := PoolSizingPath
+	PoolSizingPath = filepath.Join(t.TempDir(), "absent.json") // ensuring a pool fails here, and says so
+	t.Cleanup(func() { PoolSizingPath = sizing })
 
-	// The leaver: Page v1-0-0's owner, which no longer names a pool.
-	leaver := poolCD("team-a", "page", 1, "v1-0-0", "")
-
-	run := func(kube client.Client) (*dynfake.FakeDynamicClient, error) {
+	run := func(t *testing.T, hub *dynfake.FakeDynamicClient, cr *compositiondefinitionsv1alpha1.CompositionDefinition, were ...string) error {
+		t.Helper()
+		e := &external{mgmt: clientfake.NewClientBuilder().Build(), mgmtDynamic: hub}
+		left := map[string]bool{}
+		for _, p := range were {
+			left[p] = true
+		}
+		return e.reconcilePools(ctx, cr, left)
+	}
+	with := func(t *testing.T, cms ...*unstructured.Unstructured) *dynfake.FakeDynamicClient {
 		hub := poolHub(t, ns)
-		e := &external{kube: kube, mgmtDynamic: hub}
-		cr := leaver.DeepCopy()
-		return hub, e.reconcilePools(ctx, cr, pages)
+		for _, cm := range cms {
+			if _, err := hub.Resource(configMapsGVR).Namespace(ns).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return hub
+	}
+	leaver := poolCD("team-a", "page", 1, "v1-0-0", "")
+	kept := func(t *testing.T, hub *dynfake.FakeDynamicClient) {
+		t.Helper()
+		if idx, dep := poolObjectsLeft(t, hub, ns); !idx || !dep {
+			t.Fatalf("deleted: index=%v deployment=%v", idx, dep)
+		}
 	}
 
 	t.Run("the last leaver: the pool is deleted", func(t *testing.T) {
-		hub, err := run(clientfake.NewClientBuilder().WithScheme(sc).WithObjects(leaver.DeepCopy()).Build())
-		if err != nil {
+		hub := with(t)
+		if err := run(t, hub, &leaver, "general"); err != nil {
 			t.Fatal(err)
 		}
 		if idx, dep := poolObjectsLeft(t, hub, ns); idx || dep {
 			t.Fatalf("pool left behind: index=%v deployment=%v", idx, dep)
 		}
 	})
-
-	t.Run("the definitions cannot be listed: nothing deleted, error returned", func(t *testing.T) {
-		failing := clientfake.NewClientBuilder().WithScheme(sc).WithInterceptorFuncs(interceptor.Funcs{
-			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
-				return errors.New("apiserver unavailable")
-			},
-		}).Build()
-		hub, err := run(failing)
-		if err == nil || !strings.Contains(err.Error(), "listing CompositionDefinitions") {
-			t.Fatalf("err = %v, want the failed definitions list", err)
+	t.Run("its pods are waited for: nothing they run with goes before them", func(t *testing.T) {
+		hub := with(t)
+		roles := hub.Resource(schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}).Namespace(ns)
+		role := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+			"metadata": map[string]any{"name": deploy.PoolNames("general").Workload, "namespace": ns}}}
+		if _, err := roles.Create(ctx, role, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
 		}
-		if idx, dep := poolObjectsLeft(t, hub, ns); !idx || !dep {
-			t.Fatalf("deleted on a failed list: index=%v deployment=%v", idx, dep)
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "draining", Namespace: ns, Labels: map[string]string{"app.kubernetes.io/name": deploy.PoolNames("general").Workload}}}
+		sc := runtime.NewScheme()
+		_ = corev1.AddToScheme(sc)
+		kube := clientfake.NewClientBuilder().WithScheme(sc).WithObjects(pod).Build()
+		there := make(chan bool, 1)
+		go func() {
+			time.Sleep(700 * time.Millisecond)
+			_, err := roles.Get(ctx, role.GetName(), metav1.GetOptions{})
+			there <- err == nil
+			_ = kube.Delete(ctx, pod)
+		}()
+		e := &external{mgmt: kube, mgmtDynamic: hub}
+		if err := e.reconcilePools(ctx, &leaver, map[string]bool{"general": true}); err != nil {
+			t.Fatal(err)
+		}
+		if !<-there {
+			t.Error("the pool's Role was deleted while its pod was still there")
+		}
+		if idx, _ := poolObjectsLeft(t, hub, ns); idx {
+			t.Error("the pool was not deleted once its pod was gone")
 		}
 	})
-
-	t.Run("a member remains whose env ConfigMap cannot be read: nothing deleted, error returned", func(t *testing.T) {
-		stays := poolCD("team-b", "other", 2, "v2-0-0", "general")
-		stays.Status.Kind, stays.Status.Resource = "Other", "others"
-		hub, err := run(clientfake.NewClientBuilder().WithScheme(sc).WithObjects(leaver.DeepCopy(), &stays).Build())
-		// Pinned to the env ConfigMap read: LoadPoolSizing would fail right after it in this test
-		// (no sizing file), so a bare err != nil would pass with the read's error swallowed.
-		if err == nil || !strings.Contains(err.Error(), "reading member") {
-			t.Fatalf("err = %v, want the member's env ConfigMap read", err)
+	t.Run("the pool's ConfigMaps cannot be listed: nothing deleted, error returned", func(t *testing.T) {
+		hub := with(t)
+		hub.PrependReactor("list", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("apiserver unavailable")
+		})
+		if err := run(t, hub, &leaver, "general"); err == nil || !strings.Contains(err.Error(), "apiserver unavailable") {
+			t.Fatalf("err = %v, want the failed list", err)
 		}
-		if idx, dep := poolObjectsLeft(t, hub, ns); !idx || !dep {
-			t.Fatalf("deleted a pool that still has a member: index=%v deployment=%v", idx, dep)
+		kept(t, hub)
+	})
+	t.Run("a member remains: the pool is ensured, not deleted", func(t *testing.T) {
+		hub := with(t, memberEnv(ns, "v2-0-0", false))
+		if err := run(t, hub, &leaver, "general"); err == nil || !strings.Contains(err.Error(), "pool sizing") {
+			t.Fatalf("err = %v, want EnsurePool reaching the pool's sizing", err)
 		}
+		kept(t, hub)
+	})
+	t.Run("a member is still draining: the pool runs it until it has stopped", func(t *testing.T) {
+		hub := with(t, memberEnv(ns, "v1-0-0", true))
+		_ = run(t, hub, &leaver, "general")
+		kept(t, hub)
+	})
+	t.Run("another definition's pass leaves a pool it has nothing to do with alone", func(t *testing.T) {
+		hub := with(t, memberEnv(ns, "v2-0-0", false))
+		other := poolCD("team-b", "other", 2, "v1-0-0", "")
+		if err := run(t, hub, &other); err != nil {
+			t.Fatal(err)
+		}
+		kept(t, hub)
+	})
+	t.Run("a remote definition has no pools", func(t *testing.T) {
+		hub := with(t)
+		far := remoteCD(poolCD("team-c", "far", 3, "v1-0-0", ""))
+		if err := run(t, hub, &far, "general"); err != nil {
+			t.Fatal(err)
+		}
+		kept(t, hub)
 	})
 }
