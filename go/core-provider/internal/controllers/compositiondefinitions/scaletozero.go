@@ -212,6 +212,7 @@ func lostAvailability(available *appsv1.DeploymentCondition) string {
 func (e *external) controllerConditions(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition,
 	placement compositiondefinitionsv1alpha1.ControllerStatus, gvr schema.GroupVersionResource) (ready, active rtv1.Condition, ok bool, readErr error) {
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		e.requeue.set(client.ObjectKeyFromObject(cr), time.Time{}) // a remote definition is no pool member (#653)
 		return rtv1.Condition{}, rtv1.Condition{}, false, nil
 	}
 	// The Deployment that RUNS the controller (#580): for a pool member that is the pool's

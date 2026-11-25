@@ -1,6 +1,7 @@
 package compositiondefinitions
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlevent "sigs.k8s.io/controller-runtime/pkg/event"
 )
 
@@ -183,5 +185,51 @@ func TestMemberPollHook(t *testing.T) {
 	r.set(types.NamespacedName{Namespace: cd.Namespace, Name: cd.Name}, time.Time{})
 	if d := hook(&cd, 3*time.Minute); d != 3*time.Minute {
 		t.Errorf("cleared: %s", d)
+	}
+}
+
+// A definition's recheck belongs to its pool membership. One that leaves the pool, for a dedicated
+// controller or for a remote target (pool and targetRef are exclusive only within one spec, so one
+// update can do both), must not keep the recheck it had: a recheck in the past is floored to 1s, so the
+// poll hook would bring it back every second for as long as it exists.
+func TestMemberRecheck_IsClearedOffThePool(t *testing.T) {
+	ns := withManagementNamespace(t)
+	poolDep := rolledOut(1)
+	poolDep.Name, poolDep.Namespace = deploy.PoolNames("pages").Workload, ns
+	ctx := context.Background()
+	const poll = 3 * time.Minute
+	for _, c := range []struct {
+		name  string
+		leave func(*compositiondefinitionsv1alpha1.CompositionDefinition)
+	}{
+		{"for a dedicated controller", func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) { cd.Spec.Controller = nil }},
+		{"for a remote target", func(cd *compositiondefinitionsv1alpha1.CompositionDefinition) {
+			cd.Spec.Controller = nil
+			cd.Spec.Deploy = &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "spoke"}}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			now := time.Now()
+			e := &external{kube: clientfake.NewClientBuilder().WithObjects(poolDep.DeepCopy()).Build(),
+				leases: newLeaseClock(func() time.Time { return now }), requeue: &memberRequeue{}}
+			hook := memberPollHook(e.requeue)
+			member := poolCD("team-a", "page", 1, "v1-0-0", "pages")
+			// Premise: as a member whose Lease nobody holds yet, it is starting, rechecked at G.
+			ready, _, _, err := e.controllerConditions(ctx, &member, controllerPlacement(&member, pagesGVR), pagesGVR)
+			if err != nil || !cdreason.Creating.Is(ready) {
+				t.Fatalf("premise: a member with no Lease: Ready %s/%s %q err=%v, want Creating", ready.Status, ready.Reason, ready.Message, err)
+			}
+			if d := hook(&member, poll); d >= poll {
+				t.Fatalf("premise: the member has no recheck (hook = %s)", d)
+			}
+			left := member.DeepCopy()
+			c.leave(left)
+			if _, _, _, err := e.controllerConditions(ctx, left, controllerPlacement(left, pagesGVR), pagesGVR); err != nil {
+				t.Fatal(err)
+			}
+			if d := hook(left, poll); d != poll {
+				t.Errorf("after it left the pool the hook brings it back in %s, want the poll (%s)", d, poll)
+			}
+		})
 	}
 }

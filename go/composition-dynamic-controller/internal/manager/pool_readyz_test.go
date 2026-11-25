@@ -3,9 +3,13 @@ package manager
 import (
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-logr/logr/funcr"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 )
 
 // #653: /readyz is the PROCESS's. Not ready until the index is listed and the members it named then have
@@ -59,6 +63,41 @@ func TestPoolReadyz_ProcessLevelAndLatched(t *testing.T) {
 		}
 		if p.membersReady(nil) == nil {
 			t.Error("control: the members' own account was to say a member is not ready")
+		}
+	})
+	t.Run("a first member that never syncs is logged once, when the wait ends, not at every probe after", func(t *testing.T) {
+		f := newFakeRun()
+		p, set := newDrainPool(t, f, func(int) time.Duration { return time.Hour })
+		var mu sync.Mutex
+		var logged []string
+		p.Process.Log = logging.NewLogrLogger(funcr.New(func(_, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, args)
+		}, funcr.Options{}))
+		set(map[string]string{"never": "1"}) // a fake with no controller to sync, as a CRD version not served (#333)
+		soon(t, "start never", func() bool { return f.saw("start never=1") })
+		p.now = now
+		p.indexListed()
+		if p.ReadyzCheck(nil) == nil {
+			t.Fatal("control: never was to be waited for")
+		}
+		advance(memberSyncWait)
+		for i := range 3 {
+			if err := p.ReadyzCheck(nil); err != nil {
+				t.Fatalf("probe %d after memberSyncWait: %v", i, err)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, l := range logged {
+			if strings.Contains(l, "not synced after") && strings.Contains(l, "never") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("the members not synced were logged %d times over 3 probes, want once (latched): %q", n, logged)
 		}
 	})
 	t.Run("a first member that leaves before it runs is not waited for", func(t *testing.T) {
