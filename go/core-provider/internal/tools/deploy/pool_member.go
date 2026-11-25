@@ -67,7 +67,9 @@ func deployedWithLease(ctx context.Context, dyn dynamic.Interface, namespace str
 // member waits on the ownership Lease, which the dedicated controller holds until it has drained.
 func joinPool(ctx context.Context, o DeployOptions, controller types.NamespacedName, dedicatedSA corev1.ServiceAccount) error {
 	if o.Pools == nil {
-		return fmt.Errorf("pool %s: a controller that does not run beside its pool cannot join it", o.Pool)
+		// The caller passes the pools of the controller's namespace for every local definition (a remote
+		// one cannot name a pool: CEL refuses it), so this is a caller that did not.
+		return fmt.Errorf("pool %s: joining it needs DeployOptions.Pools, the pools of %s, and none were given", o.Pool, o.ControllerNamespace)
 	}
 	if err := EnsurePool(ctx, *o.Pools, o.Pool); err != nil {
 		return err

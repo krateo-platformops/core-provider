@@ -250,6 +250,21 @@ func TestLookup(t *testing.T) {
 		// permanently out of date. Joining also retires the dedicated controller (cutoverToPool).
 		member := opts
 		member.Pool = "general"
+		// What the controller passes for every local definition (compositiondefinitions.poolOptions):
+		// the pools of the controller's namespace, rendered from the shipped chart's own assets.
+		manifests := renderShippedChart(t, nil)
+		member.Pools = &PoolOptions{Namespace: namespace, DynClient: dyn, KubeClient: cli, Assets: PoolAssets{
+			SizingPath:             mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"),
+			ConfigmapTemplatePath:  mountedTemplate(t, manifests, "cdc-configmap.yaml", "pool-configmap.yaml"),
+			DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml"),
+			AuthnURL:               "http://authn.krateo-system.svc:8082",
+		}}
+		defer func() {
+			// The suite shares this cluster: the pool this test made goes with it.
+			if err := DeletePool(context.Background(), *member.Pools, "general"); err != nil {
+				t.Errorf("removing the pool this test created: %v", err)
+			}
+		}()
 		mdig, err := Deploy(context.Background(), cli, member)
 		assert.NoError(t, err)
 		assert.NotEqual(t, ddig, mdig, "joining a pool changes the controller's RBAC subject, so the digest must move")
@@ -261,6 +276,8 @@ func TestLookup(t *testing.T) {
 		_, err = dyn.Resource(deploymentGVR).Namespace(namespace).Get(context.Background(), getCDCDeploymentNN(types.NamespacedName{Name: dedicated}).Name, metav1.GetOptions{})
 		assert.True(t, apierrors.IsNotFound(err), "the dedicated Deployment survived joining the pool: %v", err)
 		pool := PoolServiceAccount("general", namespace)
+		_, err = dyn.Resource(deploymentGVR).Namespace(namespace).Get(context.Background(), PoolNames("general").Workload, metav1.GetOptions{})
+		assert.NoError(t, err, "joining a pool did not ensure the pool's Deployment")
 		rb, err := dyn.Resource(roleBindingGVR).Namespace(namespace).Get(context.Background(), dedicated, metav1.GetOptions{})
 		if assert.NoError(t, err) {
 			subjects, _, _ := unstructured.NestedSlice(rb.Object, "subjects")
