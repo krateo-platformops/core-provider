@@ -212,6 +212,16 @@ func markdownRows(t *testing.T, path string) []map[string]string {
 // of the cluster, or the blueprint's maintainers. An action that is not a wait names one of them.
 var actorPhrase = regexp.MustCompile(`(?i)\b(you|an admin|the blueprint's maintainers)\b`)
 
+// annotationOpByKey pins what a step does to each annotation key an action may name (#667). The
+// pause, graceful pause, hooks-unverified and create-pending keys are markers a person REMOVES; the
+// two policy keys take a value the person chooses (edit); values-schema is set to "infer".
+var annotationOpByKey = map[string]string{
+	"krateo.io/paused": "remove", "krateo.io/gracefully-paused": "remove",
+	"krateo.io/hooks-unverified": "remove", "krateo.io/external-create-pending": "remove",
+	"krateo.io/management-policy": "edit", "krateo.io/deletion-policy": "edit",
+	"krateo.io/values-schema": "set",
+}
+
 // fieldName is an annotation key, a field path or a field name in an action (frontend, #667): the
 // portal shows those under Details, not in the sentence.
 var fieldName = regexp.MustCompile(`krateo\.io/|\bstatus\.|\bspec\.|\bmetadata\.|\bapiRef\b`)
@@ -292,6 +302,15 @@ func TestEveryReasonHasItsAuthoredFields(t *testing.T) {
 		}
 		if a := r.Annotation(); a != nil && !strings.HasPrefix(a.Name, "krateo.io/") {
 			t.Errorf("%s: annotation %q is not a krateo.io/ key", key, a.Name)
+		}
+		if a := r.Annotation(); a != nil {
+			ja := &jsonAnnotation{Name: a.Name, Op: string(a.Op), Value: a.Value}
+			if why := annotationProblem(ja); why != "" {
+				t.Errorf("%s: annotation %s: %s", key, a.Name, why)
+			}
+			if want, pinned := annotationOpByKey[a.Name]; !pinned || string(a.Op) != want {
+				t.Errorf("%s: annotation %s has op %q; %s is pinned to %q", key, a.Name, a.Op, a.Name, want)
+			}
 		}
 		if r.Action() != "" {
 			withAction++

@@ -154,19 +154,37 @@ func (r Reason) Action() string { return r.docOf().Action }
 // DetailFields are the status fields carrying its detail.
 func (r Reason) DetailFields() []string { return append([]string(nil), r.docOf().DetailFields...) }
 
-// Annotation is the annotation a person's step sets or removes (#667).
+// Annotation is the annotation a person's step changes (#667), and how.
 type Annotation struct {
 	Name string
-	// Value is the value to set; nil when the step removes the annotation, or when the value is a
-	// choice the action names in words.
+	Op   AnnotationOp
+	// Value is the value to set, for AnnotationSet only.
 	Value *string
 }
 
-// annotation is an Annotation with no value to set.
-func annotation(name string) *Annotation { return &Annotation{Name: name} }
+// AnnotationOp is what the person's step does to the annotation. A machine consumer (agentiko's
+// runAction) acts on it, so the three are told apart rather than inferred from a missing value.
+type AnnotationOp string
 
-// annotationValue is an Annotation set to value.
-func annotationValue(name, value string) *Annotation { return &Annotation{Name: name, Value: &value} }
+const (
+	// AnnotationRemove: the step removes the annotation. No value.
+	AnnotationRemove AnnotationOp = "remove"
+	// AnnotationSet: the step sets the annotation to Value, which is required.
+	AnnotationSet AnnotationOp = "set"
+	// AnnotationEdit: the person chooses the value, and the action's words say what to allow. No value.
+	AnnotationEdit AnnotationOp = "edit"
+)
+
+// removeAnnotation is a step that removes name.
+func removeAnnotation(name string) *Annotation { return &Annotation{Name: name, Op: AnnotationRemove} }
+
+// setAnnotation is a step that sets name to value.
+func setAnnotation(name, value string) *Annotation {
+	return &Annotation{Name: name, Op: AnnotationSet, Value: &value}
+}
+
+// editAnnotation is a step whose value the person chooses.
+func editAnnotation(name string) *Annotation { return &Annotation{Name: name, Op: AnnotationEdit} }
 
 // The portal's controls an action may name, by their on-screen label (portal main, 2026-11-25): the
 // composition page's Pause/Resume, which toggles krateo.io/paused, and the resource page's "Clear
@@ -285,7 +303,7 @@ var (
 	ValuesSchemaMissing = ready(ReasonValuesSchemaMissing, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: the chart has no values.schema.json at its root, so no typed CRD can be generated and nothing is applied; the message names the chart (#566)",
 		Clearance{Indefinite, "until the chart ships a root values.schema.json, or the definition opts into an inferred schema"},
-		Doc{Since: "2.13.108", Action: "The blueprint's maintainers add a values.schema.json at the chart's root, or an admin lets the blueprint infer one from the chart's default values.", Annotation: annotationValue(chart.ValuesSchemaAnnotation, chart.ValuesSchemaInfer)})
+		Doc{Since: "2.13.108", Action: "The blueprint's maintainers add a values.schema.json at the chart's root, or an admin lets the blueprint infer one from the chart's default values.", Annotation: setAnnotation(chart.ValuesSchemaAnnotation, chart.ValuesSchemaInfer)})
 	DerivedNameTooLong = ready(ReasonDerivedNameTooLong, metav1.ConditionFalse, WriterCoreProvider, Failed,
 		"Observe: a name derived from the chart's name and Chart.yaml version does not fit Kubernetes' limits: the CRD version is not a DNS-1035 label, the controller Deployment's name (also its selector label) is over 63 characters, or, with cdc.metrics.enabled, the controller Service's is; the message names each name, its length and the problem. Nothing is applied, and a definition that worked before keeps what it has (#588)",
 		Clearance{Indefinite, "until the chart's name and Chart.yaml version yield names that fit"},
@@ -410,7 +428,7 @@ var (
 	AuthnMappingMissing = on(TypeAuthnMappingApplied, "MappingMissing", metav1.ConditionFalse, WriterCoreProvider,
 		"read live on this pass: the cluster serves the mapping kind, and the controller's mapping or core-provider's own is absent or does not authorize its ServiceAccount; the message names which. Written again by the next pass that may write; it stays only while a policy withholds update (#642)",
 		Clearance{NextPass, "written again by the next pass that may write; stays only while a policy withholds update"},
-		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, an admin allows updates in the blueprint's management policy.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.129", Action: "Wait: the next pass writes the mapping. If it stays, an admin allows updates in the blueprint's management policy.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	AuthnMappingNotObserved = on(TypeAuthnMappingApplied, "NotObserved", metav1.ConditionUnknown, WriterCoreProvider,
 		"a mapping could not be read on this pass, so it is not known to be there or to be missing; the message names which and the error, which is on Synced too, and the pass is retried (#642)",
 		Clearance{NextPass, "the pass is retried"},
@@ -534,7 +552,7 @@ var (
 	runtimeSyncedPaused = on(rtv1.TypeSynced, rtv1.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/paused is set; Ready is left as it was",
 		Clearance{Steady, "until krateo.io/paused is removed"},
-		Doc{Since: "2.0.0", Action: "An admin resumes the blueprint by removing its pause.", Annotation: annotation(prmeta.AnnotationKeyReconciliationPaused)})
+		Doc{Since: "2.0.0", Action: "An admin resumes the blueprint by removing its pause.", Annotation: removeAnnotation(prmeta.AnnotationKeyReconciliationPaused)})
 
 	// provider-runtime v1.21.0 (unstructured-runtime#110): the management policy reported on a
 	// CompositionDefinition that carries krateo.io/management-policy or krateo.io/deletion-policy. The
@@ -544,19 +562,19 @@ var (
 	runtimeCreateWithheld = ready(rtv1.ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterRuntime, Failed,
 		"the external resource (the CRD) is absent and krateo.io/management-policy withholds create, observe-only included; nothing is created until a human changes the policy (#110 D4)",
 		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create"},
-		Doc{Since: "2.13.120", Action: "An admin changes its management policy to allow create.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.120", Action: "An admin changes its management policy to allow create.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	runtimeUpdateWithheld = ready(rtv1.ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterRuntime, Healthy,
 		"core-provider's Observe found drift and krateo.io/management-policy withholds update: replaces a healthy Ready only, so the definition works but is NOT brought to its desired state; an unhealthy Ready keeps its own reason, with \"updates are withheld by policy\" appended (#110 D4)",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update"},
-		Doc{Since: "2.13.120", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.120", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonManagementPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/management-policy does not parse: the reconciler acts on nothing (observe only); wins over the pass's own Synced outcome; paused and deferred passes keep theirs",
 		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"},
-		Doc{Since: "2.13.120", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.120", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedDeletionPolicyInvalid = on(rtv1.TypeSynced, rtv1.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"krateo.io/deletion-policy is neither delete nor orphan, so the external resource is KEPT on delete; reported on every pass while set",
 		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"},
-		Doc{Since: "2.13.120", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: annotation(managementpolicy.DeletionAnnotationKey)})
+		Doc{Since: "2.13.120", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: editAnnotation(managementpolicy.DeletionAnnotationKey)})
 )
 
 func ready(reason rtv1.ConditionReason, status metav1.ConditionStatus, writer Writer, verdict Verdict, meaning string, clears Clearance, doc Doc) Reason {

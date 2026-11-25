@@ -129,19 +129,37 @@ func (r Reason) Action() string { return r.docOf().Action }
 // DetailFields are the status fields carrying its detail.
 func (r Reason) DetailFields() []string { return append([]string(nil), r.docOf().DetailFields...) }
 
-// Annotation is the annotation a person's step sets or removes (#667).
+// Annotation is the annotation a person's step changes (#667), and how.
 type Annotation struct {
 	Name string
-	// Value is the value to set; nil when the step removes the annotation, or when the value is a
-	// choice the action names in words.
+	Op   AnnotationOp
+	// Value is the value to set, for AnnotationSet only.
 	Value *string
 }
 
-// annotation is an Annotation with no value to set.
-func annotation(name string) *Annotation { return &Annotation{Name: name} }
+// AnnotationOp is what the person's step does to the annotation. A machine consumer (agentiko's
+// runAction) acts on it, so the three are told apart rather than inferred from a missing value.
+type AnnotationOp string
 
-// annotationValue is an Annotation set to value.
-func annotationValue(name, value string) *Annotation { return &Annotation{Name: name, Value: &value} }
+const (
+	// AnnotationRemove: the step removes the annotation. No value.
+	AnnotationRemove AnnotationOp = "remove"
+	// AnnotationSet: the step sets the annotation to Value, which is required.
+	AnnotationSet AnnotationOp = "set"
+	// AnnotationEdit: the person chooses the value, and the action's words say what to allow. No value.
+	AnnotationEdit AnnotationOp = "edit"
+)
+
+// removeAnnotation is a step that removes name.
+func removeAnnotation(name string) *Annotation { return &Annotation{Name: name, Op: AnnotationRemove} }
+
+// setAnnotation is a step that sets name to value.
+func setAnnotation(name, value string) *Annotation {
+	return &Annotation{Name: name, Op: AnnotationSet, Value: &value}
+}
+
+// editAnnotation is a step whose value the person chooses.
+func editAnnotation(name string) *Annotation { return &Annotation{Name: name, Op: AnnotationEdit} }
 
 // The portal's controls an action may name, by their on-screen label (portal main, 2026-11-25): the
 // composition page's Pause/Resume, which toggles krateo.io/paused, and the resource page's "Clear
@@ -257,7 +275,7 @@ var (
 		Doc{Since: "2.13.54", DetailFields: []string{"status.healthEvaluatedChildren", "status.managedChildrenCount"}})
 	ReconcileGracefullyPaused = ready(compositioncondition.ReasonReconcileGracefullyPaused, metav1.ConditionTrue, WriterCDC,
 		"Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half)", Clearance{Steady, "until krateo.io/gracefully-paused is removed; paired with Synced=False/ReconcileGracefullyPaused"},
-		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: annotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
+		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
 	Creating = ready(condition.ReasonCreating, metav1.ConditionFalse, WriterCDC,
 		"stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating)", Clearance{Indefinite, "until the converging child converges; no deadline (core-provider#498 adds one)"},
 		Doc{Since: "2.12.0", Action: "Wait: it clears when the composition's resources are ready. If it lasts, the message says what is still converging.", DetailFields: []string{"status.installFailures.count", "status.installFailures.lastError"}})
@@ -277,7 +295,7 @@ var (
 	HooksMayNotHaveRun = ready(ReasonHooksMayNotHaveRun, metav1.ConditionFalse, WriterCDC,
 		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps. A FIRST install of this controller's that was interrupted or failed, and never deployed, is instead installed again with every install hook (#629, #636), so this reason then means it was not: krateo.io/interrupted-install-recovery is set, an interrupted one reached its cap, or the management policy withholds create (it was rolled back to itself or upgraded, and the upgrade's hooks are not the install's); or the policy withholds update, so nothing is written to the release (no annotation in that case); or the release was live once or is not this controller's",
 		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm install or upgrade after the recovery runs its hooks and removes it"},
-		Doc{Since: "2.13.108", Action: "An admin checks that the chart's install hooks did their work, then marks them as verified.", Annotation: annotation(cdcmeta.AnnotationKeyHooksUnverified)})
+		Doc{Since: "2.13.108", Action: "An admin checks that the chart's install hooks did their work, then marks them as verified.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyHooksUnverified)})
 	ZeroEvidence = ready(condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"},
 		Doc{Since: "2.13.36", Action: "None of its resources could be checked yet. You can check that they exist and report their state; it clears once one can be checked.", DetailFields: []string{"status.managedChildrenCount", "status.healthEvaluatedChildren", "status.unevaluatedChildren"}})
@@ -290,15 +308,15 @@ var (
 	CreateWithheldByPolicy = ready(ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
 		"Observe: the release is not installed and krateo.io/management-policy withholds create, so nothing is installed (#110 D4, #597); the message names the policy value and how to allow create",
 		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create, or installs the release by other means"},
-		Doc{Since: "2.13.118", Action: "An admin changes its management policy to allow create.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin changes its management policy to allow create.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	UpdateWithheldByPolicy = ready(ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterCDC,
 		"stampReady: healthy, and krateo.io/management-policy withholds update, so the INSTALLED chart is FROZEN: a changed chart version or values, or drift, is reported and not applied, so the release may not be at the definition's chart version or values (#110 D4/D7, #597); the message names the installed and wanted versions, the drifted children, or why drift could not be assessed. Replaces only Available: a failing rollup keeps its own reason, and its message notes the withheld update",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update, or the definition's chart and the composition's values return to what is installed"},
-		Doc{Since: "2.13.118", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	RecoveryWithheldByPolicy = ready(ReasonRecoveryWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
 		"Observe: the release is stuck in a helm operation past its grace period (or its controller is gone), and the recovery, a helm rollback, is a write krateo.io/management-policy withholds (it withholds update), so the release is not rolled back (#597); the message names the helm status, how long it has been pending, and what would recover it",
 		Clearance{Indefinite, "until a human recovers the release (for example a helm rollback), or krateo.io/management-policy allows update and the next reconcile recovers it"},
-		Doc{Since: "2.13.118", Action: "An admin recovers the failed release, or allows updates in its management policy so it recovers automatically.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin recovers the failed release, or allows updates in its management policy so it recovers automatically.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 )
 
 // The reasons unstructured-runtime writes on the same compositions. Unexported: the cdc must not
@@ -306,7 +324,7 @@ var (
 var (
 	runtimeReadyPaused = ready(condition.ReasonReconcilePausedReady, metav1.ConditionTrue, WriterRuntime,
 		"krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half)", Clearance{Steady, "until krateo.io/paused is removed; paired with Synced=False/ReconcilePaused"},
-		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: annotation(urmeta.AnnotationKeyReconciliationPaused)})
+		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
 	runtimeCreating = ready(condition.ReasonCreating, metav1.ConditionFalse, WriterRuntime,
 		"worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error)", Clearance{Indefinite, "retried with backoff until the write succeeds"},
 		Doc{Since: "2.12.0", Action: "Wait: the write is retried. If it lasts, the message names the error."})
@@ -316,7 +334,7 @@ var (
 	runtimeCreateOutcomeUnknown = ready(condition.ReasonCreateOutcomeUnknown, metav1.ConditionFalse, WriterRuntime,
 		"worker: a create whose outcome cannot be determined is not repeated (krateo.io/external-create-pending set, the existence check failed); reconciliation and deletion both wait on it; message: the cause, that it clears by itself once the check answers, and the remediation (unstructured-runtime#93, #107)",
 		Clearance{Indefinite, "until an existence check succeeds (retried every resync; a transient cause clears by itself) or a human, having verified the external state, removes krateo.io/external-create-pending"},
-		Doc{Since: "2.13.103", Action: "Wait: it clears once the existence check answers. If it lasts, an admin checks the external system, then selects Clear create-pending annotation on the resource's page.", Control: ControlClearCreatePending, Annotation: annotation(urmeta.AnnotationKeyExternalCreatePending)})
+		Doc{Since: "2.13.103", Action: "Wait: it clears once the existence check answers. If it lasts, an admin checks the external system, then selects Clear create-pending annotation on the resource's page.", Control: ControlClearCreatePending, Annotation: removeAnnotation(urmeta.AnnotationKeyExternalCreatePending)})
 	runtimeDeleting = ready(condition.ReasonDeleting, metav1.ConditionFalse, WriterRuntime,
 		"Delete is in progress or failed (message: the error, on failure)", Clearance{Timer, "until deletion completes: finalizer-bearing children get {childTeardownGrace}, then the release is uninstalled with each hook and wait within {helmOperationTimeout}"},
 		Doc{Since: "2.12.0", Action: "Wait: it clears when the deletion completes."})
@@ -374,7 +392,7 @@ var (
 	SyncedGracefullyPaused = on(condition.TypeSynced, compositioncondition.ReasonReconcileGracefullyPaused, metav1.ConditionFalse, WriterCDC,
 		"Observe: krateo.io/gracefully-paused is in effect; nothing is converging this (paired with Ready=True/ReconcileGracefullyPaused)",
 		Clearance{Steady, "until krateo.io/gracefully-paused is removed"},
-		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: annotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
+		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
 	SyncedGracefulPausePending = on(condition.TypeSynced, compositioncondition.ReasonGracefulPausePending, metav1.ConditionFalse, WriterCDC,
 		"Observe: krateo.io/gracefully-paused is set but not yet in effect; the next applied change still goes through (#381)",
 		Clearance{NextPass, "takes effect after the next change to the composition is applied"},
@@ -387,7 +405,7 @@ var (
 		Doc{Since: "2.12.0", Action: "Wait: the pass is retried. If it lasts, you fix the error the message names."})
 	runtimeSyncedPaused = on(condition.TypeSynced, condition.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/paused is set (paired with Ready=True/ReconcilePaused)", Clearance{Steady, "until krateo.io/paused is removed"},
-		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: annotation(urmeta.AnnotationKeyReconciliationPaused)})
+		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
 	runtimeSyncedDeferred = on(condition.TypeSynced, condition.ReasonReconcileDeferred, metav1.ConditionFalse, WriterRuntime,
 		"worker: the runtime chose not to call the handler this pass, an endpoint's rate limit or its own concurrency limit; Ready is not touched",
 		Clearance{NextPass, "the message names the next attempt when the server gave one"},
@@ -397,11 +415,11 @@ var (
 	runtimeSyncedPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonInvalid, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/management-policy does not parse (an unknown verb, or a stray separator), so the runtime acts on nothing, as observe; it wins over every other pass outcome on Synced (the pass's own events and errors still occur); the message names the annotation and the bad token",
 		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"},
-		Doc{Since: "2.13.118", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: annotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedDeletionPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/deletion-policy is neither delete nor orphan, so the external resource will be KEPT on delete; reported on every pass while set, not only while deleting; the message names the value",
 		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"},
-		Doc{Since: "2.13.118", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: annotation(managementpolicy.DeletionAnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: editAnnotation(managementpolicy.DeletionAnnotationKey)})
 )
 
 // ChartRenderable, written by the cdc from chart-inspector's answer (chartresolved.go).
