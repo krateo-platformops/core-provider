@@ -87,9 +87,11 @@ type Reason struct {
 	doc      *Doc // a pointer, so Reason stays comparable (a switch on it compiles)
 }
 
-// Unreleased is the Since of a reason no release carries yet. The release that ships it replaces the
-// literal with its own tag, and appends the reason to testdata/released-reasons.txt
-// (UPDATE_READY_REASONS=1 go test ./internal/conditionreason/ does the append).
+// Unreleased is the Since of a reason no release carries yet; write it as `Since: Unreleased`. The
+// release that ships it replaces it with its own tag and appends the reason to
+// testdata/released-reasons.txt, both done by RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test
+// ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$' (docs/release.md); release-tag.yaml
+// runs the same test without UPDATE and refuses a tag that still has one.
 const Unreleased = "unreleased"
 
 // Doc is what docs/ready-reasons.json publishes about a reason beyond its condition (core-provider#667).

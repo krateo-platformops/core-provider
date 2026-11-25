@@ -57,11 +57,53 @@ jobs:
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
+  # #667. The reason tables (docs/ready-reasons.json, docs/cd-ready-reasons.json) publish each
+  # reason's sinceVersion; a tag must not ship one that says "unreleased", or a reason the
+  # registry's testdata/released-reasons.txt does not record. TestReasonTablesAreReleaseReady runs
+  # only with RELEASE_TAG set, and component-go-checks has no input to set an environment variable
+  # (test_args is appended to `go test` verbatim), so the gate is its own job, beside the module
+  # tests and in build's `needs:` with them. The step for the releaser is in docs/release.md.
+  release-ready-reasons:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: go/core-provider
+            package: ./internal/cdreason/
+          - module: go/composition-dynamic-controller
+            package: ./internal/conditionreason/
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+      - name: Reason tables are release-ready
+        working-directory: ${{ matrix.module }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -uo pipefail
+          go test -count=1 -v -run '^TestReasonTablesAreReleaseReady$' "$PACKAGE" 2>&1 | tee "$RUNNER_TEMP/release-ready.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          # A -run that matches nothing exits 0, and so does a skip: require the gate to have PASSED.
+          if ! grep -q -- '--- PASS: TestReasonTablesAreReleaseReady' "$RUNNER_TEMP/release-ready.log"; then
+            echo "::error::TestReasonTablesAreReleaseReady did not run and pass in $PACKAGE (skipped, or no test matched)" >&2
+            exit 1
+          fi
+
   build:
     # The gate itself. Without `needs:` the jobs run CONCURRENTLY and images publish regardless of
     # the result — which is how oasgen-provider shipped past a red suite while appearing to have a
     # test gate (#92). A declared test job is not a gate; `needs:` is.
-    needs: [test-core-provider, test-composition-dynamic-controller, test-chart-inspector]
+    needs: [test-core-provider, test-composition-dynamic-controller, test-chart-inspector, release-ready-reasons]
     uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@7da11cb60cee5cbfc7d9e8c9328692807b43cefd # 2.0.0
     permissions:
       contents: read

@@ -26,7 +26,32 @@ see the history note in `helm/core-provider/values.yaml`).
    with committed CRDs), chart lint + render smoke
    ([`lint.yaml`](../.github/workflows/lint.yaml)), security scanning, and the
    docs-standard lint.
-2. **Tag with plain semver — `X.Y.Z`, no `v` prefix — and make it ANNOTATED.** The
+2. **Make the reason tables release-ready for `X.Y.Z`** (#667), on a branch from the
+   commit you will tag, and merge it before tagging. `docs/ready-reasons.json` and
+   `docs/cd-ready-reasons.json` publish each reason's `sinceVersion`; a reason added since
+   the last release says `"unreleased"`, and the release that ships it replaces that with
+   its own tag and records it in the registry's `testdata/released-reasons.txt`:
+
+   ```sh
+   cd go/composition-dynamic-controller
+   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
+   UPDATE_READY_REASONS=1 go test ./internal/composition/ -run TestReadyReasonTableIsCurrent
+   cd ../core-provider
+   RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$'
+   UPDATE_READY_REASONS=1 go test ./internal/cdreason/ -run TestCDReadyReasonTableIsCurrent
+   ```
+
+   The first command of each pair rewrites every `Since: Unreleased` (and `RemovedIn:
+   Unreleased`) in the registry to `X.Y.Z` and appends the newly released reasons to
+   `released-reasons.txt`; the second regenerates the JSON. When nothing is unreleased
+   both are no-ops and there is nothing to commit. `release-tag.yaml`'s
+   `release-ready-reasons` job runs the same test with `RELEASE_TAG` set to the pushed tag
+   and without `UPDATE_READY_REASONS`, and `build` needs it: a tag whose tables still say
+   `"unreleased"`, or hold a reason `released-reasons.txt` does not record, publishes
+   nothing. If that happens, leave the tag (see below on re-tagging) and release the next
+   version this way.
+
+3. **Tag with plain semver — `X.Y.Z`, no `v` prefix — and make it ANNOTATED.** The
    release workflows trigger on `[0-9]+.[0-9]+.[0-9]+` only; a `v`-prefixed tag ships
    **nothing**, silently.
 
@@ -50,7 +75,7 @@ see the history note in `helm/core-provider/values.yaml`).
    match the ones already verified and rolled, and the fleet's deployed artifact stops
    corresponding to what the registry serves. Fix it on the next tag.
 
-3. **CI builds and publishes**, no manual steps:
+4. **CI builds and publishes**, no manual steps:
    - [`release-tag.yaml`](../.github/workflows/release-tag.yaml) → the shared
      `component-image-build` workflow (`krateo-platformops/.github`) builds the three
      multi-arch (amd64+arm64) images →
@@ -66,14 +91,14 @@ see the history note in `helm/core-provider/values.yaml`).
      `helm/target-chart/`), and `core-provider-crds:X.Y.Z` (`helm/core-provider-crds/`,
      versioned from the tag like the others since #157).
 
-4. **Verify** the artifacts pair up:
+5. **Verify** the artifacts pair up:
 
    ```sh
    helm show chart oci://ghcr.io/krateo-platformops/charts/core-provider --version X.Y.Z
    # appVersion in the output must equal X.Y.Z
    ```
 
-5. **Roll it out** by bumping the Krateo installer's core-provider chart pin, or
+6. **Roll it out** by bumping the Krateo installer's core-provider chart pin, or
    `helm upgrade` on a standalone install. Existing CDCs re-roll to the release's CDC
    image on their definitions' next reconcile (digest change — expected, fleet-wide).
 

@@ -2,8 +2,9 @@
 # and the release that first carried it (the reason's Since). Read by TestReleasedReasonsAreStillListed.
 # A line is never removed: a reason that leaves Table must be named in Deprecated, because consumers
 # key on the reason string and a rename or removal is breaking for them.
-# The release that ships an unreleased reason replaces its Since and appends it here with
-# UPDATE_READY_REASONS=1 go test ./internal/cdreason/ (append only).
+# The release that ships an unreleased reason replaces its Since with the tag and appends it here:
+# RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$'
+# (docs/release.md). release-tag.yaml refuses a tag while any reason is unreleased or missing here.
 ApiRefRBACComplete/False/InvalidApiRef/core-provider	2.13.72
 ApiRefRBACComplete/False/RESTActionForbidden/core-provider	2.13.72
 ApiRefRBACComplete/False/RESTActionNotFound/core-provider	2.13.72
