@@ -98,10 +98,6 @@ func TestCDReadyReasonTableIsCurrent(t *testing.T) {
 	}
 }
 
-// actorPhrase is how an action names who acts (#667): you (the person reading the portal), an admin
-// of the cluster, or the blueprint's maintainers. An action that is not a wait names one of them.
-var actorPhrase = regexp.MustCompile(`(?i)\b(you|an admin|the blueprint's maintainers)\b`)
-
 // annotationOpByKey pins what a step does to each annotation key an action may name (#667). The
 // pause, graceful pause, hooks-unverified and create-pending keys are markers a person REMOVES; the
 // two policy keys take a value the person chooses (edit); values-schema is set to "infer".
@@ -189,8 +185,8 @@ func TestEveryReasonHasItsAuthoredFields(t *testing.T) {
 		if r.Action() == "" && r.ParentVerdict() != Healthy && r.Clears().Kind != Steady {
 			t.Errorf("%s: no Action; one is required unless the reason is healthy or steady", key)
 		}
-		if a := r.Action(); a != "" && !strings.HasPrefix(a, "Wait") && !actorPhrase.MatchString(a) {
-			t.Errorf("%s: action %q is not a wait and names no actor (you, an admin, the blueprint's maintainers)", key, a)
+		if why := actorsProblem(r.Action(), r.Control(), actorStrings(r.Actors())); why != "" {
+			t.Errorf("%s: %s", key, why)
 		}
 		if a := r.Action(); cliStep.MatchString(a) {
 			t.Errorf("%s: action %q has a command-line step", key, a)
@@ -428,5 +424,30 @@ func TestNoReadyConditionBuiltOutsideCdreason(t *testing.T) {
 	}
 	for _, v := range violations {
 		t.Errorf("Ready condition built outside internal/cdreason: %s (use a cdreason.Reason)", v)
+	}
+}
+
+// TestApprovedBoardCopyIsVerbatim pins the actions that are Diego-approved board copy, rev 3 (#667):
+// they are shown as written, byte for byte, and who acts is in Actors, not in the words.
+func TestApprovedBoardCopyIsVerbatim(t *testing.T) {
+	approved := map[string]string{
+		"Ready/True/UpdateWithheldByPolicy/provider-runtime":        "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.",
+		"Ready/False/DerivedNameTooLong/core-provider":              "Shorten the chart's name or its version, then publish it again.",
+		"ApiRefRBACComplete/False/RESTActionNotFound/core-provider": "The data source this blueprint reads its details from doesn't exist. An admin creates it, or the blueprint stops referring to it.",
+	}
+	found := 0
+	for _, r := range Table() {
+		key := string(r.Type()) + "/" + string(r.Status()) + "/" + r.String() + "/" + string(r.Writer())
+		want, pinned := approved[key]
+		if !pinned {
+			continue
+		}
+		found++
+		if r.Action() != want {
+			t.Errorf("%s: action %q; the Diego-approved board copy (rev 3) is %q", key, r.Action(), want)
+		}
+	}
+	if found != len(approved) {
+		t.Errorf("found %d of the %d approved rows in the registry: a key no longer matches", found, len(approved))
 	}
 }

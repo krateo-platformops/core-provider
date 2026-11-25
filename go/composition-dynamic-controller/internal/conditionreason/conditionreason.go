@@ -109,6 +109,9 @@ type Doc struct {
 	// portal shows it as is, so changing it is a UI change. Required unless the reason is healthy or
 	// steady.
 	Action string
+	// Actors is who must act (#667): set on every action that is not a wait, and on a wait whose step
+	// is a portal control; empty otherwise. The action's words need not name them.
+	Actors []Actor
 	// Control is the portal control the person uses, by its on-screen label, when one exists: one of
 	// ControlResume and ControlClearCreatePending. agentiko's runAction reads it.
 	Control string
@@ -169,6 +172,21 @@ const (
 	ControlResume             = "Resume"
 	ControlClearCreatePending = "Clear create-pending annotation"
 )
+
+// Actor is who must act on a reason (#667).
+type Actor string
+
+const (
+	// ActorYou: the person reading the portal, who owns the composition or its values.
+	ActorYou Actor = "you"
+	// ActorAdmin: an admin of the cluster (RBAC, policies, installed components).
+	ActorAdmin Actor = "admin"
+	// ActorMaintainers: the blueprint's maintainers (its chart, schema and data sources).
+	ActorMaintainers Actor = "maintainers"
+)
+
+// Actors is who must act, or none for a wait.
+func (r Reason) Actors() []Actor { return append([]Actor(nil), r.docOf().Actors...) }
 
 // Control is the portal control the person uses, or "".
 func (r Reason) Control() string { return r.docOf().Control }
@@ -275,48 +293,48 @@ var (
 		Doc{Since: "2.13.54", DetailFields: []string{"status.healthEvaluatedChildren", "status.managedChildrenCount"}})
 	ReconcileGracefullyPaused = ready(compositioncondition.ReasonReconcileGracefullyPaused, metav1.ConditionTrue, WriterCDC,
 		"Observe, and setGracefullyPausedCondition: krateo.io/gracefully-paused is in effect (Synced=False is the liveness half)", Clearance{Steady, "until krateo.io/gracefully-paused is removed; paired with Synced=False/ReconcileGracefullyPaused"},
-		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
+		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Actors: []Actor{ActorAdmin}, Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
 	Creating = ready(condition.ReasonCreating, metav1.ConditionFalse, WriterCDC,
 		"stampReady: a child is converging; also stamped after Create's install (ConditionTypeCreating)", Clearance{Indefinite, "until the converging child converges; no deadline (core-provider#498 adds one)"},
 		Doc{Since: "2.12.0", Action: "Wait: it clears when the composition's resources are ready. If it lasts, the message says what is still converging.", DetailFields: []string{"status.installFailures.count", "status.installFailures.lastError"}})
 	Unavailable = ready(condition.ReasonUnavailable, metav1.ConditionFalse, WriterCDC,
 		"stampReady: the health verdict is failing; failObserveWithFinding: Observe failed, the message is the error; createFailedOnDerivedRBAC: a first render the chart or the values refuse, or RBAC the API server refuses, the message is the error (#646); any other failure there stays Creating", Clearance{Indefinite, "until the failing child, or the observation, recovers"},
-		Doc{Since: "2.12.0", Action: "You fix what the message names: a failing resource, values the chart refuses, or a missing permission."})
+		Doc{Since: "2.12.0", Action: "Fix what the message names: a failing resource, values the chart refuses, or a missing permission.", Actors: []Actor{ActorYou, ActorAdmin}})
 	HelmOperationInProgress = ready(ReasonHelmOperationInProgress, metav1.ConditionFalse, WriterCDC,
 		"recordHelmOperation, before an install or uninstall (#410); the message names the start time and the per-hook bound", Clearance{Timer, "until the install or uninstall returns; each hook and each wait must finish within {helmOperationTimeout}, and the message carries the start time"},
 		Doc{Since: "2.13.81", Action: "Wait: it clears when the install or uninstall returns.", DetailFields: []string{"status.helmOperation.phase", "status.helmOperation.startedAt", "status.helmOperation.startedBy"}})
 	InstallFailing = ready(ReasonInstallFailing, metav1.ConditionFalse, WriterCDC,
 		"recordInstallFailure, from the 3rd consecutive failed attempt of a first install (the first two are Creating); kept, with what is running in its message, while a retry is in flight (#636); the message names the failed attempts (status.installFailures.count), the automatic retries (status.installRecovery.count) and the last error. A retried interruption is not a failed attempt",
 		Clearance{Indefinite, "until an attempt succeeds; retried at the error backoff, with no cap"},
-		Doc{Since: "2.13.129", Action: "You fix the error the message names, often in the composition's values (the blueprint's maintainers, if it is the chart); the install is retried automatically.", DetailFields: []string{"status.installFailures.count", "status.installFailures.lastError", "status.installFailures.lastAt", "status.installRecovery.count"}})
+		Doc{Since: "2.13.129", Action: "Fix the error the message names, often in the composition's values; the install is retried automatically.", Actors: []Actor{ActorYou, ActorMaintainers}, DetailFields: []string{"status.installFailures.count", "status.installFailures.lastError", "status.installFailures.lastAt", "status.installRecovery.count"}})
 	PendingHelmOperation = ready(ReasonPendingHelmOperation, metav1.ConditionFalse, WriterCDC,
 		"Observe: a release is pending within its grace period, so this reconcile stands down", Clearance{Timer, "until the pending operation settles; otherwise rolled back once pending longer than {pendingOperationGrace} (at once when the pod that started it is gone); the message says how long it has been pending"},
 		Doc{Since: "2.12.0", Action: "Wait: it clears when the pending helm operation settles, or when it is rolled back automatically after the grace period."})
 	HooksMayNotHaveRun = ready(ReasonHooksMayNotHaveRun, metav1.ConditionFalse, WriterCDC,
 		"stampReady: krateo.io/hooks-unverified is set: a release stuck pending with no deployed revision before it was rolled back to itself, so the interrupted operation's hooks may not have run (#563); outranks the rollup, whose reason the message keeps. A FIRST install of this controller's that was interrupted or failed, and never deployed, is instead installed again with every install hook (#629, #636), so this reason then means it was not: krateo.io/interrupted-install-recovery is set, an interrupted one reached its cap, or the management policy withholds create (it was rolled back to itself or upgraded, and the upgrade's hooks are not the install's); or the policy withholds update, so nothing is written to the release (no annotation in that case); or the release was live once or is not this controller's",
 		Clearance{Indefinite, "until a human who has verified the hooks' effects removes krateo.io/hooks-unverified, or the next successful helm install or upgrade after the recovery runs its hooks and removes it"},
-		Doc{Since: "2.13.108", Action: "An admin checks that the chart's install hooks did their work, then marks them as verified.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyHooksUnverified)})
+		Doc{Since: "2.13.108", Action: "An admin checks that the chart's install hooks did their work, then marks them as verified.", Actors: []Actor{ActorAdmin}, Annotation: removeAnnotation(cdcmeta.AnnotationKeyHooksUnverified)})
 	ZeroEvidence = ready(condition.ReasonZeroEvidence, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed at all (#165)", Clearance{Indefinite, "until at least one child can be assessed"},
-		Doc{Since: "2.13.36", Action: "None of its resources could be checked yet. You can check that they exist and report their state; it clears once one can be checked.", DetailFields: []string{"status.managedChildrenCount", "status.healthEvaluatedChildren", "status.unevaluatedChildren"}})
+		Doc{Since: "2.13.36", Action: "None of its resources could be checked yet. Check that they exist and report their state; it clears once one can be checked.", Actors: []Actor{ActorYou}, DetailFields: []string{"status.managedChildrenCount", "status.healthEvaluatedChildren", "status.unevaluatedChildren"}})
 	ChildrenForbidden = ready(ReasonChildrenForbidden, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: no child could be assessed, and at least one read was refused by RBAC (#318)", Clearance{Indefinite, "until the controller may read its children (an RBAC change)"},
-		Doc{Since: "2.13.61", Action: "An admin lets the composition's controller read its resources.", DetailFields: []string{"status.managedChildrenCount", "status.unreadableChildrenCount"}})
+		Doc{Since: "2.13.61", Action: "An admin lets the composition's controller read its resources.", Actors: []Actor{ActorAdmin}, DetailFields: []string{"status.managedChildrenCount", "status.unreadableChildrenCount"}})
 	InventoryNotRecorded = ready(ReasonInventoryNotRecorded, metav1.ConditionUnknown, WriterCDC,
 		"stampReady: the managed-children inventory was never recorded", Clearance{NextPass, "the next Update records the inventory (core-provider#326)"},
 		Doc{Since: "2.13.61", Action: "Wait: the next reconcile records the composition's resources, and it clears."})
 	CreateWithheldByPolicy = ready(ReasonCreateWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
 		"Observe: the release is not installed and krateo.io/management-policy withholds create, so nothing is installed (#110 D4, #597); the message names the policy value and how to allow create",
 		Clearance{Indefinite, "until a human changes krateo.io/management-policy to allow create, or installs the release by other means"},
-		Doc{Since: "2.13.118", Action: "An admin changes its management policy to allow create.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin changes its management policy to allow create.", Actors: []Actor{ActorAdmin}, Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	UpdateWithheldByPolicy = ready(ReasonUpdateWithheldByPolicy, metav1.ConditionTrue, WriterCDC,
 		"stampReady: healthy, and krateo.io/management-policy withholds update, so the INSTALLED chart is FROZEN: a changed chart version or values, or drift, is reported and not applied, so the release may not be at the definition's chart version or values (#110 D4/D7, #597); the message names the installed and wanted versions, the drifted children, or why drift could not be assessed. Replaces only Available: a failing rollup keeps its own reason, and its message notes the withheld update",
 		Clearance{Indefinite, "until krateo.io/management-policy allows update, or the definition's chart and the composition's values return to what is installed"},
-		Doc{Since: "2.13.118", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.", Actors: []Actor{ActorAdmin}, Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	RecoveryWithheldByPolicy = ready(ReasonRecoveryWithheldByPolicy, metav1.ConditionFalse, WriterCDC,
 		"Observe: the release is stuck in a helm operation past its grace period (or its controller is gone), and the recovery, a helm rollback, is a write krateo.io/management-policy withholds (it withholds update), so the release is not rolled back (#597); the message names the helm status, how long it has been pending, and what would recover it",
 		Clearance{Indefinite, "until a human recovers the release (for example a helm rollback), or krateo.io/management-policy allows update and the next reconcile recovers it"},
-		Doc{Since: "2.13.118", Action: "An admin recovers the failed release, or allows updates in its management policy so it recovers automatically.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin recovers the failed release, or allows updates in its management policy so it recovers automatically.", Actors: []Actor{ActorAdmin}, Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 )
 
 // The reasons unstructured-runtime writes on the same compositions. Unexported: the cdc must not
@@ -324,7 +342,7 @@ var (
 var (
 	runtimeReadyPaused = ready(condition.ReasonReconcilePausedReady, metav1.ConditionTrue, WriterRuntime,
 		"krateo.io/paused is set (Synced=False/ReconcilePaused is the liveness half)", Clearance{Steady, "until krateo.io/paused is removed; paired with Synced=False/ReconcilePaused"},
-		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
+		Doc{Since: "2.12.0", Action: "To resume, select Resume.", Actors: []Actor{ActorYou}, Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
 	runtimeCreating = ready(condition.ReasonCreating, metav1.ConditionFalse, WriterRuntime,
 		"worker: a Create failed or was incomplete, or writing the resource or its annotations failed (message: the error)", Clearance{Indefinite, "retried with backoff until the write succeeds"},
 		Doc{Since: "2.12.0", Action: "Wait: the write is retried. If it lasts, the message names the error."})
@@ -334,7 +352,7 @@ var (
 	runtimeCreateOutcomeUnknown = ready(condition.ReasonCreateOutcomeUnknown, metav1.ConditionFalse, WriterRuntime,
 		"worker: a create whose outcome cannot be determined is not repeated (krateo.io/external-create-pending set, the existence check failed); reconciliation and deletion both wait on it; message: the cause, that it clears by itself once the check answers, and the remediation (unstructured-runtime#93, #107)",
 		Clearance{Indefinite, "until an existence check succeeds (retried every resync; a transient cause clears by itself) or a human, having verified the external state, removes krateo.io/external-create-pending"},
-		Doc{Since: "2.13.103", Action: "Wait: it clears once the existence check answers. If it lasts, an admin checks the external system, then selects Clear create-pending annotation on the resource's page.", Control: ControlClearCreatePending, Annotation: removeAnnotation(urmeta.AnnotationKeyExternalCreatePending)})
+		Doc{Since: "2.13.103", Action: "Wait: it clears once the existence check answers. If it lasts, an admin checks the external system, then selects Clear create-pending annotation on the resource's page.", Actors: []Actor{ActorAdmin}, Control: ControlClearCreatePending, Annotation: removeAnnotation(urmeta.AnnotationKeyExternalCreatePending)})
 	runtimeDeleting = ready(condition.ReasonDeleting, metav1.ConditionFalse, WriterRuntime,
 		"Delete is in progress or failed (message: the error, on failure)", Clearance{Timer, "until deletion completes: finalizer-bearing children get {childTeardownGrace}, then the release is uninstalled with each hook and wait within {helmOperationTimeout}"},
 		Doc{Since: "2.12.0", Action: "Wait: it clears when the deletion completes."})
@@ -392,7 +410,7 @@ var (
 	SyncedGracefullyPaused = on(condition.TypeSynced, compositioncondition.ReasonReconcileGracefullyPaused, metav1.ConditionFalse, WriterCDC,
 		"Observe: krateo.io/gracefully-paused is in effect; nothing is converging this (paired with Ready=True/ReconcileGracefullyPaused)",
 		Clearance{Steady, "until krateo.io/gracefully-paused is removed"},
-		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
+		Doc{Since: "2.12.0", Action: "An admin resumes it by removing the graceful pause.", Actors: []Actor{ActorAdmin}, Annotation: removeAnnotation(cdcmeta.AnnotationKeyReconciliationGracefullyPaused)})
 	SyncedGracefulPausePending = on(condition.TypeSynced, compositioncondition.ReasonGracefulPausePending, metav1.ConditionFalse, WriterCDC,
 		"Observe: krateo.io/gracefully-paused is set but not yet in effect; the next applied change still goes through (#381)",
 		Clearance{NextPass, "takes effect after the next change to the composition is applied"},
@@ -402,10 +420,10 @@ var (
 		Doc{Since: "2.12.0"})
 	runtimeSyncedError = on(condition.TypeSynced, condition.ReasonReconcileError, metav1.ConditionFalse, WriterRuntime,
 		"worker: the pass failed (message: the error)", Clearance{NextPass, "retried with backoff; persists while the cause does"},
-		Doc{Since: "2.12.0", Action: "Wait: the pass is retried. If it lasts, you fix the error the message names."})
+		Doc{Since: "2.12.0", Action: "Wait: the pass is retried. If it lasts, fix the error the message names."})
 	runtimeSyncedPaused = on(condition.TypeSynced, condition.ReasonReconcilePaused, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/paused is set (paired with Ready=True/ReconcilePaused)", Clearance{Steady, "until krateo.io/paused is removed"},
-		Doc{Since: "2.12.0", Action: "You can select Resume.", Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
+		Doc{Since: "2.12.0", Action: "To resume, select Resume.", Actors: []Actor{ActorYou}, Control: ControlResume, Annotation: removeAnnotation(urmeta.AnnotationKeyReconciliationPaused)})
 	runtimeSyncedDeferred = on(condition.TypeSynced, condition.ReasonReconcileDeferred, metav1.ConditionFalse, WriterRuntime,
 		"worker: the runtime chose not to call the handler this pass, an endpoint's rate limit or its own concurrency limit; Ready is not touched",
 		Clearance{NextPass, "the message names the next attempt when the server gave one"},
@@ -415,11 +433,11 @@ var (
 	runtimeSyncedPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonInvalid, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/management-policy does not parse (an unknown verb, or a stray separator), so the runtime acts on nothing, as observe; it wins over every other pass outcome on Synced (the pass's own events and errors still occur); the message names the annotation and the bad token",
 		Clearance{Indefinite, "until a human fixes krateo.io/management-policy"},
-		Doc{Since: "2.13.118", Action: "An admin fixes its management policy: the message names the value that can't be read.", Annotation: editAnnotation(managementpolicy.AnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin fixes its management policy: the message names the value that can't be read.", Actors: []Actor{ActorAdmin}, Annotation: editAnnotation(managementpolicy.AnnotationKey)})
 	runtimeSyncedDeletionPolicyInvalid = on(condition.TypeSynced, managementpolicy.ReasonDeletionPolicyInvalid, metav1.ConditionFalse, WriterRuntime,
 		"worker: krateo.io/deletion-policy is neither delete nor orphan, so the external resource will be KEPT on delete; reported on every pass while set, not only while deleting; the message names the value",
 		Clearance{Indefinite, "until a human fixes krateo.io/deletion-policy"},
-		Doc{Since: "2.13.118", Action: "An admin sets its deletion policy to delete or orphan.", Annotation: editAnnotation(managementpolicy.DeletionAnnotationKey)})
+		Doc{Since: "2.13.118", Action: "An admin sets its deletion policy to delete or orphan.", Actors: []Actor{ActorAdmin}, Annotation: editAnnotation(managementpolicy.DeletionAnnotationKey)})
 )
 
 // ChartRenderable, written by the cdc from chart-inspector's answer (chartresolved.go).
@@ -430,19 +448,19 @@ var (
 	ChartUnservedKind = on(TypeChartRenderable, ReasonUnservedKind, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector answered 422: the blueprint references a kind this cluster does not serve",
 		Clearance{Indefinite, "until the kind is served (it resolves itself once its CRD exists)"},
-		Doc{Since: "2.13.47", Action: "An admin installs the CRD of the kind the chart uses; it clears once the kind is served."})
+		Doc{Since: "2.13.47", Action: "An admin installs the CRD of the kind the chart uses; it clears once the kind is served.", Actors: []Actor{ActorAdmin}})
 	ChartValuesSchemaViolation = on(TypeChartRenderable, ReasonValuesSchemaViolation, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector answered 400: the values do not satisfy the chart's values.schema.json",
 		Clearance{Indefinite, "until the author fixes the values or the schema (#325)"},
-		Doc{Since: "2.13.64", Action: "You edit the composition's values so they satisfy the chart's values schema; if the schema is wrong, the blueprint's maintainers fix it."})
+		Doc{Since: "2.13.64", Action: "Edit the composition's values so they satisfy the chart's values schema, or fix the schema.", Actors: []Actor{ActorYou, ActorMaintainers}})
 	ChartTemplateRefused = on(TypeChartRenderable, ReasonTemplateRefused, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector answered 400 TemplateRefused: the chart's own templates refused these values (a fail/required in the chart, or a template error)",
 		Clearance{Indefinite, "until the author changes the values or the chart (#583)"},
-		Doc{Since: "2.13.112", Action: "You edit its values, or ask the blueprint's owner if they look right."})
+		Doc{Since: "2.13.112", Action: "Edit its values, or ask the blueprint's owner if they look right.", Actors: []Actor{ActorYou}})
 	ChartInspectorRejected = on(TypeChartRenderable, ReasonInspectorRejected, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector refused the request with another 4xx: the cdc and chart-inspector disagree about the request",
 		Clearance{Indefinite, "until the version skew or defect is fixed"},
-		Doc{Since: "2.13.64", Action: "An admin upgrades core-provider's components to matching versions, or reports the defect."})
+		Doc{Since: "2.13.64", Action: "An admin upgrades core-provider's components to matching versions, or reports the defect.", Actors: []Actor{ActorAdmin}})
 	ChartInspectorUnavailable = on(TypeChartRenderable, ReasonInspectorUnavailable, metav1.ConditionFalse, WriterCDC,
 		"chart-inspector itself failed (5xx, transport); not the blueprint's fault",
 		Clearance{NextPass, "retried on the next reconcile; persists while chart-inspector is down"},
@@ -463,7 +481,7 @@ var (
 	RBACNotEvaluated = on(TypeRBACComplete, ReasonRBACNotEvaluated, metav1.ConditionUnknown, WriterCDC,
 		"RBAC was not applied this reconcile: the chart could not be rendered (see ChartRenderable)",
 		Clearance{Indefinite, "follows ChartRenderable: clears once the chart renders"},
-		Doc{Since: "2.13.67", Action: "You fix the chart problem first: this check waits for it."})
+		Doc{Since: "2.13.67", Action: "Fix the chart problem first: this check waits for it.", Actors: []Actor{ActorYou, ActorMaintainers}})
 )
 
 // ApiResolved, written by the cdc when the CompositionDefinition has an apiRef (apiresolved.go).
@@ -474,29 +492,29 @@ var (
 	ApiPartiallyResolved = on(TypeApiResolved, ReasonApiPartiallyResolved, metav1.ConditionFalse, WriterCDC,
 		"some RESTAction stages did not succeed (message: each stage and snowplow's code); the resolved data IS projected, the only False with data, and status.unrefreshedFields names the fields left stale",
 		Clearance{Indefinite, "until the stages succeed; Forbidden, NotFound, Aborted and NotRun do not heal on a retry, a transient code clears on the next reconcile"},
-		Doc{Since: "2.13.106", Action: "The blueprint's maintainers fix the data source steps the message names; until then those details show their last known value.", DetailFields: []string{"status.unrefreshedFields"}})
+		Doc{Since: "2.13.106", Action: "Fix the data source steps the message names; until then those details show their last known value.", Actors: []Actor{ActorMaintainers, ActorAdmin}, DetailFields: []string{"status.unrefreshedFields"}})
 	ApiStageOutcomesUnknown = on(TypeApiResolved, ReasonStageOutcomesUnknown, metav1.ConditionUnknown, WriterCDC,
 		"snowplow answered but did not say whether every stage succeeded (no readable X-Snowplow-Stage-Outcomes; snowplow older than 1.12.57); the data IS projected",
 		Clearance{Indefinite, "until snowplow sends the header"},
-		Doc{Since: "2.13.106", Action: "An admin upgrades snowplow to 1.12.57 or later."})
+		Doc{Since: "2.13.106", Action: "An admin upgrades snowplow to 1.12.57 or later.", Actors: []Actor{ActorAdmin}})
 	ApiEmpty = on(TypeApiResolved, ReasonApiEmpty, metav1.ConditionFalse, WriterCDC,
 		"the apiRef resolved without error but returned no data", Clearance{Indefinite, "until the RESTAction returns data"},
-		Doc{Since: "2.13.44", Action: "The blueprint's maintainers check that the data source returns data for this composition."})
+		Doc{Since: "2.13.44", Action: "Check that the data source returns data for this composition.", Actors: []Actor{ActorMaintainers}})
 	ApiAuthnUnreachable = on(TypeApiResolved, ReasonAuthnUnreachable, metav1.ConditionFalse, WriterCDC,
 		"authn is unreachable, so no service token; on a remote target usually authn is not installed there",
 		Clearance{Indefinite, "until authn is reachable (installed on the target)"},
-		Doc{Since: "2.13.44", Action: "An admin installs authn on the cluster the controller runs in, or makes it reachable."})
+		Doc{Since: "2.13.44", Action: "An admin installs authn on the cluster the controller runs in, or makes it reachable.", Actors: []Actor{ActorAdmin}})
 	ApiAuthnError = on(TypeApiResolved, ReasonAuthnError, metav1.ConditionFalse, WriterCDC,
 		"authn failed on its own account (5xx)", Clearance{NextPass, "retried on the next reconcile; persists while authn fails"},
 		Doc{Since: "2.13.44", Action: "Wait: it is retried. If it lasts, an admin checks authn."})
 	ApiAuthnRejected = on(TypeApiResolved, ReasonAuthnRejected, metav1.ConditionFalse, WriterCDC,
 		"authn refused the service token and its answer carried no machine-readable cause",
 		Clearance{Indefinite, "until the refusal's cause (mapping, audience, credentials) is fixed"},
-		Doc{Since: "2.13.44", Action: "An admin fixes the cause of the refusal: the authn mapping, the audience or the credentials."})
+		Doc{Since: "2.13.44", Action: "An admin fixes the cause of the refusal: the authn mapping, the audience or the credentials.", Actors: []Actor{ActorAdmin}})
 	ApiResolveFailed = on(TypeApiResolved, ReasonResolveFailed, metav1.ConditionFalse, WriterCDC,
 		"anything that is not an authn problem: snowplow unreachable, a RESTAction that does not resolve, a malformed apiRef",
 		Clearance{Indefinite, "until the cause is fixed; a transient one clears on the next reconcile"},
-		Doc{Since: "2.13.44", Action: "An admin (snowplow unreachable) or the blueprint's maintainers (a data source that doesn't resolve, or a malformed API reference) fix the cause the message names."})
+		Doc{Since: "2.13.44", Action: "Fix the cause the message names: snowplow unreachable, a data source that doesn't resolve, or a malformed API reference.", Actors: []Actor{ActorAdmin, ActorMaintainers}})
 )
 
 // ApiAuthnRefusedWith is ApiResolved=False carrying authn's OWN refusal reason, passed through as
@@ -517,7 +535,7 @@ func ApiAuthnRefusedWith(authnReason, message string) metav1.Condition {
 var apiAuthnPassthrough = on(TypeApiResolved, "(authn's reason)", metav1.ConditionFalse, WriterCDC,
 	"authn refused the service token and named why; the reason is authn's own (e.g. NoMapping, AudienceMismatch, MissingBearer): an OPEN set",
 	Clearance{Indefinite, "until the refusal's cause is fixed"},
-	Doc{Since: "2.13.44", Action: "An admin fixes the cause authn names in the reason, for example a missing mapping."})
+	Doc{Since: "2.13.44", Action: "An admin fixes the cause authn names in the reason, for example a missing mapping.", Actors: []Actor{ActorAdmin}})
 
 // ReasonFrom is, for the one row that stands for a family of reasons passed through from another
 // component (ApiAuthnRefusedWith), that component, "authn"; empty for every listed reason.
