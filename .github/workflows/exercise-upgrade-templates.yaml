@@ -36,15 +36,19 @@ env:
 
 jobs:
   exercise:
-    name: ${{ matrix.suite }}${{ matrix.control && ' control' || '' }} (kind)
+    name: ${{ matrix.start == 'main' && 'main' || format('from {0}', matrix.start) }}${{ matrix.control && ' control' || '' }} (kind)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        # from-old: the incident's own version (acmp, 2.13.57 to 2.13.105). Its charts and images are
-        # published, and its kubeVersion floor is this cluster's 1.36.
-        suite: [main, from-old]
+        # main: every arm, from the last release before the fix. Each other entry is a STARTING version
+        # that clusters really upgrade from, through the from-old suite (quota-full, then converge):
+        # 2.13.57 (the incident's, acmp), 2.13.105 (acmp's tenants acme and globex run it), 2.13.111
+        # (demo). Their charts and images are published, their kubeVersion floor is this cluster's 1.36,
+        # and each installs with the same values and its own core-provider-crds chart; 2.13.57 runs without
+        # leader election (its chart's default then), the others with it. Parallel jobs.
+        start: [main, "2.13.57", "2.13.105", "2.13.111"]
         control: ${{ fromJSON(github.event_name == 'pull_request' && '[false, true]' || format('[{0}]', inputs.control)) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -74,16 +78,13 @@ jobs:
           echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Exercise
         env:
-          SUITE: ${{ matrix.suite }}
+          START: ${{ matrix.start }}
           CONTROL: ${{ matrix.control }}
           VERSION: ${{ inputs.version || '2.13.129' }}
         run: |
           set -euo pipefail
           helm version --short
-          case "$SUITE" in
-            main)     from="$BEFORE_651" ;;
-            from-old) from=2.13.57 ;;
-          esac
+          if [ "$START" = main ]; then suite=main from="$BEFORE_651"; else suite=from-old from="$START"; fi
           if [ -n "${IMAGE_TAG:-}" ]; then
             target=(--target-chart helm/core-provider --crds-chart helm/core-provider-crds --image-tag "$IMAGE_TAG"
                     --chart-inspector-tag "$BEFORE_651")
@@ -92,5 +93,5 @@ jobs:
           fi
           if [ "$CONTROL" = true ]; then target+=(--control); fi
           python3 -I go/core-provider/hack/upgrade-templates-e2e/run.py \
-            --suite "$SUITE" --from "$from" --node exercise-control-plane "${target[@]}" \
+            --suite "$suite" --from "$from" --node exercise-control-plane "${target[@]}" \
             --probe go/composition-dynamic-controller/hack/interrupted-install-e2e/chart
