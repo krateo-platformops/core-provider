@@ -374,6 +374,80 @@ can reconcile a release the abandoned operation is still writing, and that opera
 total stays taken if its handler has not returned. The same holds after a lost Lease, whose restart also
 does not wait. Not closed here: the pool cannot see a reconcile the runtime has abandoned.
 
+### Per-member readiness, by its Lease (#653): proposed, not built
+Diego decided on 2026-11-24 that a member's state is read from its ownership Lease. Today one member that
+fails, or a same-key replacement slower than about 15s, fails the pool pod's `/readyz`, and every member's
+definition reads `Ready=False`/`Unavailable` through the shared pool Deployment.
+
+**Two halves.**
+1. *The pool's `/readyz` becomes process-level.* It is ready once the index has been listed and every
+   member it named at that point has synced once. That is latched: a later failure, a drain or a join
+   does not fail it. The pod's readiness then means "this process runs", and no member can flip another.
+2. *core-provider reads each member's Lease*, `templates.ControllerLeaseName` (`<version>.<plural>.<group>`)
+   in the management namespace. The holder is a pod name, and the elector's timings are 15s duration,
+   10s renew deadline and 2s retry.
+
+**States and text.** These apply only when the pool Deployment has rolled out. A Deployment rolling
+out, given up or unavailable keeps today's rows for every member, because then the process is the
+problem. `G` is 20s: longer than a same-key replacement leaves the Lease unheld (it is held through the
+drain, then retaken within 4.4s), so a bump does not flip anyone.
+
+| member | Ready | ControllerActive |
+|---|---|---|
+| Lease held by a pod of `cdc-pool-<p>`, and fresh | `Available` (no message) | `True`/`Running` "controller running in pool <p>" |
+| in the index for less than `G`, Lease not yet held by the pool | `False`/`Creating` "the controller for <gvr> is starting in pool <p>" | `True`/`Running` (same) |
+| Lease held by someone else (the dedicated pod during cutover, or another pool) | `False`/`Creating` "the controller for <gvr> is taking over from <holder>" | `True`/`Running` |
+| Lease unheld or stale for `G` or more | `False`/`Unavailable` "the controller for <gvr> is not running in pool <p>: its ownership Lease <name> has not been held since <time>" | `False`/`Unavailable` (same message) |
+| Lease unreadable | Observe errors (runtime `Unknown`/`NotObserved`, the error on `Synced`) | `Unknown`/`NotObserved` "the ownership Lease <name> could not be read: <error>" |
+
+`<time>` is when this process first saw the Lease unheld. It changes only on a transition, so every
+message stays stable while its state does (the 2026-11-11 rule).
+
+**No new reason.** Every literal exists: Ready `Available`, `Creating` (parent verdict converging) and
+`Unavailable` (failed); ControllerActive `Running`, `Unavailable` and `NotObserved`. No new `Unknown`
+reason ships, so installer's gate is unaffected. What changes is the *meaning* column of five rows:
+Ready `Creating` and `Unavailable`, and ControllerActive `Running`, `Unavailable` and `NotObserved`. Today
+they say "the controller Deployment". `cd-ready-reasons.md` is regenerated from them, so installer and
+frontend are told when that merges. A member that does not run is failed, not converging. Nothing makes
+it run again by itself except its own restart, and the message says which Lease to look at.
+
+**Freshness without comparing clocks.** `renewTime` is the pool's clock. "Fresh" is decided on
+core-provider's clock instead: an informer on Leases records, per Lease, the local time of the last
+update it saw. An update is a renewal, every 2s while held. A Lease is fresh while a holder is named and
+the last renewal was seen less than its `leaseDurationSeconds` ago, which is client-go's own rule. After a
+core-provider restart, a Lease seen for less than its duration has no local history yet. For that window
+only (15s), it is judged on `now - renewTime < 2 x leaseDurationSeconds`. That is wrong only with more
+than 15s of skew, and then only during those 15s after a restart.
+
+**Wake-ups.**
+- The pool Deployment's rollout events, mapped by `krateo.io/cdc-pool` to the definitions whose
+  `status.controller.pool` names it (#580). Today a pool Deployment wakes nobody: the watch's predicate
+  needs the per-version labels it does not carry.
+- Lease events, filtered to a changed `holderIdentity` and to create/delete. A renewal changes neither,
+  so 15 members renewing every 2s wake nothing. The informer still sees the renewals, which is how
+  freshness is measured.
+- Residual: a member that dies inside a live process without releasing its Lease leaves no event. Its
+  definition reads `Unavailable` at its next poll, up to 3m later. A requeue after `G` for a pool member
+  closes that, at 15 requeues per 20s per pool; I would ship without it and measure first.
+
+**RBAC.** core-provider needs `list`/`watch` on `coordination.k8s.io` leases regardless of leader
+election (#652 added `get`).
+
+**Remote pools:** none, because CEL refuses `pool` on a remote definition.
+
+**The abandoned-reconcile overlap** (measured in pool_drain_envtest_test.go: peak 2 reconciles of one
+composition in one process). At the grace, unstructured-runtime's `Run` cancels and returns, and it
+releases the Lease, while a handler that ignores its context (helm's uninstall) still writes. A runtime
+hook would need:
+1. a channel closed when every worker of a `Run` has returned (its `wg.Wait`), exposed to the caller;
+2. for a pool, the Lease kept, and renewed, until then, not released at the grace. This makes it
+   stop-before-start across pods too, and the per-member state above then reports the key as not
+   running for as long as it lasts, on that definition alone;
+3. the pool's successor for the key started only after (1), bounded by `helmTimeout`. At the bound it
+   is reported, not started.
+
+A dedicated controller needs none of this, because its process exits after `Run`.
+
 ### Sizing and workers
 Workers are capped **pool-wide**: the pool's `workers` is the process total, and no member takes
 more than its own `spec.controller.workers`. The default pool request comes from §5b: the members'
