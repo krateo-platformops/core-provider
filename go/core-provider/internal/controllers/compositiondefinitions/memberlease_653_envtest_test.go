@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -41,7 +42,12 @@ import (
 // manager653 runs core-provider's definitions controller on e's apiserver, polling every poll. It
 // returns how many Observe passes the controller has made of each definition so far: the dry-run apply
 // of the definition's env ConfigMap that every pass that reaches the drift checks makes.
-func manager653(t *testing.T, e *env652, poll time.Duration) func(key string) int {
+//
+// limiter is the controller's global rate limiter. Production's (main.go) is provider-runtime's
+// ExponentialTimedFailure at 1s..1m, which delays EVERY reconcile of a definition reconciled within the
+// last two minutes, events included, by up to a minute (it forgets an item only after 2 x max); the
+// tests of a mechanism use one that limits nothing, and the measurement uses production's.
+func manager653(t *testing.T, e *env652, poll time.Duration, limiter workqueue.TypedRateLimiter[any]) func(key string) int {
 	t.Helper()
 	cfg := rest.CopyConfig(e.c.cfg)
 	var mu sync.Mutex
@@ -72,7 +78,7 @@ func manager653(t *testing.T, e *env652, poll time.Duration) func(key string) in
 	if err := Setup(mgr, Options{
 		ControllerOptions: controller.Options{
 			Logger: logging.NewNopLogger(), PollInterval: poll, MaxConcurrentReconciles: 5,
-			GlobalRateLimiter: ratelimiter.NewGlobalExponential(time.Second, 10*time.Second),
+			GlobalRateLimiter: limiter,
 		},
 		Pluralizer: pluralizer644{e.c.cs.Discovery()},
 	}); err != nil {
@@ -87,6 +93,14 @@ func manager653(t *testing.T, e *env652, poll time.Duration) func(key string) in
 		defer mu.Unlock()
 		return passes[key+"-configmap"]
 	}
+}
+
+// unlimited is a global rate limiter that delays nothing.
+func unlimited() workqueue.TypedRateLimiter[any] { return ratelimiter.NewGlobal(100000) }
+
+// production is main.go's, at its defaults.
+func production() workqueue.TypedRateLimiter[any] {
+	return ratelimiter.NewGlobalExponential(time.Second, time.Minute)
 }
 
 type roundTrip func(*http.Request) (*http.Response, error)
@@ -181,7 +195,7 @@ func TestEnvtest_653_OneMemberDoesNotDecideAnother(t *testing.T) {
 	e := start652(t)
 	a, b, c := e.member("alpha", "web"), e.member("beta", "web"), e.member("gamma", "web")
 	log := watchReady(t, e)
-	passes := manager653(t, e, 3*time.Minute)
+	passes := manager653(t, e, 3*time.Minute, unlimited())
 	for _, d := range []*cd644{a, b, c} {
 		e.waitReady(t, d, "True/Available", "True/Running", 2*time.Minute)
 	}
@@ -293,11 +307,21 @@ func TestEnvtest_653_OneMemberDoesNotDecideAnother(t *testing.T) {
 func TestEnvtest_653_ThePoolDeploymentWakesItsMembers(t *testing.T) {
 	e := start652(t)
 	a, b := e.member("alpha", "web"), e.member("beta", "web")
-	passes := manager653(t, e, 3*time.Minute)
+	passes := manager653(t, e, 3*time.Minute, unlimited())
 	for _, d := range []*cd644{a, b} {
 		e.waitReady(t, d, "True/Available", "True/Running", 2*time.Minute)
 	}
-	time.Sleep(3 * time.Second)
+	// Quiet first: no pass of either for 8s, so a pass after the delete is the delete's.
+	quiet := func() bool {
+		x, y := passes(e.key(a, v1)), passes(e.key(b, v1))
+		time.Sleep(8 * time.Second)
+		return passes(e.key(a, v1)) == x && passes(e.key(b, v1)) == y
+	}
+	for end := time.Now().Add(2 * time.Minute); !quiet(); {
+		if time.Now().After(end) {
+			t.Fatal("premise: the members were never quiet for 8s")
+		}
+	}
 	before := map[string]int{e.key(a, v1): passes(e.key(a, v1)), e.key(b, v1): passes(e.key(b, v1))}
 	if err := e.c.cs.AppsV1().Deployments(ns652).Delete(context.Background(), "cdc-pool-web", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
@@ -305,13 +329,13 @@ func TestEnvtest_653_ThePoolDeploymentWakesItsMembers(t *testing.T) {
 	t0 := time.Now()
 	for k, n := range before {
 		woke := time.Duration(0)
-		for end := time.Now().Add(15 * time.Second); woke == 0 && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		for end := time.Now().Add(3 * time.Second); woke == 0 && time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
 			if passes(k) > n {
 				woke = time.Since(t0)
 			}
 		}
 		if woke == 0 {
-			t.Errorf("%s was not observed within 15s of its pool's Deployment being deleted (poll 3m)", k)
+			t.Errorf("%s was not observed within 3s of its pool's Deployment being deleted, after 8s quiet (poll 3m)", k)
 			continue
 		}
 		t.Logf("%s observed %s after its pool's Deployment was deleted", k, woke.Round(100*time.Millisecond))
@@ -329,31 +353,40 @@ func TestEnvtest_653_ThePoolDeploymentWakesItsMembers(t *testing.T) {
 // the requeue it is the poll interval (3m by default). Run with MEASURE_653=1; the default run asserts
 // only the requeued arm, which is what ships.
 func TestEnvtest_653_DeadMemberMeasured(t *testing.T) {
-	arms := []bool{true}
-	if os.Getenv("MEASURE_653") != "" {
-		arms = append(arms, false)
+	type arm struct {
+		name    string
+		requeue bool
+		limiter func() workqueue.TypedRateLimiter[any]
+		bound   time.Duration // 0: measured only
 	}
-	for _, requeue := range arms {
-		t.Run(map[bool]string{true: "with the requeue", false: "without"}[requeue], func(t *testing.T) {
+	L := deploy.LeaseTimings
+	arms := []arm{{"with the requeue, production's rate limiter", true, production, L.Duration + L.MemberGrace() + time.Minute + 10*time.Second}}
+	if os.Getenv("MEASURE_653") != "" {
+		arms = append(arms,
+			arm{"with the requeue, no rate limit", true, unlimited, 0},
+			arm{"without the requeue, production's rate limiter", false, production, 0})
+	}
+	for _, c := range arms {
+		t.Run(c.name, func(t *testing.T) {
 			was := requeueMembers
-			requeueMembers = requeue
+			requeueMembers = c.requeue
 			t.Cleanup(func() { requeueMembers = was })
 			e := start652(t)
 			a := e.member("alpha", "web")
-			counter := manager653(t, e, 3*time.Minute)
-			e.waitReady(t, a, "True/Available", "True/Running", 2*time.Minute)
+			counter := manager653(t, e, 3*time.Minute, c.limiter())
+			e.waitReady(t, a, "True/Available", "True/Running", 3*time.Minute)
 			time.Sleep(5 * time.Second)
 			key := e.key(a, v1)
 			before, t0 := counter(key), time.Now()
 			e.leases.mu.Lock()
 			e.leases.dead[leaseName653(e, a)] = true
 			e.leases.mu.Unlock()
-			took := e.waitReady(t, a, "False/Unavailable", "False/Unavailable", 4*time.Minute)
+			took := e.waitReady(t, a, "False/Unavailable", "False/Unavailable", 5*time.Minute)
 			passes := counter(key) - before
-			t.Logf("MEASURED requeue=%v: a dead member read Available for %s after it stopped renewing; %d Observe passes of it in that time (%.1f/min)",
-				requeue, took.Round(time.Second), passes, float64(passes)/time.Since(t0).Minutes())
-			if requeue && took > deploy.LeaseTimings.Duration+deploy.LeaseTimings.MemberGrace()+10*time.Second {
-				t.Errorf("with the requeue: %s", took)
+			t.Logf("MEASURED %s: a dead member read Available for %s after it stopped renewing; %d Observe passes of it in that time (%.1f/min)",
+				c.name, took.Round(time.Second), passes, float64(passes)/time.Since(t0).Minutes())
+			if c.bound > 0 && took > c.bound {
+				t.Errorf("%s > %s", took, c.bound)
 			}
 		})
 	}
