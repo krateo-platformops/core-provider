@@ -48,6 +48,8 @@ jobs:
         control: ${{ fromJSON(github.event_name == 'pull_request' && '[false, true]' || format('[{0}]', inputs.control)) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Check what the exercise concludes
+        run: python3 -I go/core-provider/hack/upgrade-templates-e2e/verdicts_test.py
       - name: Install Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:

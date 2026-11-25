@@ -163,8 +163,18 @@ its own, and the new templates take effect when the new pod takes over. Their na
 content, so find one by prefix or through the Deployment's volumes, and don't reference one by name from
 outside the chart. While a roll is stuck, the old pod reports `FailedMount ... configmap "..." not found`:
 helm has deleted the previous ConfigMaps and the kubelet keeps the files the pod already has. That is
-expected, and ends with the old pod. An old pod that is deleted while the roll is stuck can't start again:
-its templates are gone, and it starts no new ones.
+expected, and ends with the old pod; a container restart in it keeps them too.
+
+If that old pod is **deleted** while the roll is stuck, its ReplicaSet replaces it, and the replacement
+renders the same templates or none, never the new ones. On the same node it normally starts: the kubelet
+stops watching an immutable ConfigMap once it has read it and keeps it for as long as any pod on the node
+names it, and the replacement arrives while the old pod is still terminating. It can't mount them
+(`FailedMount`), and no engine runs until the new pod starts, when nothing on its node still holds them: on
+another node, after a kubelet restart or a node reboot, if the old pod was already gone, or when the previous
+chart was from before #651, whose ConfigMaps aren't immutable and so aren't kept. After a kubelet restart the
+old pod itself goes on running, but a container that exits in it may not be started again. `kubectl rollout
+undo` is subject to the same rule, so it normally can't mount either: use `helm rollback`, which writes the
+ConfigMaps back.
 
 The per-definition `<plural>-<version>-jsonschema-configmap` is a different object, written by the engine;
 its name does not change.

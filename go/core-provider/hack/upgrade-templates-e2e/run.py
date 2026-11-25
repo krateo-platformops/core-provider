@@ -20,8 +20,12 @@ suite main, FROM a released chart:
   container-killed   the old container is killed in that state: it restarts, on its own files.
   quota-lifted       everything converges on the new templates.
   image-pull         the next upgrade's new pod cannot pull its image: nothing is rolled.
-  old-pod-deleted    the old pod is deleted in that state: its replacement cannot mount (FailedMount on
-                     the deleted ConfigMap), and nothing is rolled.
+  old-pod-deleted    the old pod is deleted in that state: its replacement either runs on ITS OWN templates
+                     (the kubelet keeps an immutable ConfigMap a pod on the node still names, deleted or
+                     not) or cannot mount them (FailedMount); nothing is rolled either way. The output says
+                     which happened.
+  old-pod-no-cache   the same after a kubelet restart, which empties that cache: FailedMount on its own
+                     template ConfigMap, and it never runs.
   image-fixed        everything converges.
   rollback-back      helm rollback to the released chart, quota full: nothing is rolled; then converges.
   rollback-forward   helm rollback to the newer revision, quota full: nothing is rolled; then converges.
@@ -46,14 +50,16 @@ HOLD, SHORT_HOLD = 120, 75  # both > kubelet sync (10s, jittered to 15s) + POLL;
 VOLUMES = ("cdc-deployment", "cdc-configmap", "cdc-rbac", "jsonschema-configmap", "cdc-service")
 results = []  # (arm, verdict, detail)
 REQUIRED = {
-    "main": ["quota-full", "container-killed", "quota-lifted", "image-pull", "old-pod-deleted", "image-fixed",
+    "main": ["quota-full", "container-killed", "quota-lifted", "image-pull", "old-pod-deleted",
+             "old-pod-no-cache", "image-fixed",
              "rollback-back", "rollback-forward", "values-only", "unknown-key"],
     "from-old": ["from-old", "from-old-lifted"],
 }
 FAIL_BEFORE_651 = {  # arm -> what its failure must say
     "quota-full": "ROLLED", "from-old": "ROLLED", "image-pull": "ROLLED",
     "rollback-back": "ROLLED", "rollback-forward": "ROLLED",
-    "container-killed": "FILES CHANGED", "old-pod-deleted": "OLD POD STARTED", "unknown-key": "APPLIED",
+    "container-killed": "FILES CHANGED", "old-pod-deleted": "OLD POD STARTED",
+    "old-pod-no-cache": "OLD POD STARTED", "unknown-key": "APPLIED",
 }
 
 
@@ -246,8 +252,8 @@ def cd_condition(t):
     return next((c for c in (cd.get("status") or {}).get("conditions") or [] if c["type"] == t), {})
 
 
-def hold(seconds, before, fails):
-    """Nothing of the controller moves for this long, and the definition stays Ready."""
+def hold(seconds, before, fails, stays_ready=True):
+    """Nothing of the controller moves for this long, and the definition stays Ready (stays_ready)."""
     start, polls, not_ready = time.time(), 0, None
     while time.time() - start < seconds:
         polls += 1
@@ -261,7 +267,8 @@ def hold(seconds, before, fails):
             not_ready = f"{r.get('status')}/{r.get('reason')} {r.get('message', '')[:120]}"
         time.sleep(5)
     print(f"      held {seconds}s: {len(before)} objects unchanged over {polls} polls")
-    check(fails, not not_ready, f"the definition stayed Ready=True ({not_ready or 'it did'})")
+    if stays_ready:
+        check(fails, not not_ready, f"the definition stayed Ready=True ({not_ready or 'it did'})")
 
 
 def check(fails, ok, what):
@@ -270,8 +277,28 @@ def check(fails, ok, what):
         fails.append(what)
 
 
-def record(arm, fails):
-    results.append((arm, "FAIL" if fails else "PASS", "; ".join(fails)))
+def replacement_verdict(own_rev, own, missing, mount_errors, running_rev, cache):
+    """What the replacement of a deleted old pod did: (fine, what happened).
+
+    own: the template ConfigMap names its spec carries; missing: those of them that no longer exist.
+    running_rev: the rev of the templates INSIDE its running container, None when it does not run.
+    cache: whether this node's kubelet may still hold the deleted ConfigMaps. Without it, it cannot run."""
+    if running_rev is not None:
+        if running_rev != own_rev:
+            return False, f"OLD POD STARTED on rev {running_rev or '(none)'}, not its own {own_rev or '(none)'}"
+        if not cache:
+            return False, f"OLD POD STARTED on its own rev {own_rev}, with nothing to mount it from"
+        return True, f"it runs on its own templates (rev {own_rev or '(none)'}), deleted but kept by the kubelet"
+    named = set(re.findall(r'configmap "([^"]+)" not found', "\n".join(mount_errors)))
+    if named & set(own) & set(missing):
+        return True, f"it cannot mount its own deleted templates: FailedMount names {', '.join(sorted(named))}"
+    if named:
+        return False, f"FailedMount names {', '.join(sorted(named))}, none of its own deleted templates ({', '.join(sorted(missing)) or 'none is deleted'})"
+    return False, f"it neither runs nor says which of its templates it cannot mount ({mount_errors[:1]})"
+
+
+def record(arm, fails, note=""):
+    results.append((arm, "FAIL" if fails else "PASS", "; ".join(fails) or note))
     log(f"{arm}: {'FAIL' if fails else 'PASS'}")
 
 
@@ -431,33 +458,60 @@ def image_pull_arm(target):
         check(fails, r == was, f"its templates are its own (rev {was}){'' if r == was else f': FILES CHANGED to rev {r}'}")
     check(fails, bool(cannot_pull()), "the roll was stuck throughout")
     record("image-pull", fails)
-    return old
+    return old, was
 
 
-def old_pod_deleted_arm(old):
-    log("=== old-pod-deleted")
+def restart_kubelet(node):
+    """Restart the node's kubelet, which empties its ConfigMap cache, and wait until the node is as it was."""
+    pid = lambda: sh("docker", "exec", node, "systemctl", "show", "kubelet", "-p", "MainPID", "--value").strip()
+    was = pid()
+    ours = {uid(p) for p in pods()}
+    up = {uid(p) for p in kget("pods", ns=None) if is_ready(p)} - ours
+    sh("docker", "exec", node, "systemctl", "restart", "kubelet")
+    wait("another kubelet process", lambda: pid() not in ("0", was), 60)
+    wait("the kubelet to answer", lambda: sh("kubectl", "get", "--raw", f"/api/v1/nodes/{node}/proxy/healthz", check=False).strip() == "ok", 120)
+    wait("the node to be Ready", lambda: any(c["type"] == "Ready" and c["status"] == "True" for c in kget("nodes", node)["status"]["conditions"]), 120)
+    # Every pod that was Ready is again, so nothing that follows is the restart's own disturbance.
+    wait("the pods to be Ready again", lambda: up <= {uid(p) for p in kget("pods", ns=None) if is_ready(p)}, 180)
+    print(f"      kubelet restarted: pid {was} -> {pid()}")
+
+
+def replaced_old_pod_arm(arm, old, own_rev, cache):
+    """Delete the old spec's pod while the roll is stuck on the image. Returns the replacement."""
+    log(f"=== {arm}")
     fails, before = [], snapshot()
-    names = template_names(old["spec"])
-    sh("kubectl", "delete", "pod", "-n", CP_NS, old["metadata"]["name"], "--wait=true", "--timeout=120s")
-
-    def replacement():
-        return next((p for p in pods([uid(old)]) if p["spec"]["containers"][0]["image"] == old["spec"]["containers"][0]["image"]), None)
-    new = wait("the old ReplicaSet's replacement pod", replacement, 60)
-    if template_names(new["spec"]) != names:
+    own = set(template_names(old["spec"]).values())
+    seen = {uid(p) for p in pods()}
+    missing = own - {c["metadata"]["name"] for c in kget("configmaps")}
+    print(f"      its templates: {sorted(own)}; no longer existing: {sorted(missing)}")
+    sh("kubectl", "delete", "pod", "-n", CP_NS, old["metadata"]["name"], "--wait=false")
+    image = lambda p: p["spec"]["containers"][0]["image"]
+    new = wait("the old ReplicaSet's replacement pod", lambda: next(
+        (p for p in pods(seen) if image(p) == image(old) and not p["metadata"].get("deletionTimestamp")), None), 60)
+    if set(template_names(new["spec"]).values()) != own:
         raise RuntimeError("the replacement is not the old spec")
 
-    def failed_mount():
-        return [e["message"] for e in kget("events") if e.get("reason") == "FailedMount"
-                and e["involvedObject"].get("uid") == uid(new) and "not found" in e.get("message", "")]
-    started = lambda: next((p for p in pods() if uid(p) == uid(new) and (status0(p).get("state") or {}).get("running")), None)
-    wait("the replacement to start, or to say why it cannot", lambda: failed_mount() or started(), 120)
-    msgs = failed_mount()
-    if msgs:
-        print(f"      {msgs[0][:200]}")
-    check(fails, any(n in m for m in msgs for n in names.values()), "FailedMount names the old pod's deleted template ConfigMap")
-    hold(SHORT_HOLD, before, fails)
-    check(fails, not started(), "the old spec's replacement never ran" + (": OLD POD STARTED on the new templates" if started() else ""))
-    record("old-pod-deleted", fails)
+    def mount_errors():
+        return [e["message"] for e in kget("events") if e.get("reason") == "FailedMount" and e["involvedObject"].get("uid") == uid(new)
+                and "not found" in e.get("message", "")]  # a cache still syncing is retried, and says something else
+
+    def running():
+        return next((p for p in pods() if uid(p) == uid(new) and (status0(p).get("state") or {}).get("running")), None)
+    wait("the replacement to run, or to say why it cannot", lambda: running() or mount_errors(), 150)
+
+    def outcome():
+        p = running()
+        return replacement_verdict(own_rev, own, missing, mount_errors(), mounted_rev(p) if p else None, cache)
+    ok, what = outcome()
+    check(fails, ok, what)
+    # Without the cache no core-provider runs, and the kubelet restart just made Ready move: only what is
+    # rolled is asserted there.
+    hold(SHORT_HOLD, before, fails, stays_ready=cache)
+    still, now = outcome()
+    if (still, now) != (ok, what):  # it must not become something else while nobody looks
+        check(fails, still, f"after the hold: {now}")
+    record(arm, fails, now)
+    return new
 
 
 def values_only_arm(target):
@@ -567,9 +621,15 @@ def main_suite(o, target):
         arm("container-killed", lambda: container_killed_arm(o.node, old, ""))
     lift_quota()
     arm("quota-lifted", lambda: converge_arm("quota-lifted", target.image, "A"))
-    old = arm("image-pull", lambda: image_pull_arm(target))
-    if old:
-        arm("old-pod-deleted", lambda: old_pod_deleted_arm(old))
+    stuck = arm("image-pull", lambda: image_pull_arm(target))
+    if stuck:
+        old, own_rev = stuck
+        new = arm("old-pod-deleted", lambda: replaced_old_pod_arm("old-pod-deleted", old, own_rev, cache=True))
+        if new:
+            def no_cache():
+                restart_kubelet(o.node)
+                return replaced_old_pod_arm("old-pod-no-cache", new, own_rev, cache=False)
+            arm("old-pod-no-cache", no_cache)
     target.upgrade("B")
     arm("image-fixed", lambda: converge_arm("image-fixed", target.image, "B"))
     newer = revision()
@@ -580,7 +640,7 @@ def main_suite(o, target):
             # Part of the same arm: the rollback itself must still happen once there is room.
             lift_quota()
             r = results.pop()
-            fails = [r[2]] if r[2] else []
+            fails = [r[2]] if r[1] == "FAIL" else []
             try:
                 converged(image, rev)
             except TimeoutError as e:
