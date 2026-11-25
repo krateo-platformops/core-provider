@@ -797,6 +797,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 		if reconcileRes != nil && reconcileRes.Changed {
 			markWrote(ctx, writeHelmReconcile) // the reconcile changed the cluster, possibly before an error
 		}
+		// #640: before the error return below, which a failed retry takes and the drift line never sees.
+		reportFailedReleaseHeal(mg, reconcileRes, releaseName, log)
 		// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 		h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, reconcileRes, childrenLeft(reconcileRelease(reconcileRes), err)), mg)
 		if err != nil {
@@ -1506,6 +1508,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 				res, rerr := hc.Reconcile(ctx, releaseName, pkg.URL, reconcileConfig(actionConfig, recordRevision, retiring, false)) // the runtime dispatches Update only when the policy allows it
 				// Recorded on both outcomes: a partial apply returns its verdicts with the error (#276).
 				h.audit.Record(ctx, auditrec.FromReconcile(auditrec.ActionReconcile, res, childrenLeft(reconcileRelease(res), rerr)), mg)
+				reportFailedReleaseHeal(mg, res, releaseName, log) // #640, on both outcomes, as in Observe
 				if rerr != nil {
 					return nil, rerr
 				}
