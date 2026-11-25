@@ -1,0 +1,54 @@
+# Every reason a core-provider release carried, one per line: condition/status/reason/writer, a tab,
+# and the release that first carried it (the reason's Since). Read by TestReleasedReasonsAreStillListed.
+# A line is never removed: a reason that leaves Table must be named in Deprecated, because consumers
+# key on the reason string and a rename or removal is breaking for them.
+# The release that ships an unreleased reason replaces its Since with the tag and appends it here:
+# RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate ./internal/conditionreason/ -run '^TestReasonTablesAreReleaseReady$'
+# (docs/release.md). release-tag.yaml refuses a tag while any reason is unreleased or missing here.
+ApiResolved/False/(authn's reason)/composition-dynamic-controller	2.13.44
+ApiResolved/False/ApiEmpty/composition-dynamic-controller	2.13.44
+ApiResolved/False/ApiPartiallyResolved/composition-dynamic-controller	2.13.106
+ApiResolved/False/AuthnError/composition-dynamic-controller	2.13.44
+ApiResolved/False/AuthnRejected/composition-dynamic-controller	2.13.44
+ApiResolved/False/AuthnUnreachable/composition-dynamic-controller	2.13.44
+ApiResolved/False/ResolveFailed/composition-dynamic-controller	2.13.44
+ApiResolved/True/Resolved/composition-dynamic-controller	2.13.44
+ApiResolved/Unknown/StageOutcomesUnknown/composition-dynamic-controller	2.13.106
+ChartRenderable/False/InspectorRejected/composition-dynamic-controller	2.13.64
+ChartRenderable/False/InspectorUnavailable/composition-dynamic-controller	2.13.47
+ChartRenderable/False/TemplateRefused/composition-dynamic-controller	2.13.112
+ChartRenderable/False/UnservedKind/composition-dynamic-controller	2.13.47
+ChartRenderable/False/ValuesSchemaViolation/composition-dynamic-controller	2.13.64
+ChartRenderable/True/Renderable/composition-dynamic-controller	2.13.47
+RBACComplete/False/ApplyFailed/composition-dynamic-controller	2.13.67
+RBACComplete/False/NamespaceTerminating/composition-dynamic-controller	2.13.67
+RBACComplete/True/Applied/composition-dynamic-controller	2.13.67
+RBACComplete/Unknown/NotEvaluated/composition-dynamic-controller	2.13.67
+Ready/False/CreateOutcomeUnknown/unstructured-runtime	2.13.103
+Ready/False/CreateWithheldByPolicy/composition-dynamic-controller	2.13.118
+Ready/False/Creating/composition-dynamic-controller	2.12.0
+Ready/False/Creating/unstructured-runtime	2.12.0
+Ready/False/Deleting/unstructured-runtime	2.12.0
+Ready/False/HelmOperationInProgress/composition-dynamic-controller	2.13.81
+Ready/False/HooksMayNotHaveRun/composition-dynamic-controller	2.13.108
+Ready/False/InstallFailing/composition-dynamic-controller	2.13.129
+Ready/False/PendingHelmOperation/composition-dynamic-controller	2.12.0
+Ready/False/RecoveryWithheldByPolicy/composition-dynamic-controller	2.13.118
+Ready/False/Unavailable/composition-dynamic-controller	2.12.0
+Ready/True/Available/composition-dynamic-controller	2.12.0
+Ready/True/AvailablePartialCoverage/composition-dynamic-controller	2.13.54
+Ready/True/ReconcileGracefullyPaused/composition-dynamic-controller	2.12.0
+Ready/True/ReconcilePaused/unstructured-runtime	2.12.0
+Ready/True/UpdateWithheldByPolicy/composition-dynamic-controller	2.13.118
+Ready/Unknown/ChildrenForbidden/composition-dynamic-controller	2.13.61
+Ready/Unknown/InventoryNotRecorded/composition-dynamic-controller	2.13.61
+Ready/Unknown/ObserveFailed/unstructured-runtime	2.13.60
+Ready/Unknown/ZeroEvidence/composition-dynamic-controller	2.13.36
+Synced/False/DeletionPolicyInvalid/unstructured-runtime	2.13.118
+Synced/False/GracefulPausePending/composition-dynamic-controller	2.13.75
+Synced/False/ManagementPolicyInvalid/unstructured-runtime	2.13.118
+Synced/False/ReconcileDeferred/unstructured-runtime	2.13.65
+Synced/False/ReconcileError/unstructured-runtime	2.12.0
+Synced/False/ReconcileGracefullyPaused/composition-dynamic-controller	2.12.0
+Synced/False/ReconcilePaused/unstructured-runtime	2.12.0
+Synced/True/ReconcileSuccess/unstructured-runtime	2.12.0

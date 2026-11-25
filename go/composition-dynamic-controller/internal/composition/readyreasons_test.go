@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,13 +94,19 @@ strings are authn's and not listed one by one.
 |---|---|---|---|---|---|---|
 `)
 	for _, r := range conditionreason.Table() {
-		verdict := "—"
-		if r.Type() == "Ready" {
-			verdict = rollupVerdict(t, r)
-		}
-		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s |\n", r.Type(), r, r.Status(), r.Writer(), verdict, renderClearance(t, r), r.Meaning())
+		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s |\n", r.Type(), r, r.Status(), r.Writer(), verdictOf(t, r), renderClearance(t, r), r.Meaning())
 	}
 	return b.String()
+}
+
+// verdictOf is the table's parent-verdict cell: the rollup's reading on a Ready row, "—" elsewhere
+// (the rollup reads only Ready).
+func verdictOf(t *testing.T, r conditionreason.Reason) string {
+	t.Helper()
+	if r.Type() == "Ready" {
+		return rollupVerdict(t, r)
+	}
+	return "—"
 }
 
 // clearanceTimers are the controller timers a Clearance note may name, with the variable that sets
@@ -113,13 +121,21 @@ func clearanceTimers() map[string]string {
 
 func renderClearance(t *testing.T, r conditionreason.Reason) string {
 	t.Helper()
+	kind, note := clearanceParts(t, r)
+	return "`" + kind + "`: " + note
+}
+
+// clearanceParts is r's expected-to-clear class and its note with the timers substituted: the two
+// halves of the markdown's "expected to clear" cell, which docs/ready-reasons.json carries apart.
+func clearanceParts(t *testing.T, r conditionreason.Reason) (kind, note string) {
+	t.Helper()
 	c := r.Clears()
 	switch c.Kind {
 	case conditionreason.Steady, conditionreason.Timer, conditionreason.NextPass, conditionreason.Indefinite:
 	default:
 		t.Fatalf("%s (%s): no expected-to-clear class (%q); every reason needs one", r, r.Writer(), c.Kind)
 	}
-	note := c.Note
+	note = c.Note
 	for key, value := range clearanceTimers() {
 		note = strings.ReplaceAll(note, key, value)
 	}
@@ -129,25 +145,182 @@ func renderClearance(t *testing.T, r conditionreason.Reason) string {
 	if c.Kind == conditionreason.Timer && note == c.Note {
 		t.Fatalf("%s (%s): a timer reason must name its timer", r, r.Writer())
 	}
-	return "`" + string(c.Kind) + "`: " + note
+	return string(c.Kind), note
 }
 
 // The rendered table is committed, and stale is a failure: a reason added, removed, re-statused or
 // re-classified by the rollup changes the file in the same change, where a consumer diffing tags
 // sees it.
+//
+// Both renderings are checked, the markdown and the JSON (core-provider#667), each against its own
+// committed file: either one stale fails.
 func TestReadyReasonTableIsCurrent(t *testing.T) {
-	want := renderReadyReasons(t)
-	if os.Getenv("UPDATE_READY_REASONS") == "1" {
-		if err := os.WriteFile(readyReasonsDoc, []byte(want), 0o644); err != nil {
-			t.Fatal(err)
+	for _, doc := range []struct {
+		path string
+		want string
+	}{
+		{readyReasonsDoc, renderReadyReasons(t)},
+		{readyReasonsJSON, renderReadyReasonsJSON(t)},
+	} {
+		if os.Getenv("UPDATE_READY_REASONS") == "1" {
+			if err := os.WriteFile(doc.path, []byte(doc.want), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := os.ReadFile(doc.path)
+		if err != nil {
+			t.Errorf("%v (run with UPDATE_READY_REASONS=1 to create it)", err)
+			continue
+		}
+		if string(got) != doc.want {
+			t.Errorf("%s is stale: run `UPDATE_READY_REASONS=1 go test ./internal/composition/ -run TestReadyReasonTableIsCurrent` and commit it.\n--- want\n%s", doc.path, doc.want)
 		}
 	}
-	got, err := os.ReadFile(readyReasonsDoc)
+}
+
+// markdownRows parses a reasons table by column NAME, as its consumers do.
+func markdownRows(t *testing.T, path string) []map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("%v (run with UPDATE_READY_REASONS=1 to create it)", err)
+		t.Fatal(err)
 	}
-	if string(got) != want {
-		t.Fatalf("%s is stale: run `UPDATE_READY_REASONS=1 go test ./internal/composition/ -run TestReadyReasonTableIsCurrent` and commit it.\n--- want\n%s", readyReasonsDoc, want)
+	var header []string
+	var out []map[string]string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "| ") {
+			continue
+		}
+		cells := strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, "| "), " |"), " | ")
+		if header == nil {
+			header = cells
+			continue
+		}
+		if len(cells) != len(header) {
+			t.Fatalf("%s: a row with %d cells under %d columns: %q", path, len(cells), len(header), line)
+		}
+		row := map[string]string{}
+		for i, c := range cells {
+			row[header[i]] = c
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// annotationOpByKey pins what a step does to each annotation key an action may name (#667). The
+// pause, graceful pause, hooks-unverified and create-pending keys are markers a person REMOVES; the
+// two policy keys take a value the person chooses (edit); values-schema is set to "infer".
+var annotationOpByKey = map[string]string{
+	"krateo.io/paused": "remove", "krateo.io/gracefully-paused": "remove",
+	"krateo.io/hooks-unverified": "remove", "krateo.io/external-create-pending": "remove",
+	"krateo.io/management-policy": "edit", "krateo.io/deletion-policy": "edit",
+	"krateo.io/values-schema": "set",
+}
+
+// fieldName is an annotation key, a field path or a field name in an action (frontend, #667): the
+// portal shows those under Details, not in the sentence.
+var fieldName = regexp.MustCompile(`krateo\.io/|\bstatus\.|\bspec\.|\bmetadata\.|\bapiRef\b`)
+
+// offVocabulary are the words the portal does not use: it says blueprint, data source and resources.
+var offVocabulary = regexp.MustCompile(`(?i)\b(composition ?definitions?|definitions?|restactions?|children|child)\b`)
+
+// cliStep is a command line in an action, which is on-screen text for a person, not a runbook.
+var cliStep = regexp.MustCompile(`(?i)\bkubectl\b|\bhelm (rollback|upgrade|install|uninstall)\b`)
+
+// statusSchema is core-provider's statics/status.schema.json: the composition status fields the
+// generated CRD declares. A field it does not declare is pruned by the apiserver, so a detail field
+// absent from it would point a consumer at nothing.
+const statusSchema = "../../../core-provider/internal/tools/crd/generation/statics/status.schema.json"
+
+// Every reason carries the fields the JSON publishes (core-provider#667): a since-version, an action
+// unless it is healthy or steady, and detail fields that the composition's status really declares.
+func TestEveryReasonHasItsAuthoredFields(t *testing.T) {
+	raw, err := os.ReadFile(statusSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	declared := func(path string) bool {
+		parts := strings.Split(path, ".")
+		if parts[0] != "status" {
+			return false
+		}
+		node := schema
+		for _, p := range parts[1:] {
+			props, _ := node["properties"].(map[string]any)
+			next, ok := props[p].(map[string]any)
+			if !ok {
+				return false
+			}
+			node = next
+		}
+		return true
+	}
+	// Control: the resolver must find a field the cdc is known to write, and refuse one it is not,
+	// or a pass below would say nothing.
+	if !declared("status.installFailures.lastError") || declared("status.installFailures.nope") {
+		t.Fatal("control: the status.schema.json resolver does not tell a declared field from an undeclared one")
+	}
+	var types []string
+	for _, r := range conditionreason.Table() {
+		types = append(types, regexp.QuoteMeta(r.Type()))
+	}
+	// A condition type named in an action (Ready, Synced, ...), or the Sync button, which only re-reads.
+	conditionTypes := regexp.MustCompile(`\b(` + strings.Join(append(types, "Sync"), "|") + `)\b`)
+	withAction, withDetail := 0, 0
+	for _, r := range conditionreason.Table() {
+		key := r.Type() + "/" + string(r.Status()) + "/" + r.String() + "/" + string(r.Writer())
+		if r.Since() == "" {
+			t.Errorf("%s: no Since (a released tag, or %q)", key, conditionreason.Unreleased)
+		}
+		kind, _ := clearanceParts(t, r)
+		if r.Action() == "" && verdictOf(t, r) != "healthy" && kind != string(conditionreason.Steady) {
+			t.Errorf("%s: no Action; one is required unless the reason is healthy or steady", key)
+		}
+		if why := actorsProblem(r.Action(), r.Control(), actorStrings(r.Actors())); why != "" {
+			t.Errorf("%s: %s", key, why)
+		}
+		if a := r.Action(); cliStep.MatchString(a) {
+			t.Errorf("%s: action %q has a command-line step", key, a)
+		}
+		if a := r.Action(); fieldName.MatchString(a) || conditionTypes.MatchString(a) {
+			t.Errorf("%s: action %q names an annotation, a field or a condition: plain words only (the annotation goes in Annotation)", key, a)
+		}
+		if a := r.Action(); offVocabulary.MatchString(a) {
+			t.Errorf("%s: action %q says %q: the portal's words are blueprint, data source and resources", key, a, offVocabulary.FindString(a))
+		}
+		if c := r.Control(); c != "" && (!portalControls[c] || !strings.Contains(r.Action(), c)) {
+			t.Errorf("%s: control %q is not one of %v, or the action does not name it", key, c, portalControls)
+		}
+		if a := r.Annotation(); a != nil && !strings.HasPrefix(a.Name, "krateo.io/") {
+			t.Errorf("%s: annotation %q is not a krateo.io/ key", key, a.Name)
+		}
+		if a := r.Annotation(); a != nil {
+			ja := &jsonAnnotation{Name: a.Name, Op: string(a.Op), Value: a.Value}
+			if why := annotationProblem(ja); why != "" {
+				t.Errorf("%s: annotation %s: %s", key, a.Name, why)
+			}
+			if want, pinned := annotationOpByKey[a.Name]; !pinned || string(a.Op) != want {
+				t.Errorf("%s: annotation %s has op %q; %s is pinned to %q", key, a.Name, a.Op, a.Name, want)
+			}
+		}
+		if r.Action() != "" {
+			withAction++
+		}
+		for _, p := range r.DetailFields() {
+			withDetail++
+			if !declared(p) {
+				t.Errorf("%s: detail field %s is not declared in %s", key, p, statusSchema)
+			}
+		}
+	}
+	t.Logf("%d reasons, %d with an action, %d detail fields checked", len(conditionreason.Table()), withAction, withDetail)
+	if withDetail == 0 {
+		t.Fatal("no detail field was checked: the loop measured nothing")
 	}
 }
 
@@ -284,5 +457,29 @@ func TestNoConditionBuiltOutsideConditionreason(t *testing.T) {
 	}
 	for _, v := range violations {
 		t.Errorf("condition built outside internal/conditionreason: %s (use a conditionreason.Reason)", v)
+	}
+}
+
+// TestApprovedBoardCopyIsVerbatim pins the actions that are Diego-approved board copy, rev 3 (#667):
+// they are shown as written, byte for byte, and who acts is in Actors, not in the words.
+func TestApprovedBoardCopyIsVerbatim(t *testing.T) {
+	approved := map[string]string{
+		"ChartRenderable/False/TemplateRefused/composition-dynamic-controller": "Edit its values, or ask the blueprint's owner if they look right.",
+		"Ready/True/UpdateWithheldByPolicy/composition-dynamic-controller":     "Its management policy doesn't allow updates. An admin can allow them; the edit then applies.",
+	}
+	found := 0
+	for _, r := range conditionreason.Table() {
+		key := r.Type() + "/" + string(r.Status()) + "/" + r.String() + "/" + string(r.Writer())
+		want, pinned := approved[key]
+		if !pinned {
+			continue
+		}
+		found++
+		if r.Action() != want {
+			t.Errorf("%s: action %q; the Diego-approved board copy (rev 3) is %q", key, r.Action(), want)
+		}
+	}
+	if found != len(approved) {
+		t.Errorf("found %d of the %d approved rows in the registry: a key no longer matches", found, len(approved))
 	}
 }

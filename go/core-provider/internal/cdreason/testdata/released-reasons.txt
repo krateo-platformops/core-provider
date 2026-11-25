@@ -1,0 +1,59 @@
+# Every reason a core-provider release carried, one per line: condition/status/reason/writer, a tab,
+# and the release that first carried it (the reason's Since). Read by TestReleasedReasonsAreStillListed.
+# A line is never removed: a reason that leaves Table must be named in Deprecated, because consumers
+# key on the reason string and a rename or removal is breaking for them.
+# The release that ships an unreleased reason replaces its Since with the tag and appends it here:
+# RELEASE_TAG=X.Y.Z UPDATE_READY_REASONS=1 go test -tags releasegate ./internal/cdreason/ -run '^TestReasonTablesAreReleaseReady$'
+# (docs/release.md). release-tag.yaml refuses a tag while any reason is unreleased or missing here.
+ApiRefRBACComplete/False/InvalidApiRef/core-provider	2.13.72
+ApiRefRBACComplete/False/RESTActionForbidden/core-provider	2.13.72
+ApiRefRBACComplete/False/RESTActionNotFound/core-provider	2.13.72
+ApiRefRBACComplete/False/SnowplowError/core-provider	2.13.72
+ApiRefRBACComplete/False/SnowplowNotConfigured/core-provider	2.13.72
+ApiRefRBACComplete/False/SnowplowUnavailable/core-provider	2.13.72
+ApiRefRBACComplete/False/StageUnresolvable/core-provider	2.13.72
+ApiRefRBACComplete/False/Unauthorized/core-provider	2.13.72
+ApiRefRBACComplete/True/ReadSetResolved/core-provider	2.13.72
+AuthnDelegation/False/DelegationUnsupported/core-provider	2.13.79
+AuthnDelegation/True/Rendered/core-provider	2.13.79
+AuthnMappingApplied/False/AuthnNotInstalled/core-provider	2.13.97
+AuthnMappingApplied/False/MappingMissing/core-provider	2.13.129
+AuthnMappingApplied/True/Applied/core-provider	2.13.97
+AuthnMappingApplied/Unknown/NotObserved/core-provider	2.13.97
+ControllerActive/False/ScaledToZero/core-provider	2.13.84
+ControllerActive/False/Unavailable/core-provider	2.13.84
+ControllerActive/True/Running/core-provider	2.13.84
+ControllerActive/Unknown/NotObserved/core-provider	2.13.84
+MigratedValuesValid/False/ValuesRefusedByNewVersion/core-provider	2.13.125
+MigratedValuesValid/True/AllValid/core-provider	2.13.125
+MigratedValuesValid/Unknown/ValidationIncomplete/core-provider	2.13.125
+Ready/False/CreateWithheldByPolicy/provider-runtime	2.13.120
+Ready/False/Creating/core-provider	2.0.0
+Ready/False/Creating/provider-runtime	2.0.0
+Ready/False/Deleting/core-provider	2.0.0
+Ready/False/Deleting/provider-runtime	2.0.0
+Ready/False/DerivedNameTooLong/core-provider	2.13.114
+Ready/False/RemoteChartUnreachable/core-provider	2.6.0
+Ready/False/SchemaDefaultContradiction/core-provider	2.13.108
+Ready/False/Unavailable/core-provider	2.0.0
+Ready/False/ValuesSchemaMissing/core-provider	2.13.108
+Ready/True/Available/core-provider	2.0.0
+Ready/True/ScaledToZero/core-provider	2.13.84
+Ready/True/UpdateWithheldByPolicy/provider-runtime	2.13.120
+Ready/Unknown/NotObserved/provider-runtime	2.13.82
+SchemaFullyEnforced/False/ConstraintsNotEnforced/core-provider	2.13.68
+SchemaFullyEnforced/True/FullyEnforced/core-provider	2.13.68
+SchemaFullyEnforced/Unknown/OwnedByAnotherDefinition/core-provider	2.13.68
+SchemaFullyEnforced/Unknown/SchemaInferred/core-provider	2.13.117
+SpecSchemaCurrent/False/GeneratedSchemaNotLooser/core-provider	2.13.104
+SpecSchemaCurrent/False/LooserSchemaPending/core-provider	2.13.104
+SpecSchemaCurrent/True/Current/core-provider	2.13.104
+SpecSchemaCurrent/Unknown/OwnedByAnotherDefinition/core-provider	2.13.104
+Synced/False/DeletionPolicyInvalid/provider-runtime	2.13.120
+Synced/False/ManagementPolicyInvalid/provider-runtime	2.13.120
+Synced/False/ReconcileError/provider-runtime	2.0.0
+Synced/False/ReconcilePaused/provider-runtime	2.0.0
+Synced/True/ReconcileSuccess/provider-runtime	2.0.0
+ValuesSchemaAuthored/False/InferredFromValues/core-provider	2.13.117
+ValuesSchemaAuthored/True/Authored/core-provider	2.13.117
+ValuesSchemaAuthored/Unknown/OwnedByAnotherDefinition/core-provider	2.13.117
