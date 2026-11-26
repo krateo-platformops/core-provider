@@ -134,11 +134,19 @@ type Options struct {
 	// WrittenBy is this binary's stamp (core-provider#669), put on every definition status this
 	// controller writes. Zero leaves status.writtenBy as it is.
 	WrittenBy compositiondefinitionsv1alpha1.WrittenBy
+	// LeaseTimings are the composition controllers' ownership Lease timings (#660), from the same chart
+	// value the controllers read (deploy.OwnershipLeaseTimingsFromEnv). Every wait on those Leases is
+	// measured by them: a pool member's freshness (#653) and a controller leaving a pool (#652).
+	// Required: an invalid set, zero included, is refused by Setup.
+	LeaseTimings deploy.OwnershipLeaseTimings
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
 	if ManagementNamespace == "" {
 		return errNoManagementNamespace
+	}
+	if err := o.LeaseTimings.Validate(); err != nil {
+		return err
 	}
 	name := reconciler.ControllerName(compositiondefinitionsv1alpha1.CompositionDefinitionGroupKind)
 
@@ -172,7 +180,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 
 	// #653: every pool member's state is its ownership Lease, seen through this clock, which the Lease
 	// watch below feeds. The watch is limited to the management namespace by the manager's cache (main.go).
-	leases, requeue := newLeaseClock(nil), &memberRequeue{}
+	leases, requeue := newLeaseClock(nil, o.LeaseTimings), &memberRequeue{}
 	leaseInformer, err := mgr.GetCache().GetInformer(context.Background(), &coordinationv1.Lease{})
 	if err != nil {
 		return fmt.Errorf("error getting the Lease informer: %w", err)
@@ -194,6 +202,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			leases:             leases,
 			requeue:            requeue,
 			writtenBy:          o.WrittenBy,
+			leaseTimings:       o.LeaseTimings,
 		}),
 		reconciler.WithPollIntervalHook(memberPollHook(requeue)),
 		reconciler.WithTimeout(reconcileTimeout),
@@ -384,6 +393,9 @@ type connector struct {
 
 	// writtenBy is this binary's stamp (#669, Options.WrittenBy).
 	writtenBy compositiondefinitionsv1alpha1.WrittenBy
+
+	// leaseTimings: see Options.LeaseTimings.
+	leaseTimings deploy.OwnershipLeaseTimings
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -418,6 +430,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		removeDanglingRBAC: c.removeDanglingRBAC,
 		leases:             c.leases,
 		requeue:            c.requeue,
+		leaseTimings:       c.leaseTimings,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -481,6 +494,8 @@ type external struct {
 
 	leases  *leaseClock
 	requeue *memberRequeue
+	// leaseTimings: see Options.LeaseTimings. A controller leaving a pool is waited for by them.
+	leaseTimings deploy.OwnershipLeaseTimings
 
 	// connectedTarget is the KubernetesTarget these clients were built for, "" for the management
 	// cluster. See recordObservedGeneration.
@@ -2584,6 +2599,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 				AuthnNamespace:         AuthnNamespace,
 				LocalPools:             !remote,
+				LeaseTimings:           e.leaseTimings,
 			}); errors.Is(uerr, deploy.ErrPoolMemberNotDrained) {
 				// Not best effort: its pool may still be running it, and what follows removes the CRD.
 				return uerr
@@ -2621,6 +2637,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 			AuthnNamespace:         AuthnNamespace,
 			LocalPools:             !remote,
+			LeaseTimings:           e.leaseTimings,
 		}
 
 		err = deploy.Undeploy(ctx, e.kube, opts)

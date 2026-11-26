@@ -37,6 +37,7 @@ import (
 
 	"github.com/krateo-platformops/core-provider/apis"
 	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/core-provider/internal/tools/kube/watcher"
 	"github.com/krateo-platformops/plumbing/e2e"
 	xenv "github.com/krateo-platformops/plumbing/env"
@@ -223,6 +224,7 @@ func TestController(t *testing.T) {
 		if err := Setup(mgr, Options{
 			ControllerOptions: o,
 			Pluralizer:        pluralizer,
+			LeaseTimings:      deploy.OwnershipLeaseTimings{Duration: 30 * time.Second, RenewDeadline: 20 * time.Second, RetryPeriod: 5 * time.Second},
 		}); err != nil {
 			log.Info("Cannot setup controllers", "error", err)
 			os.Exit(1)

@@ -401,6 +401,7 @@ func newBench642(t *testing.T, hub, target *cluster642) *bench642 {
 		mgmt: hub.cl, mgmtDynamic: hub.dyn, apiReader: hub.cl,
 		kube: target.cl, dynamic: target.dyn, client: target.cs, remote: hub != target,
 		log: logging.NewNopLogger(), pluralizer: notFoundPluralizer{},
+		leaseTimings: envtestLeaseTimings,
 	}
 	b.r = reconciler.NewReconciler(&fake.Manager{Client: hub.cl, Scheme: hub.cl.Scheme()},
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),

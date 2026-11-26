@@ -27,13 +27,9 @@ import (
 // "Per-member readiness, by its Lease"). A pool's pod is one process for every member, so its
 // Deployment says whether the process runs, not whether a member does: a member that failed in a
 // healthy process, and one that never started, both sit behind a Deployment that reads Available. Each
-// member's controller holds the Lease templates.ControllerLeaseName names, renewed every 2s while it
-// reconciles, and released when it stops. That is read here, on top of the Deployment's verdict.
-
-// memberGrace is G (deploy.OwnershipLeaseTimings.MemberGrace, 20s at the default timings). A same-key
-// replacement holds the Lease through its drain, and the successor takes it within Quiet, so a bump
-// flips nobody.
-func memberGrace() time.Duration { return deploy.LeaseTimings.MemberGrace() }
+// member's controller holds the Lease templates.ControllerLeaseName names, renewed every retryPeriod (5s
+// at the default timings, #660) while it reconciles, and released when it stops. That is read here, on
+// top of the Deployment's verdict.
 
 // leaseRecord is what this process has seen of one Lease: the Lease as last seen, and when, on this
 // process's clock. initial: seen only in the informer's first list, so no renewal has been seen yet.
@@ -48,7 +44,10 @@ type leaseRecord struct {
 // client-go's own rule (a record unchanged for leaseDurationSeconds belongs to a holder that is gone),
 // so no two clocks are compared.
 type leaseClock struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// timings are the ones the controllers run with (#660, Options.LeaseTimings): G, and the duration of
+	// a Lease that does not say its own.
+	timings deploy.OwnershipLeaseTimings
 	now     func() time.Time
 	records map[string]leaseRecord
 	// missing: when this process first looked for a Lease that did not exist.
@@ -56,11 +55,11 @@ type leaseClock struct {
 	synced  func() bool
 }
 
-func newLeaseClock(now func() time.Time) *leaseClock {
+func newLeaseClock(now func() time.Time, timings deploy.OwnershipLeaseTimings) *leaseClock {
 	if now == nil {
 		now = time.Now
 	}
-	return &leaseClock{now: now, records: map[string]leaseRecord{}, missing: map[string]time.Time{}, synced: func() bool { return true }}
+	return &leaseClock{timings: timings, now: now, records: map[string]leaseRecord{}, missing: map[string]time.Time{}, synced: func() bool { return true }}
 }
 
 // observe records a Lease event and says whether it can change a member's verdict: a holder that
@@ -83,7 +82,7 @@ func (c *leaseClock) observe(l *coordinationv1.Lease, initial, deleted bool) (wa
 	if !had {
 		return true
 	}
-	return holderOf(prev.lease) != holderOf(l) || now.Sub(prev.at) >= leaseDuration(prev.lease)
+	return holderOf(prev.lease) != holderOf(l) || now.Sub(prev.at) >= leaseDuration(prev.lease, c.timings)
 }
 
 func holderOf(l *coordinationv1.Lease) string {
@@ -93,11 +92,11 @@ func holderOf(l *coordinationv1.Lease) string {
 	return *l.Spec.HolderIdentity
 }
 
-func leaseDuration(l *coordinationv1.Lease) time.Duration {
+func leaseDuration(l *coordinationv1.Lease, t deploy.OwnershipLeaseTimings) time.Duration {
 	if l != nil && l.Spec.LeaseDurationSeconds != nil && *l.Spec.LeaseDurationSeconds > 0 {
 		return time.Duration(*l.Spec.LeaseDurationSeconds) * time.Second
 	}
-	return deploy.LeaseTimings.Duration // a Lease that does not say: the timings the controllers run with
+	return t.Duration // a Lease that does not say: the timings the controllers run with
 }
 
 // memberKind is what a member's Lease says, beside a pool Deployment that has rolled out.
@@ -137,9 +136,9 @@ func (c *leaseClock) state(pool string, gvr schema.GroupVersionResource, namespa
 			first = now
 			c.missing[name] = first
 		}
-		return notHeld(namespace+"/"+name, "", first, now)
+		return notHeld(namespace+"/"+name, "", first, now, c.timings)
 	}
-	return leaseVerdict(namespace+"/"+name, pool, rec, now)
+	return leaseVerdict(namespace+"/"+name, pool, rec, now, c.timings)
 }
 
 // leaseVerdict is the decision, a pure function of what was seen and when.
@@ -150,8 +149,11 @@ func (c *leaseClock) state(pool string, gvr schema.GroupVersionResource, namespa
 //     only then); after that it is stale, because a held Lease would have been renewed in between.
 //   - Held by a pod of cdc-pool-<pool> (the Deployment's pods are named <Deployment>-<hash>-<suffix>) is
 //     the pool running the member; held by anyone else is a hand-over in progress.
-func leaseVerdict(name, pool string, rec leaseRecord, now time.Time) memberState {
-	l, dur := rec.lease, leaseDuration(rec.lease)
+//   - Not held by the pool reads Unavailable after G (t.MemberGrace: the controllers' leaseDuration plus
+//     Quiet, 42.5s at the default 30s/20s/5s). A same-key replacement holds the Lease through its drain,
+//     and the successor takes it within Quiet, so a bump flips nobody.
+func leaseVerdict(name, pool string, rec leaseRecord, now time.Time, t deploy.OwnershipLeaseTimings) memberState {
+	l, dur := rec.lease, leaseDuration(rec.lease, t)
 	holder := holderOf(l)
 	fresh, freshUntil := false, rec.at.Add(dur)
 	switch {
@@ -168,7 +170,7 @@ func leaseVerdict(name, pool string, rec leaseRecord, now time.Time) memberState
 		fresh = now.Before(freshUntil)
 	}
 	if fresh && strings.HasPrefix(holder, deploy.PoolNames(pool).Workload+"-") {
-		return memberState{kind: memberRunning, lease: name, holder: holder, recheck: freshUntil.Add(memberGrace())}
+		return memberState{kind: memberRunning, lease: name, holder: holder, recheck: freshUntil.Add(t.MemberGrace())}
 	}
 	if fresh {
 		return memberState{kind: memberTakingOver, lease: name, holder: holder}
@@ -182,12 +184,12 @@ func leaseVerdict(name, pool string, rec leaseRecord, now time.Time) memberState
 		// restart costs G, never a false Unavailable.
 		since = rec.at
 	}
-	return notHeld(name, holder, since, now)
+	return notHeld(name, holder, since, now, t)
 }
 
-func notHeld(name, holder string, since, now time.Time) memberState {
-	if now.Sub(since) < memberGrace() {
-		return memberState{kind: memberStarting, lease: name, holder: holder, since: since, recheck: since.Add(memberGrace())}
+func notHeld(name, holder string, since, now time.Time, t deploy.OwnershipLeaseTimings) memberState {
+	if g := t.MemberGrace(); now.Sub(since) < g {
+		return memberState{kind: memberStarting, lease: name, holder: holder, since: since, recheck: since.Add(g)}
 	}
 	return memberState{kind: memberNotRunning, lease: name, holder: holder, since: since}
 }

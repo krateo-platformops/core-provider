@@ -512,6 +512,32 @@ cdc:
   # the release is "failed" and the composition reports it. Set it above your slowest single hook.
   # The CDC's pending-operation grace defaults to this plus a minute. Zero is refused (no bound).
   helmTimeout: 15m
+  # ownershipLease (#660): the timings of the coordination.k8s.io Lease every composition controller
+  # holds while it reconciles its Kind x version (docs/design/cdc-pooling.md, step 2), as Go durations,
+  # client-go's leader-election leaseDuration / renewDeadline / retryPeriod. ONE value for both binaries:
+  # it is rendered under the same three env names (COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION,
+  # _RENEW_DEADLINE, _RETRY_PERIOD) into every controller's ConfigMap, dedicated and pool, and into
+  # core-provider's own, which measures every wait on these Leases by them (a pool member's freshness and
+  # its grace G = duration + 2.5 x retryPeriod, #653; a controller leaving a pool, #652).
+  #
+  # The write load at rest: a holder renews every retryPeriod, one Lease PUT per controller per
+  # retryPeriod. The old 2s (unstructured-runtime's 15s/10s/2s) was 0.5 PUT/s per controller, ~25/s for
+  # 50 controllers, the largest write load of a SQLite (kine) tenant control plane at rest; 5s is 0.2/s,
+  # ~10/s for 50.
+  #
+  # The costs: a controller pod that dies WITHOUT releasing its Lease, and is replaced by a pod of another
+  # name, is waited for up to `duration` (30s, was 15s) before the replacement reconciles. A graceful
+  # rollout releases at once, but the new pod takes the Lease at its next attempt, within 2.2 x
+  # retryPeriod (client-go's jitter): 11s, was 4.4s. A container restart in the same pod reacquires at
+  # once (it already holds it). A pool member reads Unavailable after G, 42.5s (was 20s).
+  #
+  # The three are a set, all required: duration > renewDeadline > retryPeriod x 1.2 (client-go's
+  # JitterFactor), every one > 0. The chart refuses to render, and both binaries refuse to start, on a
+  # set that breaks the rule.
+  ownershipLease:
+    duration: 30s
+    renewDeadline: 20s
+    retryPeriod: 5s
   # Probes (#333). Without them a CDC whose informer can never list its resource (its CRD version
   # is no longer served) reports Ready=true for as long as its process runs: measured for four days
   # on five controllers logging `"Failed to watch" ... failed to list *unstructured.Unstructured: the

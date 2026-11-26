@@ -25,7 +25,7 @@ func (e *external) poolOptions(cr *compositiondefinitionsv1alpha1.CompositionDef
 		return nil
 	}
 	return &deploy.PoolOptions{
-		Namespace: controllerNamespace(cr), DynClient: e.mgmtDynamic, KubeClient: e.mgmt,
+		Namespace: controllerNamespace(cr), DynClient: e.mgmtDynamic, KubeClient: e.mgmt, LeaseTimings: e.leaseTimings,
 		Assets: deploy.PoolAssets{
 			SizingPath: PoolSizingPath, ConfigmapTemplatePath: PoolConfigmapTemplatePath,
 			DeploymentTemplatePath: PoolDeploymentTemplatePath, AuthnURL: AuthnURL,

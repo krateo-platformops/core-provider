@@ -278,7 +278,7 @@
     },
     "env": {
       "type": "object",
-      "title": "Environment variables",
+      "title": "Environment variables of core-provider's own ConfigMap. The COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_* keys are refused: cdc.ownershipLease renders them, for core-provider and every controller at once, so a copy here would make a duplicate key. Use cdc.ownershipLease.",
       "additionalProperties": {
         "type": "string"
       },
@@ -291,6 +291,25 @@
       },
       "default": {
         "CORE_PROVIDER_DEBUG": "false"
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION"
+            ]
+          },
+          {
+            "required": [
+              "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RENEW_DEADLINE"
+            ]
+          },
+          {
+            "required": [
+              "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RETRY_PERIOD"
+            ]
+          }
+        ]
       }
     },
     "apiRefRBAC": {
@@ -585,7 +604,7 @@
         },
         "env": {
           "type": "object",
-          "title": "Environment variables, rendered into each CDC's ConfigMap and read via envFrom. GOMEMLIMIT is REFUSED here: the deployment sets it as a container env var, which takes precedence over envFrom, so a value set here would be silently ignored. Use cdc.goMemLimit instead. COMPOSITION_CONTROLLER_HELM_TIMEOUT is refused too: cdc.helmTimeout renders that key, and a second copy would make a duplicate key in the ConfigMap. Use cdc.helmTimeout.",
+          "title": "Environment variables, rendered into each CDC's ConfigMap and read via envFrom. GOMEMLIMIT is REFUSED here: the deployment sets it as a container env var, which takes precedence over envFrom, so a value set here would be silently ignored. Use cdc.goMemLimit instead. COMPOSITION_CONTROLLER_HELM_TIMEOUT is refused too: cdc.helmTimeout renders that key, and a second copy would make a duplicate key in the ConfigMap. Use cdc.helmTimeout. The COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_* keys are refused for the same reason: cdc.ownershipLease renders them, for the controllers and core-provider at once. Use cdc.ownershipLease.",
           "additionalProperties": {
             "type": "string"
           },
@@ -619,6 +638,21 @@
                 "required": [
                   "COMPOSITION_CONTROLLER_HELM_TIMEOUT"
                 ]
+              },
+              {
+                "required": [
+                  "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION"
+                ]
+              },
+              {
+                "required": [
+                  "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RENEW_DEADLINE"
+                ]
+              },
+              {
+                "required": [
+                  "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RETRY_PERIOD"
+                ]
               }
             ]
           }
@@ -633,6 +667,41 @@
           "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
           "title": "helm Timeout for every install/upgrade/rollback/uninstall a CDC runs, as a Go duration (e.g. 15m, 1h30m). helm applies it to EACH hook and each resource wait, not to the whole operation: a hook that does not finish within it fails the operation instead of holding it forever (#410). Set it above the slowest single hook. Zero is refused: it would mean no bound.",
           "default": "15m"
+        },
+        "ownershipLease": {
+          "type": "object",
+          "title": "Ownership Lease timings of every composition controller (#660), as Go durations: client-go's leaseDuration / renewDeadline / retryPeriod. ONE value for both binaries: rendered under the same env names (COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION, _RENEW_DEADLINE, _RETRY_PERIOD) into every controller's ConfigMap and into core-provider's, which measures every wait on these Leases by them. A holder renews every retryPeriod (one Lease write per controller per retryPeriod at rest); a pod that dies without releasing its Lease is waited for up to duration. Required as a set: duration > renewDeadline > retryPeriod x 1.2, every one > 0; the chart refuses to render, and both binaries to start, otherwise.",
+          "additionalProperties": false,
+          "required": [
+            "duration",
+            "renewDeadline",
+            "retryPeriod"
+          ],
+          "properties": {
+            "duration": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "title": "leaseDuration: how long a holder that stops renewing keeps the Lease, so how long a successor waits for a pod that died without releasing it",
+              "default": "30s"
+            },
+            "renewDeadline": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "title": "renewDeadline: how long a holder keeps trying to renew before it gives the Lease up and stops reconciling",
+              "default": "20s"
+            },
+            "retryPeriod": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "title": "retryPeriod: how often a holder renews (its Lease write rate at rest) and a candidate retries",
+              "default": "5s"
+            }
+          },
+          "default": {
+            "duration": "30s",
+            "renewDeadline": "20s",
+            "retryPeriod": "5s"
+          }
         },
         "goMemLimit": {
           "type": "string",
