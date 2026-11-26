@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/writtenby"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -29,7 +30,16 @@ import (
 // contending during a GVK handover): the next pass reads what the other wrote and writes on top of
 // it, instead of forcing a stale write through. Concurrent passes of one controller on one object
 // are the runtime's to prevent (unstructured-runtime#62).
+//
+// EVERY STATUS THE HANDLER WRITES GOES OUT HERE, so this is where status.writtenBy is stamped (#669):
+// the build stamp the entry point put on ctx (withPassContext). Stamped on the body about to be sent,
+// never a reason to send one, so a pass that changes nothing else sends back the stored stamp and the
+// apiserver records nothing. Not on mg earlier in the pass: a main-resource Update in between
+// (tools.Update) returns the stored status and would drop a stamp put on before it.
 func updateStatus(ctx context.Context, mg *unstructured.Unstructured, opts tools.UpdateOptions) (*unstructured.Unstructured, error) {
+	if err := writtenby.FromContext(ctx).Set(mg); err != nil {
+		return nil, fmt.Errorf("setting status.writtenBy: %w", err)
+	}
 	updated, err := tools.UpdateStatus(ctx, mg, opts)
 	if apierrors.IsConflict(err) {
 		return nil, fmt.Errorf("status computed from a stale read conflicts with a newer write; "+

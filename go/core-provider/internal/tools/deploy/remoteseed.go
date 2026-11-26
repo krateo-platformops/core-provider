@@ -45,6 +45,9 @@ type RemoteSeedOptions struct {
 	APIVersion string
 	Kind       string
 	Resource   string
+	// WrittenBy is core-provider's stamp (#669), put on the shadow's status: core-provider is the
+	// only writer of it. Zero leaves status.writtenBy as it is.
+	WrittenBy compositiondefinitionsv1alpha1.WrittenBy
 }
 
 // SeedRemoteTarget makes a spoke self-sufficient for a projected cdc (Path A, Inc 1). The projected
@@ -119,6 +122,9 @@ func SeedRemoteTarget(ctx context.Context, kube client.Client, dyn dynamic.Inter
 	_ = unstructured.SetNestedField(live.Object, opts.APIVersion, "status", "apiVersion")
 	_ = unstructured.SetNestedField(live.Object, opts.Kind, "status", "kind")
 	_ = unstructured.SetNestedField(live.Object, opts.Resource, "status", "resource")
+	if w := opts.WrittenBy; w != (compositiondefinitionsv1alpha1.WrittenBy{}) {
+		_ = unstructured.SetNestedStringMap(live.Object, map[string]string{"name": w.Name, "version": w.Version, "commit": w.Commit}, "status", "writtenBy")
+	}
 	if _, err := res.UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("setting shadow CompositionDefinition status: %w", err)
 	}

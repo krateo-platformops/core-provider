@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
+	"github.com/krateo-platformops/core-provider/internal/tools/writtenby"
 	"io/fs"
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -130,6 +131,9 @@ type Options struct {
 	RemoveDanglingRBAC bool
 	// Audit records the controller's writes (core-provider#423); nil records nothing.
 	Audit *auditrec.Recorder
+	// WrittenBy is this binary's stamp (core-provider#669), put on every definition status this
+	// controller writes. Zero leaves status.writtenBy as it is.
+	WrittenBy compositiondefinitionsv1alpha1.WrittenBy
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -189,6 +193,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			audit:              o.Audit,
 			leases:             leases,
 			requeue:            requeue,
+			writtenBy:          o.WrittenBy,
 		}),
 		reconciler.WithPollIntervalHook(memberPollHook(requeue)),
 		reconciler.WithTimeout(reconcileTimeout),
@@ -376,6 +381,9 @@ type connector struct {
 	// leases and requeue: a pool member's state, by its ownership Lease (#653, memberlease.go).
 	leases  *leaseClock
 	requeue *memberRequeue
+
+	// writtenBy is this binary's stamp (#669, Options.WrittenBy).
+	writtenBy compositiondefinitionsv1alpha1.WrittenBy
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -386,8 +394,15 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
+	// #669. Connect is the first of core-provider's code in a pass, and provider-runtime writes the
+	// status at the end of every pass that reaches it, including one whose Connect fails (a remote
+	// target that cannot be reached). Stamped here so that write names this binary too. Observe
+	// stamps again after its live re-read, which replaces the object this one was put on.
+	writtenby.Set(cr, c.writtenBy)
+
 	ext := &external{
 		connectedTarget: targetNameOf(cr.Spec.Deploy),
+		writtenBy:       c.writtenBy,
 
 		audit:       c.audit,
 		mgmt:        c.kube,
@@ -470,6 +485,9 @@ type external struct {
 	// connectedTarget is the KubernetesTarget these clients were built for, "" for the management
 	// cluster. See recordObservedGeneration.
 	connectedTarget string
+
+	// writtenBy is this binary's stamp (#669, Options.WrittenBy).
+	writtenBy compositiondefinitionsv1alpha1.WrittenBy
 }
 
 // setTargetStatus records where the controller is deployed and whether that cluster is
@@ -949,6 +967,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			fresh.DeepCopyInto(cr)
 		}
 	}
+	// #669: on the object the rest of the pass builds its status on, so whatever status this pass
+	// writes names this binary. The re-read above replaced the stamp Connect put on.
+	writtenby.Set(cr, e.writtenBy)
 	deleted := meta.WasDeleted(cr)
 
 	log.Info("Observing CompositionDefinition")
@@ -1856,6 +1877,7 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 		APIVersion: gvr.GroupVersion().String(),
 		Kind:       gvk.Kind,
 		Resource:   gvr.Resource,
+		WrittenBy:  e.writtenBy,
 	}); err != nil {
 		return fmt.Errorf("seeding remote target: %w", err)
 	}

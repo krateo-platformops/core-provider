@@ -26,6 +26,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/ownership"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/writtenby"
 	"github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/ptr"
@@ -85,6 +86,10 @@ type Process struct {
 	// MetricsBindAddress serves the process's Prometheus registry ("" or "0": off). One server for
 	// the process: each member's controller would otherwise start its own on the same port.
 	MetricsBindAddress string
+
+	// WrittenBy is this binary's build stamp (core-provider#669), which every member's handler puts
+	// on each composition status it writes.
+	WrittenBy writtenby.Stamp
 }
 
 // Member is one controller the process hosts: one Kind x version, and what belongs to it alone.
@@ -133,6 +138,27 @@ func Build(ctx context.Context, p Process, members []Member) ([]Built, error) {
 	return out, nil
 }
 
+// handlerOptions is what member m's handler is built from: the process's shared parts, m's own, and
+// m's audit recorder and metrics view.
+func (p Process) handlerOptions(m Member, audit *auditrec.Recorder, mx *metrics.Metrics) *composition.HandlerOptions {
+	return &composition.HandlerOptions{
+		Kubeconfig:         p.Config,
+		Pluralizer:         p.Pluralizer,
+		PackageInfoGetter:  p.PackageInfoGetter,
+		EventRecorder:      p.EventRecorder,
+		ChartInspectorUrl:  p.ChartInspectorURL,
+		SaName:             p.SAName,
+		SaNamespace:        p.SANamespace,
+		SafeReleaseName:    p.SafeReleaseName,
+		Mapper:             p.Mapper,
+		StatusDataTemplate: m.StatusDataTemplate,
+		APIResolver:        m.APIResolver,
+		Audit:              audit,
+		Metrics:            mx,
+		WrittenBy:          p.WrittenBy,
+	}
+}
+
 // build assembles one member's controller: everything main.go used to wire for the single GVR.
 func (p Process) build(ctx context.Context, m Member) (*controller.Controller, error) {
 	log := p.Log
@@ -155,21 +181,7 @@ func (p Process) build(ctx context.Context, m Member) (*controller.Controller, e
 		return nil, fmt.Errorf("creating the audit recorder: %w", err)
 	}
 
-	handler := composition.NewHandler(&composition.HandlerOptions{
-		Kubeconfig:         p.Config,
-		Pluralizer:         p.Pluralizer,
-		PackageInfoGetter:  p.PackageInfoGetter,
-		EventRecorder:      p.EventRecorder,
-		ChartInspectorUrl:  p.ChartInspectorURL,
-		SaName:             p.SAName,
-		SaNamespace:        p.SANamespace,
-		SafeReleaseName:    p.SafeReleaseName,
-		Mapper:             p.Mapper,
-		StatusDataTemplate: m.StatusDataTemplate,
-		APIResolver:        m.APIResolver,
-		Audit:              audit,
-		Metrics:            metrics.GetInstance().With(controllerAttr),
-	})
+	handler := composition.NewHandler(p.handlerOptions(m, audit, metrics.GetInstance().With(controllerAttr)))
 
 	opts := []builder.FuncOption{
 		builder.WithLogger(log),

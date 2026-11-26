@@ -76,6 +76,9 @@ var reservedStatusFields = map[string]struct{}{
 	"installRecovery": {},
 	// #636: the consecutive failed attempts of a first install, which Ready's InstallFailing is read from.
 	"installFailures": {},
+	// #669: the binary that made the last status write. Reserved because the controller rewrites it on
+	// every status write; a blueprint mapping of the same name would be overwritten.
+	"writtenBy": {},
 }
 
 // ValidateStatusFields checks the declared status fields: non-empty forPath, no collision

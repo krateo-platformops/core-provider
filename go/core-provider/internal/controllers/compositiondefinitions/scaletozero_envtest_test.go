@@ -323,7 +323,7 @@ func TestScaleToZeroEnvtestWakeWatch(t *testing.T) {
 	}
 	// The real template path is not mounted in a test; active=1 is what the shipped chart renders
 	// (TestChartControllerReplicasReadsTheShippedTemplate).
-	if err := setupScaleToZero(mgr, live, logging.NewNopLogger(), func(schema.GroupVersionResource) (int32, error) { return 1, nil }); err != nil {
+	if err := setupScaleToZero(mgr, live, logging.NewNopLogger(), func(schema.GroupVersionResource) (int32, error) { return 1, nil }, compositiondefinitionsv1alpha1.WrittenBy{}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

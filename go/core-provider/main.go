@@ -27,6 +27,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/krateo-platformops/core-provider/apis"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/writtenby"
 	"github.com/krateo-platformops/provider-runtime/pkg/controller"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimiter"
@@ -53,6 +55,12 @@ var (
 	buildVersion = "dev"
 	buildCommit  = "unknown"
 )
+
+// writtenBy is the stamp this binary puts on every CompositionDefinition status it writes
+// (core-provider#669): its build version and commit as the build carries them.
+func writtenBy() compositiondefinitionsv1alpha1.WrittenBy {
+	return writtenby.New(buildVersion, buildCommit)
+}
 
 // main exits with run's code. run returns rather than calling os.Exit, so its deferred telemetry
 // and log shutdowns always run and flush buffered spans, metrics and log records; os.Exit inside it
@@ -301,6 +309,7 @@ func run() int {
 		Metrics:            telemetryMetrics,
 		Pluralizer:         pluralizer.New(false),
 		RemoveDanglingRBAC: *removeDanglingRBAC,
+		WrittenBy:          writtenBy(),
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
 		return 1
@@ -316,7 +325,7 @@ func run() int {
 		log.Error(err, "Cannot create the scale-to-zero client")
 		return 1
 	}
-	if err := compositiondefinitions.SetupScaleToZero(mgr, live, log, compositiondefinitions.CDCtemplateDeploymentPath); err != nil {
+	if err := compositiondefinitions.SetupScaleToZero(mgr, live, log, compositiondefinitions.CDCtemplateDeploymentPath, writtenBy()); err != nil {
 		log.Error(err, "Cannot setup the scale-to-zero controller")
 		return 1
 	}
