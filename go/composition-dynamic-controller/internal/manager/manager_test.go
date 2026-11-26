@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/ownership"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -22,6 +23,9 @@ func testProcess() Process {
 		MaxErrorRetries:         5,
 		GracefulShutdownTimeout: time.Second,
 		Workers:                 1,
+		// The timings every envtest here was written against (unstructured-runtime's defaults before
+		// #660 made them a value); a test that asserts the timings sets its own.
+		OwnershipTimings: ownership.Timings{LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second},
 	}
 }
 
