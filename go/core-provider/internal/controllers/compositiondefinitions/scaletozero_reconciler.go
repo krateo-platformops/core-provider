@@ -65,6 +65,8 @@ type scaleToZeroReconciler struct {
 	// active is the replica count a woken controller runs (the chart's cdc.replicaCount).
 	active func(gvr schema.GroupVersionResource) (int32, error)
 	now    func() time.Time
+	// writtenBy is this binary's stamp (#669), carried by every status patch this reconciler sends.
+	writtenBy compositiondefinitionsv1alpha1.WrittenBy
 
 	ctrl    controller.Controller
 	watched sync.Map // schema.GroupVersionKind -> struct{}
@@ -266,13 +268,19 @@ func scaleToZeroPatch(st *compositiondefinitionsv1alpha1.ScaleToZeroStatus) any 
 }
 
 // persist writes status.scaleToZero with a merge patch on that field only, and only when it
-// changed, so the reconciler adds no write while nothing changes. nil removes it.
+// changed, so the reconciler adds no write while nothing changes. nil removes it. A patch it does
+// send also carries status.writtenBy (#669): it is a status write by this binary. The stamp is
+// decided after the no-change return, so it never causes a write.
 func (r *scaleToZeroReconciler) persist(ctx context.Context, cd *compositiondefinitionsv1alpha1.CompositionDefinition,
 	st *compositiondefinitionsv1alpha1.ScaleToZeroStatus) error {
 	if reflect.DeepEqual(cd.Status.ScaleToZero, st) {
 		return nil
 	}
-	body, err := json.Marshal(map[string]any{"status": map[string]any{"scaleToZero": scaleToZeroPatch(st)}})
+	status := map[string]any{"scaleToZero": scaleToZeroPatch(st)}
+	if r.writtenBy != (compositiondefinitionsv1alpha1.WrittenBy{}) {
+		status["writtenBy"] = r.writtenBy
+	}
+	body, err := json.Marshal(map[string]any{"status": status})
 	if err != nil {
 		return err
 	}
@@ -326,22 +334,26 @@ func (r *scaleToZeroReconciler) definitionsOf(gvk schema.GroupVersionKind) handl
 // SetupScaleToZero registers the scale-to-zero reconciler (#393). live must be built with
 // client.New (the helper reads live and paginates); templatePath is the shipped controller
 // Deployment template, the source of the replica count a controller is woken to.
-func SetupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, templatePath string) error {
+// writtenBy is this binary's stamp (#669), put on every status patch the reconciler sends.
+func SetupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, templatePath string,
+	writtenBy compositiondefinitionsv1alpha1.WrittenBy) error {
 	return setupScaleToZero(mgr, live, log, func(gvr schema.GroupVersionResource) (int32, error) {
 		return deploy.ChartControllerReplicas(templatePath, gvr)
-	})
+	}, writtenBy)
 }
 
 // setupScaleToZero is SetupScaleToZero with the replica source injected, so a test runs the real
 // controller without the mounted chart template.
-func setupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, active func(schema.GroupVersionResource) (int32, error)) error {
+func setupScaleToZero(mgr ctrl.Manager, live client.Client, log logging.Logger, active func(schema.GroupVersionResource) (int32, error),
+	writtenBy compositiondefinitionsv1alpha1.WrittenBy) error {
 	r := &scaleToZeroReconciler{
-		kube:   mgr.GetClient(),
-		live:   live,
-		cache:  mgr.GetCache(),
-		log:    log.WithValues("controller", "scaletozero"),
-		active: active,
-		now:    time.Now,
+		kube:      mgr.GetClient(),
+		live:      live,
+		cache:     mgr.GetCache(),
+		log:       log.WithValues("controller", "scaletozero"),
+		active:    active,
+		now:       time.Now,
+		writtenBy: writtenBy,
 	}
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("compositiondefinition-scaletozero").

@@ -29,6 +29,7 @@ import (
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/dynamic"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/writtenby"
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
@@ -57,6 +58,12 @@ var (
 	buildVersion = "dev"
 	buildCommit  = "unknown"
 )
+
+// writtenBy is the stamp this binary puts on every composition status it writes (core-provider#669):
+// its build version and commit as the build carries them.
+func writtenBy() writtenby.Stamp {
+	return writtenby.Stamp{Version: buildVersion, Commit: buildCommit}
+}
 
 func main() {
 	// Flags
@@ -416,6 +423,7 @@ func main() {
 		PodNamespace:            os.Getenv("POD_NAMESPACE"),
 		PodName:                 os.Getenv("POD_NAME"),
 		MetricsBindAddress:      metricsBindAddress,
+		WrittenBy:               writtenBy(),
 	}
 	if *poolIndex != "" {
 		// The members share ONE governor, Shared, whose ceiling is the pool's total (#561). The

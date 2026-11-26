@@ -39,6 +39,8 @@ func baselineStatusWrites() map[string]any {
 		"installFailures": map[string]any{"count": int64(3), "lastAt": "2026-11-23T21:00:00Z", "lastError": "failed post-install"},
 		// The durable record of an automatic first-install recovery (#629, #636).
 		"installRecovery": map[string]any{"kind": "Retried", "lastAt": "2026-11-23T21:00:00Z", "count": int64(2), "reason": "Failed", "message": "the first install failed (revision 1)", "revision": int64(1)},
+		// The binary that made the last status write (#669): the cdc stamps it on every status write.
+		"writtenBy": map[string]any{"name": "composition-dynamic-controller", "version": "2.13.135", "commit": "0123abcd"},
 	}
 }
 

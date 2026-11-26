@@ -296,6 +296,16 @@ spec:
             type: object
           status:
             properties:
+              writtenBy:
+                type: object
+                description: 'The binary that made the last status write (#669).'
+                properties:
+                  name:
+                    type: string
+                  version:
+                    type: string
+                  commit:
+                    type: string
               installFailures:
                 type: object
                 description: 'The consecutive attempts of this composition''s first install that failed (#636). Removed once a revision is deployed.'

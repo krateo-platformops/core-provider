@@ -184,6 +184,24 @@
           "description": "The helm revision the last retry was of. Removed once a revision is deployed."
         }
       }
+    },
+    "writtenBy": {
+      "type": "object",
+      "description": "The binary that made this composition's last status write (core-provider#669). name is composition-dynamic-controller, whose conditions are listed in docs/ready-reasons.json; version is the core-provider repository tag to read that table at (dev on a build that was not stamped). It names the LAST status write only: a condition that write did not rewrite can still carry an earlier binary's text. On a remote composition's hub copy it is the spoke controller's, copied with the rest of the status. NO DEFAULT: absent means the last status write came from a controller older than this field (or a CRD that predates it, which prunes it).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The binary: composition-dynamic-controller."
+        },
+        "version": {
+          "type": "string",
+          "description": "Its build version: the bare core-provider repository tag on a release build (e.g. 2.13.135), dev on a build that was not stamped."
+        },
+        "commit": {
+          "type": "string",
+          "description": "The commit it was built from, unknown on a build that was not stamped."
+        }
+      }
     }
   }
 }

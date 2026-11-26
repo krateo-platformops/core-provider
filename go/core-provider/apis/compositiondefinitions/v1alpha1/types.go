@@ -697,6 +697,28 @@ type CompositionDefinitionStatus struct {
 	// every Observe; empty when nothing is held. Written by the definition's own reconciler.
 	// +optional
 	ServedVersionsHeld []HeldVersion `json:"servedVersionsHeld,omitempty"`
+
+	// WrittenBy: the binary that made this definition's last status write (core-provider#669). Its
+	// name is "core-provider", whose conditions are listed in docs/cd-ready-reasons.json, and its
+	// version is the core-provider repository tag to read that table at. It names the LAST status
+	// write only: a condition that write did not rewrite (a type a newer version no longer writes) can
+	// still carry an earlier binary's text. Set on the object the pass is about to write anyway, never
+	// a reason for a write, so a pass that changes nothing else writes nothing; a pass that ends before
+	// core-provider's own code runs (a paused definition) leaves it as it was. ABSENT: the last status
+	// write came from a core-provider older than this field.
+	// +optional
+	WrittenBy *WrittenBy `json:"writtenBy,omitempty"`
+}
+
+// WrittenBy names a binary by its build stamp (core-provider#669).
+type WrittenBy struct {
+	// Name is the binary: "core-provider" on a CompositionDefinition.
+	Name string `json:"name"`
+	// Version is the binary's build version: the bare core-provider repository tag on a release
+	// build (e.g. 2.13.135), "dev" on a build that was not stamped. Written as the build carries it.
+	Version string `json:"version"`
+	// Commit is the commit the binary was built from, "unknown" on a build that was not stamped.
+	Commit string `json:"commit"`
 }
 
 // HeldVersion is one served version the prune keeps, with the reason (#471).

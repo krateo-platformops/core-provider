@@ -188,6 +188,45 @@ window. The window is 4x the slowest Installer reconcile pass measured on krateo
 | `SnowplowError` | Anything else, including cyclic stages and a 404 that is not snowplow's own |
 | `SnowplowNotConfigured` | `apiRefRBAC.enabled` is off in the chart while the definition declares an `apiRef` |
 
+### `status.writtenBy`: which binary, and which release's reason table (#669)
+
+Every CompositionDefinition and every composition names the binary that made its **last status
+write**, readable by anyone who can read the object (no Deployment read needed):
+
+```
+status.writtenBy.name      core-provider | composition-dynamic-controller
+status.writtenBy.version   2.13.135        # the bare core-provider repository tag; dev on an unstamped build
+status.writtenBy.commit    3f9c...         # unknown on an unstamped build
+```
+
+| `name` | on | its conditions are listed in |
+|---|---|---|
+| `core-provider` | a CompositionDefinition | [`cd-ready-reasons.json`](cd-ready-reasons.json) |
+| `composition-dynamic-controller` | a composition | [`ready-reasons.json`](ready-reasons.json) |
+
+Read the table at the tag `version` names. Any `version` that is not a tag of this repository
+(`dev`, a build that was not stamped; `pr-N`, a pull request's image build; or any other value),
+or a `writtenBy` that is absent (the last write came from a release older than the field, or a
+composition CRD that predates it prunes it), means: read the table at `HEAD` and say that you did.
+
+- **The last status write only, not the author of every condition.** A condition that write did
+  not rewrite (a condition type a newer version no longer writes) can still carry an earlier
+  binary's text. Per-condition provenance, if it is ever needed, belongs on the condition.
+- **Not separate writers:** provider-runtime runs inside core-provider and unstructured-runtime
+  inside the composition-dynamic-controller, so their writes carry the binary's name. Two writes
+  do not rewrite it, and the next ordinary pass does: unstructured-runtime's own writes, which
+  patch `status.conditions` alone, and provider-runtime's write on a
+  pass that ends before core-provider's code runs (a paused definition, `krateo.io/paused`: it
+  keeps the previous binary's `writtenBy` until it is resumed).
+- **Never a write of its own.** It is set on the object the writer is about to send anyway: a
+  pass that changes nothing else sends the stored value back and the apiserver records nothing
+  (resourceVersion unchanged). After a roll, the new binary's first status write carries its
+  version.
+- **A remote composition's hub copy** carries the spoke controller's `writtenBy`, copied with the
+  rest of its status by core-provider's mirror: the conditions are the spoke controller's.
+- `version` is written as the build carries it: release images are built with the bare git tag;
+  it is never rewritten to look like one.
+
 ### The GVK a blueprint must pin
 
 **Read it from the status; never re-derive it.**
@@ -264,7 +303,8 @@ in the referencing object's own namespace (no cross-namespace targeting).
 
 For each definition the engine generates a CRD: group `composition.krateo.io`,
 version `v<chart-version-dashed>`, kind = Pascalized chart name; `spec` = the chart's
-`values.schema.json`; `status` = baseline keys + any `statusDataTemplate` paths. One
+`values.schema.json`; `status` = baseline keys (among them `writtenBy`, described under the
+definition's status above) + any `statusDataTemplate` paths. One
 CRD per (group, kind) carries **many served versions** plus a permissive `vacuum`
 storage version; conversion is always `None`; instances get the
 `krateo.io/composition-version` label stamped by the chart-shipped

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/conditionreason"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/writtenby"
 	"github.com/krateo-platformops/plumbing/versionname"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -166,6 +167,9 @@ type HandlerOptions struct {
 	// timings), carrying krateo.composition.gvr (docs/design/cdc-pooling.md step 3). Nil uses the
 	// process instance, as before.
 	Metrics *metrics.Metrics
+	// WrittenBy is this binary's build stamp (core-provider#669), put on every composition status
+	// the handler writes as status.writtenBy. Zero leaves the field as it is.
+	WrittenBy writtenby.Stamp
 }
 
 // APIResolver resolves the apiRef's RESTAction (via snowplow, under the CDC's authn identity)
@@ -190,6 +194,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		apiResolver:        opts.APIResolver,
 		audit:              opts.Audit,
 		metrics:            opts.Metrics,
+		writtenBy:          opts.WrittenBy,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
 	}
 }
@@ -222,8 +227,11 @@ type handler struct {
 	saNamespace       string
 	// audit records every helm child write (core-provider#423); nil records nothing.
 	audit *auditrec.Recorder
-	// metrics is HandlerOptions.Metrics; withMetrics puts it in each entry point's ctx.
+	// metrics is HandlerOptions.Metrics; withPassContext puts it in each entry point's ctx.
 	metrics *metrics.Metrics
+	// writtenBy is HandlerOptions.WrittenBy; withPassContext puts it in each entry point's ctx, and
+	// updateStatus stamps it on every status the handler writes (#669).
+	writtenBy writtenby.Stamp
 	// Feature flag to disable random suffix in Helm release names. This is highly discouraged as it can lead to release name collisions, but it can be useful for certain complex charts that have issues with long release names.
 	safeReleaseName bool
 	// statusDataTemplate are the declarative ${ jq } status projections from the
@@ -288,7 +296,7 @@ func logMappingRetry(ctx context.Context, r helm.MappingRetry) {
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (observation controller.ExternalObservation, rerr error) {
-	ctx = h.withMetrics(ctx)
+	ctx = h.withPassContext(ctx)
 	// #381: on every return, say so when a graceful pause is requested but not yet in effect. Deferred,
 	// so the body (and every guard test that reads it) stays where it was.
 	defer func() { observation, rerr = withGracefulPausePending(mg, observation, rerr) }()
@@ -1045,7 +1053,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 			err = controller.CreateNotCommitted(err)
 		}
 	}()
-	ctx = h.withMetrics(ctx)
+	ctx = h.withPassContext(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationCreate)
 
@@ -1320,7 +1328,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) (er
 }
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {
-	ctx = h.withMetrics(ctx)
+	ctx = h.withPassContext(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationUpdate)
 
@@ -1625,7 +1633,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 }
 
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
-	ctx = h.withMetrics(ctx)
+	ctx = h.withPassContext(ctx)
 	mg = mg.DeepCopy()
 	markOperation(ctx, operationDelete)
 
@@ -2265,11 +2273,13 @@ func (h *handler) uninstallRegeneratedRBAC(ctx context.Context, mg *unstructured
 	return nil
 }
 
-// withMetrics carries this controller's metrics view in ctx, so every timer below it (helm, RBAC,
-// chart-inspector) records with krateo.composition.gvr rather than as the process. Called first in
-// each entry point the runtime dispatches to.
-func (h *handler) withMetrics(ctx context.Context) context.Context {
-	return metrics.NewContext(ctx, h.metrics)
+// withPassContext is what every entry point the runtime dispatches to puts in its ctx first:
+//   - this controller's metrics view, so every timer below it (helm, RBAC, chart-inspector) records
+//     with krateo.composition.gvr rather than as the process;
+//   - this binary's build stamp (#669), so every status write below it, whichever helper makes it,
+//     goes out through updateStatus with status.writtenBy naming this binary.
+func (h *handler) withPassContext(ctx context.Context) context.Context {
+	return writtenby.NewContext(metrics.NewContext(ctx, h.metrics), h.writtenBy)
 }
 
 // syncedGracefulPausePendingMessage is Synced=False/GracefulPausePending's message (#381).
