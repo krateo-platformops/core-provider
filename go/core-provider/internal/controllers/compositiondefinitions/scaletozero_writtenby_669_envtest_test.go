@@ -41,7 +41,9 @@ func TestScaleToZeroWrittenByEnvtest(t *testing.T) {
 	cd := e.definition(t, "a", &yes, "10m", nil)
 	var patches atomic.Int32
 	e.r.kube = patchCount669{Client: e.r.kube, n: &patches}
-	w := writtenby.New("2.13.135", "c0ffee135")
+	// The expectations are literals, never built with writtenby.New: a stamp constructor that dropped its
+	// arguments would otherwise build the expectation as wrongly as the stamp, and agree with it.
+	w, wantW := writtenby.New("2.13.135", "c0ffee135"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.135", Commit: "c0ffee135"}
 	e.r.writtenBy = w
 
 	read := func() *compositiondefinitionsv1alpha1.CompositionDefinition {
@@ -64,8 +66,8 @@ func TestScaleToZeroWrittenByEnvtest(t *testing.T) {
 		t.Fatalf("control: %d status patches on the pass that starts the hold-down, want 1", patches.Load())
 	}
 	got := read()
-	if got.Status.WrittenBy == nil || *got.Status.WrittenBy != w {
-		t.Fatalf("the scale-to-zero patch: status.writtenBy = %+v, want %+v", got.Status.WrittenBy, w)
+	if got.Status.WrittenBy == nil || *got.Status.WrittenBy != wantW {
+		t.Fatalf("the scale-to-zero patch: status.writtenBy = %+v, want %+v", got.Status.WrittenBy, wantW)
 	}
 
 	// Within the hold-down the decision is the same. Whatever this pass sends, the apiserver records
@@ -81,15 +83,15 @@ func TestScaleToZeroWrittenByEnvtest(t *testing.T) {
 
 	// A new binary: a patch it sends names it; a pass that sends none leaves the stored stamp. Which
 	// one happens is the reconciler's own rule (persist), not the stamp's.
-	next := writtenby.New("2.13.136", "c0ffee136")
+	next, wantNext := writtenby.New("2.13.136", "c0ffee136"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.136", Commit: "c0ffee136"}
 	e.r.writtenBy = next
 	patches.Store(0)
 	e.reconcile(t, cd)
 	after := read()
 	switch {
-	case patches.Load() > 0 && *after.Status.WrittenBy != next:
-		t.Errorf("the next binary sent a status patch and status.writtenBy = %+v, want %+v", after.Status.WrittenBy, next)
-	case patches.Load() == 0 && (after.ResourceVersion != rv || *after.Status.WrittenBy != w):
+	case patches.Load() > 0 && *after.Status.WrittenBy != wantNext:
+		t.Errorf("the next binary sent a status patch and status.writtenBy = %+v, want %+v", after.Status.WrittenBy, wantNext)
+	case patches.Load() == 0 && (after.ResourceVersion != rv || *after.Status.WrittenBy != wantW):
 		t.Errorf("no status patch, and the definition changed: resourceVersion %s -> %s, status.writtenBy %+v", rv, after.ResourceVersion, after.Status.WrittenBy)
 	}
 	if patches.Load() != sent {

@@ -66,7 +66,9 @@ func TestEnvtest_669_WrittenBy(t *testing.T) {
 	e.charts.add(t, "stamped", "1.0.0", `{"type":"object"}`)
 	d := e.define(t, "stamped", "stamped", nil)
 	var updates atomic.Int32
-	first := writtenby.New("2.13.135", "c0ffee135")
+	// The expectations are literals, never built with writtenby.New: a stamp constructor that dropped its
+	// arguments would otherwise build the expectation as wrongly as the stamp, and agree with it.
+	first, wantFirst := writtenby.New("2.13.135", "c0ffee135"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.135", Commit: "c0ffee135"}
 	d.r = e.reconciler669(first, &updates)
 	d.rest(6)
 
@@ -78,8 +80,8 @@ func TestEnvtest_669_WrittenBy(t *testing.T) {
 		}
 		return *w
 	}
-	if got := stored(); got != first {
-		t.Fatalf("at rest: status.writtenBy = %+v, want %+v", got, first)
+	if got := stored(); got != wantFirst {
+		t.Fatalf("at rest: status.writtenBy = %+v, want %+v", got, wantFirst)
 	}
 	if got := stored().Name; got != "core-provider" {
 		t.Errorf("status.writtenBy.name = %q, want core-provider", got)
@@ -104,13 +106,13 @@ func TestEnvtest_669_WrittenBy(t *testing.T) {
 	}
 
 	// A NEW BINARY. The next status write carries its version, on a pass that changes nothing else.
-	next := writtenby.New("2.13.136", "c0ffee136")
+	next, wantNext := writtenby.New("2.13.136", "c0ffee136"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.136", Commit: "c0ffee136"}
 	d.r = e.reconciler669(next, &updates)
 	if _, err := d.pass(); err != nil {
 		t.Fatal(err)
 	}
-	if got := stored(); got != next {
-		t.Errorf("after a pass by the next binary: status.writtenBy = %+v, want %+v", got, next)
+	if got := stored(); got != wantNext {
+		t.Errorf("after a pass by the next binary: status.writtenBy = %+v, want %+v", got, wantNext)
 	}
 	if d.cond(string(rtv1.TypeReady)) != "True/Available" {
 		t.Errorf("the new binary's pass changed Ready to %s", d.cond(string(rtv1.TypeReady)))
@@ -126,7 +128,7 @@ func TestEnvtest_669_WrittenByOnAConnectFailure(t *testing.T) {
 		cd.Spec.Deploy = &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "no-such-target"}}
 	})
 	var updates atomic.Int32
-	w := writtenby.New("2.13.135", "c0ffee135")
+	w, want := writtenby.New("2.13.135", "c0ffee135"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.135", Commit: "c0ffee135"}
 	d.r = e.reconciler669(w, &updates)
 	if _, err := d.pass(); err == nil {
 		t.Fatal("control: the pass succeeded, so it is not a Connect failure")
@@ -135,7 +137,7 @@ func TestEnvtest_669_WrittenByOnAConnectFailure(t *testing.T) {
 		t.Fatalf("control: Synced=%s, want the runtime's False/ReconcileError write", got)
 	}
 	got := d.cd().Status.WrittenBy
-	if got == nil || *got != w {
-		t.Errorf("the Connect failure's status write: status.writtenBy = %+v, want %+v", got, w)
+	if got == nil || *got != want {
+		t.Errorf("the Connect failure's status write: status.writtenBy = %+v, want %+v", got, want)
 	}
 }

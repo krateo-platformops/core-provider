@@ -69,11 +69,13 @@ func TestRemoteSeedWrittenByEnvtest(t *testing.T) {
 		return map[string]string{"name": w.Name, "version": w.Version, "commit": w.Commit}
 	}
 
-	first := writtenby.New("2.13.135", "c0ffee135")
+	// The expectations are literals, never built with writtenby.New: a stamp constructor that dropped its
+	// arguments would otherwise build the expectation as wrongly as the stamp, and agree with it.
+	first, wantFirst := writtenby.New("2.13.135", "c0ffee135"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.135", Commit: "c0ffee135"}
 	seed(first)
 	got, rv := shadow()
-	if len(got) != 3 || got["name"] != "core-provider" || got["version"] != first.Version || got["commit"] != first.Commit {
-		t.Fatalf("after the first seed: status.writtenBy = %v, want %v", got, want(first))
+	if len(got) != 3 || got["name"] != "core-provider" || got["version"] != wantFirst.Version || got["commit"] != wantFirst.Commit {
+		t.Fatalf("after the first seed: status.writtenBy = %v, want %v", got, want(wantFirst))
 	}
 
 	// The seed re-writes the shadow on every Observe of a remote definition; the same binary writes
@@ -83,9 +85,9 @@ func TestRemoteSeedWrittenByEnvtest(t *testing.T) {
 		t.Errorf("a re-seed by the same binary moved the shadow's resourceVersion %s -> %s", rv, again)
 	}
 
-	next := writtenby.New("2.13.136", "c0ffee136")
+	next, wantNext := writtenby.New("2.13.136", "c0ffee136"), compositiondefinitionsv1alpha1.WrittenBy{Name: "core-provider", Version: "2.13.136", Commit: "c0ffee136"}
 	seed(next)
-	if got, _ := shadow(); got["version"] != next.Version || got["commit"] != next.Commit {
-		t.Errorf("after a seed by the next binary: status.writtenBy = %v, want %v", got, want(next))
+	if got, _ := shadow(); got["version"] != wantNext.Version || got["commit"] != wantNext.Commit {
+		t.Errorf("after a seed by the next binary: status.writtenBy = %v, want %v", got, want(wantNext))
 	}
 }
