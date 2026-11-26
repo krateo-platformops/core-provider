@@ -204,9 +204,10 @@ status.writtenBy.commit    3f9c...         # unknown on an unstamped build
 | `core-provider` | a CompositionDefinition | [`cd-ready-reasons.json`](cd-ready-reasons.json) |
 | `composition-dynamic-controller` | a composition | [`ready-reasons.json`](ready-reasons.json) |
 
-Read the table at the tag `version` names. When `version` is not a tag (`dev`: a build that was
-not stamped) or `writtenBy` is absent (the last write came from a release older than the field,
-or a composition CRD that predates it prunes it), read the table at `HEAD` and say that you did.
+Read the table at the tag `version` names. Any `version` that is not a tag of this repository
+(`dev`, a build that was not stamped; `pr-N`, a pull request's image build; or any other value),
+or a `writtenBy` that is absent (the last write came from a release older than the field, or a
+composition CRD that predates it prunes it), means: read the table at `HEAD` and say that you did.
 
 - **The last status write only, not the author of every condition.** A condition that write did
   not rewrite (a condition type a newer version no longer writes) can still carry an earlier

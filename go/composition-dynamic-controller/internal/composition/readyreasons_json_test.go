@@ -62,9 +62,10 @@ const writtenByNotice = "status.writtenBy names the binary that made the object'
 	"which table describes its conditions: " +
 	`name "` + writtenby.Name + `" (a composition): docs/ready-reasons.json; ` +
 	`name "core-provider" (a CompositionDefinition): docs/cd-ready-reasons.json. ` +
-	"status.writtenBy.version is the core-provider repository tag to read that table at; when it is not a tag " +
-	"(dev, a build that was not stamped) or status.writtenBy is absent (a writer older than the field), read the " +
-	"table at HEAD and say that you did. It names the last status write only, not the author of every condition: " +
+	"status.writtenBy.version is the core-provider repository tag to read that table at. Any version that is not " +
+	"a tag of this repository (dev, an unstamped build; pr-N, a pull request's build; or any other value), or a " +
+	"status.writtenBy that is absent (a writer older than the field), means: read the table at HEAD and say that " +
+	"you did. It names the last status write only, not the author of every condition: " +
 	"a condition that write did not rewrite (such as a type a newer version no longer writes) can still carry an " +
 	"earlier binary's text, and per-condition provenance, if ever needed, belongs on the condition. " +
 	"unstructured-runtime and provider-runtime run inside the composition-dynamic-controller and core-provider " +
