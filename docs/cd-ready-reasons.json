@@ -1395,10 +1395,9 @@
         "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
       },
       "sinceVersion": "unreleased",
-      "action": "Shrink the blueprint's API reference extras, or an admin raises the request-header limit of the gateway in front of snowplow.",
+      "action": "Shrink the blueprint's API reference extras.",
       "actors": [
-        "maintainers",
-        "admin"
+        "maintainers"
       ],
       "detailFields": [
         "status.apiRefRBAC.unresolvedCompositions"
@@ -1406,16 +1405,15 @@
       "cases": [
         {
           "writer": "core-provider",
-          "meaning": "a composition's extras are too large for snowplow's /rbac request (HTTP 431: the request's headers, the path and the bearer included, exceed a limit of snowplow or of the gateway in front of it); that composition's reads are not granted and its existing Roles are kept (never narrowed), nothing is granted cluster-wide in their place, and every other composition is resolved as usual, so the definition is not held; the message and status.apiRefRBAC.unresolvedCompositions name them (namespace/name)",
+          "meaning": "a composition's extras are too large for snowplow's /rbac request (HTTP 431: the request's headers, the path and the bearer included, exceed a limit; on the default direct path, core-provider calling the snowplow Service, it is snowplow's Go default of about 1 MiB, and through a gateway (apiRefRBAC.snowplowUrl pointing at one) it is the gateway's header budget, about 16 KiB with the bearer and path included; if extras ever legitimately exceed it, the fix is a request-body transport for /rbac in snowplow, not a wider limit); that composition's reads are not granted and its existing Roles are kept (never narrowed), nothing is granted cluster-wide in their place, and every other composition is resolved as usual, so the definition is not held; the message and status.apiRefRBAC.unresolvedCompositions name them (namespace/name)",
           "clearance": {
             "kind": "indefinite",
             "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
           },
           "sinceVersion": "unreleased",
-          "action": "Shrink the blueprint's API reference extras, or an admin raises the request-header limit of the gateway in front of snowplow.",
+          "action": "Shrink the blueprint's API reference extras.",
           "actors": [
-            "maintainers",
-            "admin"
+            "maintainers"
           ],
           "detailFields": [
             "status.apiRefRBAC.unresolvedCompositions"
