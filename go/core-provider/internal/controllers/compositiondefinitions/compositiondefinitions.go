@@ -1226,6 +1226,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			cr.SetConditions(specSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(valuesSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(schemaDefaultsOwnedElsewhereCondition(owner.Namespace, owner.Name))
+			cr.Status.SchemaDefaults = nil // the owner's status carries the list
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner, specSchemaBytes)
 		}
 		// #387: the owner now, so a follower's Ready message no longer describes this definition.
@@ -1243,7 +1244,10 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// the current render (the cache returns the warnings with the CRD); Events fire only when the
 	// render actually ran.
 	cr.SetConditions(schemaSourceConditions(specSchema, generated.Warnings)...)
-	cr.SetConditions(schemaDefaultsCondition(specSchema, defaultsNotUsed)) // #686
+	// #686: the condition and status.schemaDefaults come from one computation.
+	schemaDefaultsCond, schemaDefaults := schemaDefaultsCondition(specSchema, defaultsNotUsed)
+	cr.SetConditions(schemaDefaultsCond)
+	cr.Status.SchemaDefaults = schemaDefaults
 	emitSchemaEvents(e.rec, cr, generated.Warnings, generated.Fresh)
 	// #614: while instances are reported holding values the served version refuses (or unchecked),
 	// re-validate them, so the condition clears once they are fixed or gone.

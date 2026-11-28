@@ -259,6 +259,38 @@ status:
 - **Never a write of its own.** It is set on the object the pass writes anyway and only when it differs
   from what is stored: a pass that changes nothing else leaves `resourceVersion` unchanged.
 
+### `status.schemaDefaults`: where the chart's schema and values.yaml defaults disagree (#686)
+
+The `SchemaDefaultsMatchValues` condition says whether the chart's `values.schema.json` defaults agree
+with its `values.yaml` (the generated CRD follows `values.yaml`, as helm does). **Its message is human
+text, not a contract: do not parse it.** The machine-readable list is `status.schemaDefaults`:
+
+```yaml
+status:
+  schemaDefaults:
+    differ:
+      - path: restdefinitions.quota.enabled
+        schema: false          # the schema's default (a JSON value, not a string holding JSON)
+        values: true           # values.yaml's value
+        kind: valueDiffers
+      - path: restdefinitions.group.enabled
+        schema: false
+        kind: schemaDefaultWithoutValuesKey    # no `values`: values.yaml has no such key
+    dropped: 0                 # how many more differences were not listed
+```
+
+- `kind` is one of `valueDiffers` (both sides have a value), `schemaDefaultWithoutValuesKey` (`values` is
+  absent; the CRD has no default there) or `valuesValueInvalid` (values.yaml's value is refused by the
+  schema, so it was not made a default; `schema` is absent).
+- `path` is the dotted values path, the spelling the condition message uses. `schema` and `values` are
+  JSON values (`apiextensionsv1.JSON`), so a boolean is `true`, not `"true"`.
+- Sorted by `path`, at most 10 entries; `dropped` counts the rest (0 when none). The condition message
+  names the same entries in the same order: both are cut from one computed list in the same pass.
+- **Absent** when the condition is `Aligned`, when it is `OwnedByAnotherDefinition` (read the owner's
+  status) and from a core-provider older than this field. Never an empty object.
+- **Never a write of its own.** It is set on the object the pass writes anyway: a pass that changes
+  nothing else leaves `resourceVersion` unchanged.
+
 ### The GVK a blueprint must pin
 
 **Read it from the status; never re-derive it.**

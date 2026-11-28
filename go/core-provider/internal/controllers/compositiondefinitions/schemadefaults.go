@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
 	"github.com/krateo-platformops/core-provider/internal/tools/chart"
 	crdutils "github.com/krateo-platformops/core-provider/internal/tools/crd/generation"
@@ -44,17 +45,48 @@ func crdFromChart(spec chart.SpecSchemaResult, gvk schema.GroupVersionKind) (*ap
 }
 
 // schemaDefaultsCondition says whether the chart's values.schema.json defaults agree with its
-// values.yaml, which the generated CRD follows (#686). Informational: Ready does not read it. The
-// differences are sorted, so an unchanged chart produces an unchanged message.
-func schemaDefaultsCondition(spec chart.SpecSchemaResult, invalid []crdutils.DefaultDifference) rtv1.Condition {
+// values.yaml, which the generated CRD follows (#686), and returns the same differences as the
+// structured status.schemaDefaults (nil when Aligned). Informational: Ready does not read it. The
+// differences are sorted once and BOTH the message and the status list are cut from that one slice, so
+// they name the same paths in the same order and an unchanged chart produces an unchanged result.
+func schemaDefaultsCondition(spec chart.SpecSchemaResult, invalid []crdutils.DefaultDifference) (rtv1.Condition, *v1alpha1.SchemaDefaultsStatus) {
 	diffs := append(crdutils.SchemaDefaultDifferences(spec.Bytes, spec.Values), invalid...)
 	if len(diffs) == 0 {
-		return cdreason.SchemaDefaultsAligned.WithMessage("every default in the chart's values.schema.json equals the value in its values.yaml")
+		return cdreason.SchemaDefaultsAligned.WithMessage("every default in the chart's values.schema.json equals the value in its values.yaml"), nil
 	}
 	sort.SliceStable(diffs, func(i, j int) bool { return diffs[i].Path < diffs[j].Path })
-	return cdreason.SchemaDefaultsDiffer.WithMessage(fmt.Sprintf(
+	cond := cdreason.SchemaDefaultsDiffer.WithMessage(fmt.Sprintf(
 		"%d default(s) in the chart's values.schema.json disagree with its values.yaml; the generated CRD uses values.yaml's, as helm does: %s",
 		len(diffs), crdutils.DescribeDifferences(diffs, maxDefaultDifferencesInMessage)))
+	return cond, schemaDefaultsStatus(diffs, maxDefaultDifferencesInMessage)
+}
+
+// schemaDefaultsStatus is the structured form of the first max of diffs (already sorted).
+func schemaDefaultsStatus(diffs []crdutils.DefaultDifference, max int) *v1alpha1.SchemaDefaultsStatus {
+	listed := diffs
+	if len(listed) > max {
+		listed = listed[:max]
+	}
+	st := &v1alpha1.SchemaDefaultsStatus{Differ: make([]v1alpha1.SchemaDefaultDifference, 0, len(listed)), Dropped: len(diffs) - len(listed)}
+	for _, d := range listed {
+		e := v1alpha1.SchemaDefaultDifference{Path: d.Path}
+		switch {
+		case d.Invalid:
+			e.Kind = v1alpha1.SchemaDefaultValuesInvalid
+		case d.Values == "":
+			e.Kind = v1alpha1.SchemaDefaultWithoutValuesKey
+		default:
+			e.Kind = v1alpha1.SchemaDefaultValueDiffers
+		}
+		if d.Schema != "" {
+			e.Schema = &apiextensionsv1.JSON{Raw: []byte(d.Schema)}
+		}
+		if d.Values != "" {
+			e.Values = &apiextensionsv1.JSON{Raw: []byte(d.Values)}
+		}
+		st.Differ = append(st.Differ, e)
+	}
+	return st
 }
 
 // schemaDefaultsOwnedElsewhereCondition is the follower's: it does not generate the CRD.

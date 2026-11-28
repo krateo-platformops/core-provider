@@ -909,6 +909,63 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              schemaDefaults:
+                description: |-
+                  SchemaDefaults is the machine-readable list behind the SchemaDefaultsMatchValues condition
+                  (core-provider#686): where the chart's values.schema.json declares a default that its values.yaml
+                  disagrees with. The condition's MESSAGE is human text and is not a contract; read this field
+                  instead. Set in the same pass, from the same computed differences and in the same order as the
+                  message, so the two cannot disagree. ABSENT when the condition is Aligned, when it is
+                  OwnedByAnotherDefinition (the owner's status carries it), and from a core-provider older than this
+                  field: absent is never "differences unknown" and never an empty object.
+                properties:
+                  differ:
+                    description: |-
+                      Differ is the listed differences, sorted by path, in the order the condition message names them.
+                      At most 10; Dropped counts the rest.
+                    items:
+                      description: |-
+                        SchemaDefaultDifference is one path where the chart's values.schema.json and values.yaml disagree.
+                        Schema and Values are JSON values (apiextensionsv1.JSON: a boolean, number, string, array or
+                        object exactly as the chart wrote it, not a string holding JSON), which round-trips through the CRD
+                        as an untyped field.
+                      properties:
+                        kind:
+                          description: Kind is valueDiffers, schemaDefaultWithoutValuesKey
+                            or valuesValueInvalid.
+                          enum:
+                          - valueDiffers
+                          - schemaDefaultWithoutValuesKey
+                          - valuesValueInvalid
+                          type: string
+                        path:
+                          description: |-
+                            Path is the dotted values path ("restdefinitions.quota.enabled"), the spelling the condition
+                            message uses; "[]" marks an array's items and ".*" a map's values.
+                          type: string
+                        schema:
+                          description: |-
+                            Schema is the default the schema declares at Path. Absent for valuesValueInvalid, where the
+                            difference is not between two defaults.
+                          x-kubernetes-preserve-unknown-fields: true
+                        values:
+                          description: Values is values.yaml's value at Path. Absent
+                            for schemaDefaultWithoutValuesKey.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - kind
+                      - path
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  dropped:
+                    description: Dropped is how many more differences exist beyond
+                      those listed in Differ; 0 when all are listed.
+                    type: integer
+                required:
+                - differ
+                - dropped
+                type: object
               servedVersionsHeld:
                 description: |-
                   ServedVersionsHeld lists, per served version of this definition's CRD that is NOT prune-eligible
