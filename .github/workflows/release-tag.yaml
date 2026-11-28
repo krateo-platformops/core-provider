@@ -135,6 +135,12 @@ jobs:
       # charts are platform components installed by installer, not krateo-blueprints blueprints, pages or
       # operators: deliberately not indexed. A tag push publishes: dry_run stays at its default, false.
       index_channel: none
+      # core-provider's published charts are exactly helm/{core-provider,core-provider-crds,target-chart}. Without
+      # chart_root, discovery searched the whole repo, and hack/ is not in the shared prune list: the cdc's e2e
+      # fixture charts (hookprobe, crdprobe, crprobe) were packaged and pushed to the org registry as if they were
+      # products, and 2.13.138 published its images but none of its charts because #696's benchmark chart was
+      # refused by the push guard (its CompositionDefinition installs from an in-cluster URL).
+      chart_root: helm
 
   # #360. A GitHub release is a public claim that a version exists, and it used to be published at
   # tag time, about 30 minutes before the images did. Pull every artifact by tag, and require each
