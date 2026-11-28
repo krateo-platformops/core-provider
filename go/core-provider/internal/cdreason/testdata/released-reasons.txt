@@ -60,3 +60,6 @@ ValuesSchemaAuthored/Unknown/OwnedByAnotherDefinition/core-provider	2.13.117
 SchemaDefaultsMatchValues/False/SchemaDefaultsDiffer/core-provider	2.13.137
 SchemaDefaultsMatchValues/True/Aligned/core-provider	2.13.137
 SchemaDefaultsMatchValues/Unknown/OwnedByAnotherDefinition/core-provider	2.13.137
+ApiRefRBACComplete/False/ExtrasTooLarge/core-provider	2.13.138
+ApiRefRBACComplete/True/ClusterWideRows/core-provider	2.13.138
+ApiRefRBACComplete/Unknown/RolesNotDetermined/core-provider	2.13.138
