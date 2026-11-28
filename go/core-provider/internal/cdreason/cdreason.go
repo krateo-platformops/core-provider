@@ -437,11 +437,11 @@ var (
 	ApiRefClusterWide = on(TypeApiRefRBACComplete, "ClusterWideRows", metav1.ConditionTrue, WriterCoreProvider,
 		"the apiRef's read-set was resolved and its RBAC rendered, but some namespaced reads take their namespace from a prior stage's output, which no composition can resolve before the RESTAction runs: they stay in the definition's ClusterRole, named in status.apiRefRBAC.clusterWide; every other read is a Role in the namespace the compositions' reads land in",
 		Clearance{Steady, "while the RESTAction has such reads"},
-		Doc{Since: Unreleased, Action: "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.", Actors: []Actor{ActorMaintainers}, DetailFields: []string{"status.apiRefRBAC.clusterWide"}})
+		Doc{Since: "2.13.138", Action: "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.", Actors: []Actor{ActorMaintainers}, DetailFields: []string{"status.apiRefRBAC.clusterWide"}})
 	ApiRefRolesNotDetermined = on(TypeApiRefRBACComplete, "RolesNotDetermined", metav1.ConditionUnknown, WriterCoreProvider,
 		"snowplow could not be asked, or failed, while resolving a composition's reads, so which namespaces need a Role is not known; the Roles that exist are left exactly as they are (not knowing is not the same as needing none) and the pass is retried",
 		Clearance{NextPass, "retried until snowplow answers"},
-		Doc{Since: Unreleased, Action: "Wait: it is retried. If it lasts, an admin checks that snowplow is running."})
+		Doc{Since: "2.13.138", Action: "Wait: it is retried. If it lasts, an admin checks that snowplow is running."})
 
 	AuthnDelegationRendered = on(TypeAuthnDelegation, "Rendered", metav1.ConditionTrue, WriterCoreProvider,
 		"the authn mapping CRD serves spec.delegation and it is rendered onto the mapping",
@@ -543,7 +543,7 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 	restactionrbac.CauseExtrasTooLarge: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseExtrasTooLarge), metav1.ConditionFalse, WriterCoreProvider,
 		"a composition's extras are too large for snowplow's /rbac request (HTTP 431: the request's headers, the path and the bearer included, exceed a limit; on the default direct path, core-provider calling the snowplow Service, it is snowplow's Go default of about 1 MiB, and through a gateway (apiRefRBAC.snowplowUrl pointing at one) it is the gateway's header budget, about 16 KiB with the bearer and path included; if extras ever legitimately exceed it, the fix is a request-body transport for /rbac in snowplow, not a wider limit); that composition's reads are not granted and its existing Roles are kept (never narrowed), nothing is granted cluster-wide in their place, and every other composition is resolved as usual, so the definition is not held; the message and status.apiRefRBAC.unresolvedCompositions name them (namespace/name)",
 		Clearance{Indefinite, "until the composition's extras fit, or the limit is raised; retried on every pass"},
-		Doc{Since: Unreleased, Action: "Shrink the blueprint's API reference extras.", Actors: []Actor{ActorMaintainers}, DetailFields: []string{"status.apiRefRBAC.unresolvedCompositions"}}),
+		Doc{Since: "2.13.138", Action: "Shrink the blueprint's API reference extras.", Actors: []Actor{ActorMaintainers}, DetailFields: []string{"status.apiRefRBAC.unresolvedCompositions"}}),
 	restactionrbac.CauseNotConfigured: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseNotConfigured), metav1.ConditionFalse, WriterCoreProvider,
 		"core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef",
 		Clearance{Indefinite, "until core-provider has a snowplow URL, or the apiRef is removed"},

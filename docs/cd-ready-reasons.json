@@ -1085,7 +1085,7 @@
         "kind": "steady",
         "detail": "while the RESTAction has such reads"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.138",
       "action": "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.",
       "actors": [
         "maintainers"
@@ -1101,7 +1101,7 @@
             "kind": "steady",
             "detail": "while the RESTAction has such reads"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.138",
           "action": "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.",
           "actors": [
             "maintainers"
@@ -1124,7 +1124,7 @@
         "kind": "next pass",
         "detail": "retried until snowplow answers"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.138",
       "action": "Wait: it is retried. If it lasts, an admin checks that snowplow is running.",
       "detailFields": [],
       "cases": [
@@ -1135,7 +1135,7 @@
             "kind": "next pass",
             "detail": "retried until snowplow answers"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.138",
           "action": "Wait: it is retried. If it lasts, an admin checks that snowplow is running.",
           "detailFields": []
         }
@@ -1394,7 +1394,7 @@
         "kind": "indefinite",
         "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.138",
       "action": "Shrink the blueprint's API reference extras.",
       "actors": [
         "maintainers"
@@ -1410,7 +1410,7 @@
             "kind": "indefinite",
             "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.138",
           "action": "Shrink the blueprint's API reference extras.",
           "actors": [
             "maintainers"
