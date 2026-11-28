@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/krateo-platformops/core-provider/internal/tools/auditrec"
 	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
@@ -67,7 +68,7 @@ func ApiRefRBACGroup(ctx context.Context, dyn dynamic.Interface, gvr schema.Grou
 // could not be asked, because an empty or partial plan reads as "no namespace needs a Role" and this
 // deletes on that. A failure to LIST what exists is an error and deletes nothing.
 func ApplyApiRefRoles(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource,
-	definition client.ObjectKey, composed restactionrbac.Composed) error {
+	definition client.ObjectKey, composed restactionrbac.Composed, additive bool) error {
 	name := ApiRefRBACName(gvr)
 	labels := map[string]string{
 		ApiRefRBACLabel:                    name,
@@ -80,6 +81,19 @@ func ApplyApiRefRoles(ctx context.Context, dyn dynamic.Interface, gvr schema.Gro
 		role, binding := composed.Roles[i], composed.RoleBindings[i]
 		role.Labels, binding.Labels = labels, labels
 		want[role.Namespace] = true
+		if additive {
+			// A composition's reads are unknown (its request was refused), so what a Role already holds
+			// may be its: keep every rule it has and add what is wanted.
+			if live, err := dyn.Resource(roleGVR).Namespace(role.Namespace).Get(ctx, role.Name, metav1.GetOptions{}); err == nil {
+				var cur rbacv1.Role
+				if runtime.DefaultUnstructuredConverter.FromUnstructured(live.Object, &cur) == nil {
+					role.Rules = unionRules(cur.Rules, role.Rules)
+				}
+			} else if !apierrors.IsNotFound(err) {
+				errs = append(errs, fmt.Errorf("reading Role %s/%s: %w", role.Namespace, role.Name, err))
+				continue
+			}
+		}
 		if _, err := applyRecorded(ctx, dyn, roleGVR, "Role", auditrec.ActionRBACApply, &role, kubecli.ApplyOptions{}); err != nil {
 			errs = append(errs, fmt.Errorf("applying Role %s/%s: %w", role.Namespace, role.Name, err))
 			continue
@@ -88,10 +102,30 @@ func ApplyApiRefRoles(ctx context.Context, dyn dynamic.Interface, gvr schema.Gro
 			errs = append(errs, fmt.Errorf("applying RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err))
 		}
 	}
-	if err := pruneApiRefRoles(ctx, dyn, name, want); err != nil {
-		errs = append(errs, err)
+	if !additive {
+		if err := pruneApiRefRoles(ctx, dyn, name, want); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// unionRules is cur followed by every rule of want that cur does not already hold.
+func unionRules(cur, want []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	out := append([]rbacv1.PolicyRule{}, cur...)
+	for _, w := range want {
+		found := false
+		for _, c := range cur {
+			if reflect.DeepEqual(c, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // DeleteApiRefRoles removes every Role and RoleBinding of the definition version name, on teardown.

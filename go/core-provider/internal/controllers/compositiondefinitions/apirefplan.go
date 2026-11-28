@@ -47,6 +47,9 @@ func classifyResolveError(composition types.NamespacedName, err error) error {
 	err = fmt.Errorf("composition %s: %w", composition, err)
 	if e, ok := restactionrbac.AsError(err); ok {
 		switch e.Cause {
+		case restactionrbac.CauseExtrasTooLarge, restactionrbac.CauseInvalidApiRef:
+			// About THIS composition's extras alone: it does not fail the definition (see refused).
+			return &refused{composition: composition, cause: e.Cause, err: err}
 		case restactionrbac.CauseSnowplowUnavailable, restactionrbac.CauseSnowplowError:
 			return &notDetermined{err: err}
 		}
@@ -55,10 +58,29 @@ func classifyResolveError(composition types.NamespacedName, err error) error {
 	return &notDetermined{err: err}
 }
 
+// refused is a failure that belongs to one composition: snowplow refused the request built from ITS
+// extras (431 too large, 400 invalid). Every other composition is resolved without it, so one object's
+// input cannot block the rest of its blueprint. Its own rows are not known, so nothing it contributed
+// is withdrawn (cannot determine is not empty): see apiRefPlan.Unresolved.
+type refused struct {
+	composition types.NamespacedName
+	cause       restactionrbac.Cause
+	err         error
+}
+
+func (e *refused) Error() string { return e.err.Error() }
+func (e *refused) Unwrap() error { return e.err }
+
+// maxNamedCompositions caps the compositions a condition message and status list name.
+const maxNamedCompositions = 20
+
 // apiRefPlan is a definition's resolved apiRef read-sets, one per composition.
 type apiRefPlan struct {
 	Compositions [][]restactionrbac.Resource
-	digest       string
+	// Unresolved are the compositions whose request snowplow refused. Their rows are absent from
+	// Compositions, so while any exist the Roles are only ever added to, never narrowed or pruned.
+	Unresolved []compositiondefinitionsv1alpha1.ApiRefUnresolvedComposition
+	digest     string
 }
 
 func (p *apiRefPlan) clusterWide() []restactionrbac.ClusterWide {
@@ -169,9 +191,27 @@ func (p *apiRefPlanner) plan(ctx context.Context, cd *compositiondefinitionsv1al
 		}(i, key, client.ObjectKeyFromObject(c), extras)
 	}
 	wg.Wait()
-	if err := firstError(errs); err != nil {
+	var unresolved []compositiondefinitionsv1alpha1.ApiRefUnresolvedComposition
+	var global []error
+	for i, e := range errs {
+		var rf *refused
+		switch {
+		case e == nil:
+		case errors.As(e, &rf):
+			unresolved = append(unresolved, compositiondefinitionsv1alpha1.ApiRefUnresolvedComposition{
+				Namespace: rf.composition.Namespace, Name: rf.composition.Name, Reason: string(rf.cause)})
+			sets[i] = nil
+		default:
+			global = append(global, e)
+		}
+	}
+	if err := firstError(global); err != nil {
 		return nil, err
 	}
+	sort.Slice(unresolved, func(i, j int) bool {
+		a, b := unresolved[i], unresolved[j]
+		return a.Namespace+"/"+a.Name < b.Namespace+"/"+b.Name
+	})
 
 	// Entries of this definition no composition used this pass are gone with their compositions.
 	live := map[planKey]bool{}
@@ -186,7 +226,7 @@ func (p *apiRefPlanner) plan(ctx context.Context, cd *compositiondefinitionsv1al
 	}
 	p.mu.Unlock()
 
-	out := &apiRefPlan{Compositions: sets}
+	out := &apiRefPlan{Compositions: sets, Unresolved: unresolved}
 	out.digest = planDigest(sets)
 	return out, nil
 }

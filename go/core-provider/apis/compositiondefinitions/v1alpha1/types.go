@@ -829,6 +829,20 @@ type ApiRefRBACStatus struct {
 	// resources are not listed: they are cluster-wide by nature.
 	// +optional
 	ClusterWide []ApiRefClusterWideRow `json:"clusterWide,omitempty"`
+
+	// UnresolvedCompositions are the compositions whose apiRef request snowplow refused (reason
+	// ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20. Their
+	// reads are not granted by this pass and their existing grants are kept: the Roles are only added to
+	// while any is listed. One composition never fails the definition.
+	// +optional
+	UnresolvedCompositions []ApiRefUnresolvedComposition `json:"unresolvedCompositions,omitempty"`
+}
+
+// ApiRefUnresolvedComposition is one composition whose reads could not be resolved.
+type ApiRefUnresolvedComposition struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Reason    string `json:"reason"`
 }
 
 // ApiRefClusterWideRow is one namespaced read granted cluster-wide.

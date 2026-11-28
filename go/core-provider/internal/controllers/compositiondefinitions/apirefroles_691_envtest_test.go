@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,6 +50,7 @@ type rbac691Snowplow struct {
 	calls  atomic.Int64
 	status atomic.Int32 // 0: answer; else that status
 	prior  atomic.Bool
+	refuse atomic.Value // string: the composition whose request is answered 431 (extras too large)
 	last   atomic.Value // map[string]any: the extras of the last call
 }
 
@@ -65,6 +67,10 @@ func newRBAC691Snowplow(t *testing.T) *rbac691Snowplow {
 		s.last.Store(extras)
 		ns, _ := extras["compositionNamespace"].(string)
 		name, _ := extras["compositionName"].(string)
+		if big, _ := s.refuse.Load().(string); big != "" && big == name {
+			w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
+			return
+		}
 		rows := []restactionrbac.Resource{
 			{Version: "v1", Resource: "pods", Namespace: ns, Verb: "list"},
 			{Version: "v1", Resource: "configmaps", Namespace: ns, Name: name, Verb: "get"},
@@ -102,7 +108,7 @@ func TestApiRefRoles691Envtest(t *testing.T) {
 	SnowplowURL = sp.srv.URL
 	t.Cleanup(func() { SnowplowURL = old })
 
-	for _, ns := range []string{"team-a", "team-b", "team-c"} {
+	for _, ns := range []string{"team-a", "team-b", "team-c", "team-d", "team-e"} {
 		if err := e.kube.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
 			t.Fatal(err)
 		}
@@ -295,5 +301,46 @@ func TestApiRefRoles691Envtest(t *testing.T) {
 	sp.status.Store(0)
 	eventually691(t, "team-b's Role is removed and team-c's written once snowplow answers", func() bool {
 		return same(namespacesWithRoles(), []string{"team-c"})
+	})
+
+	// ONE COMPOSITION'S REQUEST IS REFUSED (431): it must not fail the definition or block the others.
+	// "huge" in team-d has oversized extras; "ok" in team-e is normal; team-c's composition (c4) leaves.
+	sp.refuse.Store("huge")
+	composition("team-d", "huge")
+	composition("team-e", "ok")
+	deleteComposition("team-c", "c4")
+	eventually691(t, "the normal composition's Role is written beside the refused one", func() bool { return roleIn("team-e") != nil })
+	time.Sleep(2 * time.Second)
+	// Not determined for "huge" means what its contributions were is unknown: team-c's Role is KEPT
+	// though its composition is gone (nothing is narrowed or pruned while a composition is refused),
+	// and nothing is written for the refused one's own namespace.
+	if got := namespacesWithRoles(); !same(got, []string{"team-c", "team-e"}) {
+		t.Fatalf("with one composition refused the Roles are %v, want [team-c team-e]", got)
+	}
+	// The definition's own pass goes on: planApiRef succeeds, and names the composition.
+	live := &compositiondefinitionsv1alpha1.CompositionDefinition{}
+	if err := e.kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: "d"}, live); err != nil {
+		t.Fatal(err)
+	}
+	opts := deploy.DeployOptions{}
+	if err := (&external{planner: planner}).planApiRef(ctx, live, stzGVR, &opts); err != nil {
+		t.Fatalf("one refused composition failed the definition's pass: %v", err)
+	}
+	recordApiRefRBAC(live, nil)
+	cond := live.GetCondition(conditionTypeApiRefRBACComplete)
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "ExtrasTooLarge" || !strings.Contains(cond.Message, "team-d/huge") || strings.Contains(cond.Message, "team-e/ok") {
+		t.Errorf("condition = %s/%s %q, want False/ExtrasTooLarge naming team-d/huge only", cond.Status, cond.Reason, cond.Message)
+	}
+	if u := live.Status.ApiRefRBAC.UnresolvedCompositions; len(u) != 1 || u[0].Namespace != "team-d" || u[0].Name != "huge" || u[0].Reason != "ExtrasTooLarge" {
+		t.Errorf("status.apiRefRBAC.unresolvedCompositions = %+v", u)
+	}
+	if !opts.ApiRefPerNamespace || len(opts.ApiRefCompositions) != 2 {
+		t.Errorf("Deploy is handed every composition slot (the refused one empty): perNamespace=%v sets=%d", opts.ApiRefPerNamespace, len(opts.ApiRefCompositions))
+	}
+	// It clears: once the request fits, the refused one is granted and team-c's stale Role is pruned.
+	sp.refuse.Store("")
+	deleteComposition("team-d", "huge")
+	eventually691(t, "after the refusal clears, only the live compositions' namespaces have Roles", func() bool {
+		return same(namespacesWithRoles(), []string{"team-e"})
 	})
 }

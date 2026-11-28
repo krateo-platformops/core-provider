@@ -504,6 +504,28 @@ spec:
                     items:
                       type: string
                     type: array
+                  unresolvedCompositions:
+                    description: |-
+                      UnresolvedCompositions are the compositions whose apiRef request snowplow refused (reason
+                      ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20. Their
+                      reads are not granted by this pass and their existing grants are kept: the Roles are only added to
+                      while any is listed. One composition never fails the definition.
+                    items:
+                      description: ApiRefUnresolvedComposition is one composition
+                        whose reads could not be resolved.
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        reason:
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      - reason
+                      type: object
+                    type: array
                 type: object
               apiVersion:
                 description: 'ApiVersion: the api version of the custom resource -

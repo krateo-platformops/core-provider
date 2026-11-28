@@ -55,6 +55,10 @@ func (e *external) planApiRef(ctx context.Context, cr *compositiondefinitionsv1a
 
 func apiRefRBACStatus(plan *apiRefPlan) *compositiondefinitionsv1alpha1.ApiRefRBACStatus {
 	st := &compositiondefinitionsv1alpha1.ApiRefRBACStatus{Namespaces: plan.namespaces()}
+	st.UnresolvedCompositions = plan.Unresolved
+	if len(st.UnresolvedCompositions) > maxNamedCompositions {
+		st.UnresolvedCompositions = st.UnresolvedCompositions[:maxNamedCompositions]
+	}
 	for _, cw := range plan.clusterWide() {
 		st.ClusterWide = append(st.ClusterWide, compositiondefinitionsv1alpha1.ApiRefClusterWideRow{Group: cw.Group, Resource: cw.Resource, Verb: cw.Verb})
 	}
@@ -90,6 +94,23 @@ func recordApiRefRBAC(cr *compositiondefinitionsv1alpha1.CompositionDefinition, 
 		return
 	}
 	if err == nil {
+		if st := cr.Status.ApiRefRBAC; st != nil && len(st.UnresolvedCompositions) > 0 {
+			// One or more compositions' requests were refused: named, and the definition goes on.
+			first := st.UnresolvedCompositions[0]
+			r, ok := cdreason.ApiRefRBACFailure(restactionrbac.Cause(first.Reason))
+			if !ok {
+				r, _ = cdreason.ApiRefRBACFailure(restactionrbac.CauseExtrasTooLarge)
+			}
+			names := ""
+			for i, u := range st.UnresolvedCompositions {
+				if i > 0 {
+					names += ", "
+				}
+				names += u.Namespace + "/" + u.Name
+			}
+			cr.SetConditions(r.WithMessage("snowplow refused the request of these compositions, whose Roles are kept as they are and not narrowed: " + names))
+			return
+		}
 		if st := cr.Status.ApiRefRBAC; st != nil && len(st.ClusterWide) > 0 {
 			cr.SetConditions(cdreason.ApiRefClusterWide.Condition())
 			return

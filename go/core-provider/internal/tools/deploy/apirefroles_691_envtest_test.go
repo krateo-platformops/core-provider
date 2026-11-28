@@ -124,7 +124,7 @@ func TestApiRefClusterRole691Envtest(t *testing.T) {
 	// The Roles, beside it: one per namespace, then pruned when a namespace leaves, then all removed.
 	composed := restactionrbac.Compose(nil, comps, "krateo:cdc:sa-v1-0-2", ApiRefRBACName(gvr))
 	def := types.NamespacedName{Namespace: "default", Name: "d"}
-	if err := ApplyApiRefRoles(ctx, dyn, gvr, def, composed); err != nil {
+	if err := ApplyApiRefRoles(ctx, dyn, gvr, def, composed, false); err != nil {
 		t.Fatal(err)
 	}
 	roles := func() []string {
@@ -142,7 +142,7 @@ func TestApiRefClusterRole691Envtest(t *testing.T) {
 	if got := roles(); len(got) != 2 || got[0] != "team-a" || got[1] != "team-b" {
 		t.Fatalf("Roles in %v, want [team-a team-b]", got)
 	}
-	if err := ApplyApiRefRoles(ctx, dyn, gvr, def, restactionrbac.Compose(nil, comps[:1], "krateo:cdc:sa-v1-0-2", ApiRefRBACName(gvr))); err != nil {
+	if err := ApplyApiRefRoles(ctx, dyn, gvr, def, restactionrbac.Compose(nil, comps[:1], "krateo:cdc:sa-v1-0-2", ApiRefRBACName(gvr)), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := roles(); len(got) != 1 || got[0] != "team-a" {

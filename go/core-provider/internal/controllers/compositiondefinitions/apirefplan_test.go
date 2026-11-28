@@ -59,6 +59,7 @@ type planSnowplow struct {
 	srv    *httptest.Server
 	calls  atomic.Int64
 	status atomic.Int32
+	big    string // the composition whose request is answered 431
 }
 
 func newPlanSnowplow(t *testing.T) *planSnowplow {
@@ -72,6 +73,10 @@ func newPlanSnowplow(t *testing.T) *planSnowplow {
 		ex := map[string]any{}
 		_ = json.Unmarshal([]byte(r.URL.Query().Get("extras")), &ex)
 		ns, _ := ex["compositionNamespace"].(string)
+		if n, _ := ex["compositionName"].(string); s.big != "" && n == s.big {
+			w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"readSet": []restactionrbac.Resource{
 			{Version: "v1", Resource: "pods", Namespace: ns, Verb: "list"},
 			{Version: "v1", Resource: "secrets", Verb: "get", NamespaceUnknown: true}}})
@@ -163,7 +168,6 @@ func TestPlan_FailuresAreNamedAndNeverAnEmptyPlan(t *testing.T) {
 	}{
 		{http.StatusServiceUnavailable, true, "Unknown/RolesNotDetermined"},
 		{http.StatusInternalServerError, true, "Unknown/RolesNotDetermined"},
-		{http.StatusRequestHeaderFieldsTooLarge, false, "False/ExtrasTooLarge"},
 		{http.StatusUnprocessableEntity, false, "False/StageUnresolvable"},
 	} {
 		sp := newPlanSnowplow(t)
@@ -220,5 +224,30 @@ func TestRecordApiRefRBAC_ClusterWideRowsAreNamed(t *testing.T) {
 	recordApiRefRBAC(cd, nil)
 	if cd.Status.ApiRefRBAC != nil || cd.GetCondition(conditionTypeApiRefRBACComplete).Reason != "" {
 		t.Errorf("without an apiRef both go: %+v", cd.Status.ApiRefRBAC)
+	}
+}
+
+// A composition whose request snowplow refuses (431) beside a normal one: the plan is made, the normal
+// one's reads are in it, and the refused one is named (not an error, not an empty set).
+func TestPlan_AComposition431IsNamedAndDoesNotFailThePlan(t *testing.T) {
+	sp := newPlanSnowplow(t)
+	sp.big = "huge"
+	withSnowplowURL(t, sp.srv.URL)
+	p := plannerFor691(sp, planDyn(restAction(1), planComposition("a", "ok"), planComposition("b", "huge")))
+	plan, err := p.plan(context.Background(), planDefinition(), planGVR)
+	if err != nil {
+		t.Fatalf("one refused composition failed the plan: %v", err)
+	}
+	if len(plan.Unresolved) != 1 || plan.Unresolved[0].Namespace != "b" || plan.Unresolved[0].Name != "huge" || plan.Unresolved[0].Reason != "ExtrasTooLarge" {
+		t.Fatalf("unresolved = %+v", plan.Unresolved)
+	}
+	if st := apiRefRBACStatus(plan); len(st.Namespaces) != 1 || st.Namespaces[0] != "a" {
+		t.Errorf("the normal composition's namespace must be planned, got %v", st.Namespaces)
+	}
+	cd := planDefinition()
+	cd.Status.ApiRefRBAC = apiRefRBACStatus(plan)
+	recordApiRefRBAC(cd, nil)
+	if c := cd.GetCondition(conditionTypeApiRefRBACComplete); c.Reason != "ExtrasTooLarge" || c.Status != metav1.ConditionFalse {
+		t.Errorf("condition = %s/%s", c.Status, c.Reason)
 	}
 }

@@ -109,7 +109,7 @@ func (r *apiRefRolesReconciler) Reconcile(ctx context.Context, req reconcile.Req
 		return reconcile.Result{}, err
 	}
 	composed := restactionrbac.Compose(nil, plan.Compositions, group, name)
-	if err := deploy.ApplyApiRefRoles(ctx, r.dyn, gvr, key, composed); err != nil {
+	if err := deploy.ApplyApiRefRoles(ctx, r.dyn, gvr, key, composed, len(plan.Unresolved) > 0); err != nil {
 		return reconcile.Result{}, err
 	}
 	r.planner.markApplied(key, plan.digest)
