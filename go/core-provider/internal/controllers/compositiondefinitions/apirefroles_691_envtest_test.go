@@ -91,6 +91,10 @@ func eventually691(t *testing.T, what string, cond func() bool) {
 }
 
 func TestApiRefRoles691Envtest(t *testing.T) {
+	// startStzEnv sets the package's ManagementNamespace and leaves it set; this file sorts before
+	// controllerowner_test.go, whose TestHandedOver reads it, so it is put back (CI runs the package whole).
+	oldNS := ManagementNamespace
+	t.Cleanup(func() { ManagementNamespace = oldNS })
 	e := startStzEnv(t)
 	ctx := context.Background()
 	sp := newRBAC691Snowplow(t)
