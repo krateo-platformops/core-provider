@@ -36,7 +36,7 @@ func TestSchemaDefaultsCondition_AlignedChart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := schemaDefaultsCondition(spec, invalid)
+	c, _ := schemaDefaultsCondition(spec, invalid)
 	if !cdreason.SchemaDefaultsAligned.Is(c) || c.Status != metav1.ConditionTrue || c.Reason != "Aligned" {
 		t.Fatalf("condition = %s/%s (%s), want True/Aligned", c.Status, c.Reason, c.Message)
 	}
@@ -48,7 +48,7 @@ func TestSchemaDefaultsCondition_NovaLikeChartDiffers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := schemaDefaultsCondition(spec, invalid)
+	c, _ := schemaDefaultsCondition(spec, invalid)
 	if !cdreason.SchemaDefaultsDiffer.Is(c) || c.Status != metav1.ConditionFalse || c.Reason != "SchemaDefaultsDiffer" {
 		t.Fatalf("condition = %s/%s (%s), want False/SchemaDefaultsDiffer", c.Status, c.Reason, c.Message)
 	}
@@ -68,7 +68,7 @@ func TestSchemaDefaultsCondition_SchemaDefaultWithNoValuesKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := schemaDefaultsCondition(spec, invalid)
+	c, _ := schemaDefaultsCondition(spec, invalid)
 	if !strings.Contains(c.Message, "restdefinitions.quota.enabled: schema default, no values.yaml key") {
 		t.Fatalf("message = %s", c.Message)
 	}
@@ -80,7 +80,7 @@ func TestSchemaDefaultsCondition_MessageIsBounded(t *testing.T) {
 		props = append(props, `"`+n+`":{"type":"boolean","default":false}`)
 	}
 	spec := chartWith(t, `{"type":"object","properties":{`+strings.Join(props, ",")+`}}`, "z: 1\n")
-	c := schemaDefaultsCondition(spec, nil)
+	c, _ := schemaDefaultsCondition(spec, nil)
 	if !strings.Contains(c.Message, "13 default(s)") || !strings.HasSuffix(c.Message, "; +3 more") {
 		t.Fatalf("message = %s", c.Message)
 	}

@@ -681,6 +681,16 @@ type CompositionDefinitionStatus struct {
 	// +optional
 	Chart *ChartStatus `json:"chart,omitempty"`
 
+	// SchemaDefaults is the machine-readable list behind the SchemaDefaultsMatchValues condition
+	// (core-provider#686): where the chart's values.schema.json declares a default that its values.yaml
+	// disagrees with. The condition's MESSAGE is human text and is not a contract; read this field
+	// instead. Set in the same pass, from the same computed differences and in the same order as the
+	// message, so the two cannot disagree. ABSENT when the condition is Aligned, when it is
+	// OwnedByAnotherDefinition (the owner's status carries it), and from a core-provider older than this
+	// field: absent is never "differences unknown" and never an empty object.
+	// +optional
+	SchemaDefaults *SchemaDefaultsStatus `json:"schemaDefaults,omitempty"`
+
 	// ScaleToZero is the scale-to-zero reconciler's state for a definition that opted in (#393).
 	// Absent otherwise. Written ONLY by that reconciler, with a merge patch on this field; the
 	// definition's main reconciler reads it to report Ready and ControllerActive.
@@ -892,4 +902,54 @@ type ChartContentsKind struct {
 	Kind string `json:"kind"`
 	// +kubebuilder:validation:Minimum=1
 	Count int `json:"count"`
+}
+
+// SchemaDefaultKind says how one default of a chart's values.schema.json relates to its values.yaml.
+type SchemaDefaultKind string
+
+const (
+	// SchemaDefaultValueDiffers: the schema declares a default and values.yaml has a different value
+	// at the path. The generated CRD defaults to values.yaml's value.
+	SchemaDefaultValueDiffers SchemaDefaultKind = "valueDiffers"
+	// SchemaDefaultWithoutValuesKey: the schema declares a default and values.yaml has no key (or a
+	// null) at the path, so the generated CRD has no default there; helm applies none either.
+	SchemaDefaultWithoutValuesKey SchemaDefaultKind = "schemaDefaultWithoutValuesKey"
+	// SchemaDefaultValuesInvalid: values.yaml has a value at the path that the schema's own
+	// constraints refuse, so it was not made a CRD default.
+	SchemaDefaultValuesInvalid SchemaDefaultKind = "valuesValueInvalid"
+)
+
+// SchemaDefaultsStatus lists the differences between a chart's values.schema.json defaults and its
+// values.yaml (core-provider#686), at most 10 of them, sorted by path.
+type SchemaDefaultsStatus struct {
+	// Differ is the listed differences, sorted by path, in the order the condition message names them.
+	// At most 10; Dropped counts the rest.
+	// +listType=atomic
+	Differ []SchemaDefaultDifference `json:"differ"`
+
+	// Dropped is how many more differences exist beyond those listed in Differ; 0 when all are listed.
+	Dropped int `json:"dropped"`
+}
+
+// SchemaDefaultDifference is one path where the chart's values.schema.json and values.yaml disagree.
+// Schema and Values are JSON values (apiextensionsv1.JSON: a boolean, number, string, array or
+// object exactly as the chart wrote it, not a string holding JSON), which round-trips through the CRD
+// as an untyped field.
+type SchemaDefaultDifference struct {
+	// Path is the dotted values path ("restdefinitions.quota.enabled"), the spelling the condition
+	// message uses; "[]" marks an array's items and ".*" a map's values.
+	Path string `json:"path"`
+
+	// Schema is the default the schema declares at Path. Absent for valuesValueInvalid, where the
+	// difference is not between two defaults.
+	// +optional
+	Schema *apiextensionsv1.JSON `json:"schema,omitempty"`
+
+	// Values is values.yaml's value at Path. Absent for schemaDefaultWithoutValuesKey.
+	// +optional
+	Values *apiextensionsv1.JSON `json:"values,omitempty"`
+
+	// Kind is valueDiffers, schemaDefaultWithoutValuesKey or valuesValueInvalid.
+	// +kubebuilder:validation:Enum=valueDiffers;schemaDefaultWithoutValuesKey;valuesValueInvalid
+	Kind SchemaDefaultKind `json:"kind"`
 }
