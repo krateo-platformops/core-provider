@@ -51,6 +51,24 @@ Partial RBAC is never written. While it is `False` the definition makes no progr
 version bump is held too; the running controller and its compositions are untouched. It
 clears by itself once the read-set resolves.
 
+**Where the apiRef reads are granted (#691).** A read the RESTAction declares in a namespace the
+composition's extras decide (`compositionNamespace` and the other two composition keys) is a Role and
+RoleBinding in THAT namespace, one pair per namespace holding a composition whose reads land there; it
+is added when a composition appears and removed when the last one leaves. Cluster-scoped reads stay in the
+definition's ClusterRole. A read whose namespace comes from a prior stage's output cannot be placed
+before the RESTAction runs, so it stays cluster-wide, and is named in `status.apiRefRBAC.clusterWide`
+(`group`, `resource`, `verb`) with the condition `True/ClusterWideRows`; `status.apiRefRBAC.namespaces`
+lists the namespaces with a Role. When snowplow cannot be asked, `ApiRefRBACComplete` is
+`Unknown/RolesNotDetermined` and no Role is changed; a request snowplow refuses as too large (431) is
+`False/ExtrasTooLarge`. A remote definition keeps the single ClusterRole.
+
+`status.apiRefRBAC` is `namespaces` (complete, not capped), `clusterWide` (complete, not capped),
+`unresolvedCompositions [{namespace, name, reason}]` (sorted by namespace/name, at most 20) and
+`unresolvedDropped` (an integer, always present with `apiRefRBAC`: how many more refused compositions
+exist beyond the listed ones, 0 when the list is complete, so the list and the count add up to the
+total). The `ExtrasTooLarge` condition message names the same compositions in the same order and ends
+with `+N more` when `unresolvedDropped` is N.
+
 **`status.controller` names the Deployment that runs this definition's controller (#580). Read it;
 do not derive `<resource>-<version>-controller`.** A Kind in a pool (`spec.controller.pool`) has no
 such Deployment: its controller runs in `cdc-pool-<pool>`.

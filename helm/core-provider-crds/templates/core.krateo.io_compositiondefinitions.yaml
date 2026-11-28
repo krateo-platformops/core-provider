@@ -469,6 +469,74 @@ spec:
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.
             properties:
+              apiRefRBAC:
+                description: |-
+                  ApiRefRBAC says where this definition's apiRef read grants are, and which stay cluster-wide
+                  (core-provider#691). Set while the definition declares an apiRef on a local cluster, in the same
+                  pass that sets ApiRefRBACComplete; read it instead of that condition's message. Absent without an
+                  apiRef, and from a core-provider older than this field.
+                properties:
+                  clusterWide:
+                    description: |-
+                      ClusterWide are the reads kept in the definition's ClusterRole because their namespace is
+                      resolved from a prior stage's output, so no composition can place them. Sorted. NOT capped: it is
+                      complete (one entry per group, resource and verb of the RESTAction). Cluster-scoped resources are
+                      not listed: they are cluster-wide by nature.
+                    items:
+                      description: ApiRefClusterWideRow is one namespaced read granted
+                        cluster-wide.
+                      properties:
+                        group:
+                          type: string
+                        resource:
+                          type: string
+                        verb:
+                          type: string
+                      required:
+                      - group
+                      - resource
+                      - verb
+                      type: object
+                    type: array
+                  namespaces:
+                    description: |-
+                      Namespaces are the namespaces holding a Role and RoleBinding for this definition's apiRef reads
+                      (one per namespace a composition's reads land in), sorted. NOT capped: it is complete.
+                    items:
+                      type: string
+                    type: array
+                  unresolvedCompositions:
+                    description: |-
+                      UnresolvedCompositions are the compositions whose apiRef request snowplow refused (reason
+                      ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20
+                      (UnresolvedDropped counts the rest). Their
+                      reads are not granted by this pass and their existing grants are kept: the Roles are only added to
+                      while any is listed. One composition never fails the definition.
+                    items:
+                      description: ApiRefUnresolvedComposition is one composition
+                        whose reads could not be resolved.
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        reason:
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      - reason
+                      type: object
+                    type: array
+                  unresolvedDropped:
+                    description: |-
+                      UnresolvedDropped is how many more refused compositions exist beyond those listed in
+                      UnresolvedCompositions; 0 when all are listed. Always present with apiRefRBAC, so a list that is
+                      complete reads differently from one that was cut: the list and this count add up to the total.
+                    type: integer
+                required:
+                - unresolvedDropped
+                type: object
               apiVersion:
                 description: 'ApiVersion: the api version of the custom resource -
                   Last applied apiVersion'

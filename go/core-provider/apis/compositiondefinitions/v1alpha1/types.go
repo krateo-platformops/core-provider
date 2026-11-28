@@ -697,6 +697,13 @@ type CompositionDefinitionStatus struct {
 	// +optional
 	ScaleToZero *ScaleToZeroStatus `json:"scaleToZero,omitempty"`
 
+	// ApiRefRBAC says where this definition's apiRef read grants are, and which stay cluster-wide
+	// (core-provider#691). Set while the definition declares an apiRef on a local cluster, in the same
+	// pass that sets ApiRefRBACComplete; read it instead of that condition's message. Absent without an
+	// apiRef, and from a core-provider older than this field.
+	// +optional
+	ApiRefRBAC *ApiRefRBACStatus `json:"apiRefRBAC,omitempty"`
+
 	// ServedVersionsPendingPrune records, per served version of this definition's CRD that has
 	// become prune-eligible (no definition references it, no instance is labelled with it, no stored
 	// helm revision names it), when it first became so (#454). A version is pruned only after it has
@@ -806,6 +813,50 @@ type ScaleToZeroStatus struct {
 	// must opt in).
 	// +optional
 	HeldBy []string `json:"heldBy,omitempty"`
+}
+
+// ApiRefRBACStatus is where a definition's apiRef reads are granted. A read that a composition's
+// extras place in a namespace is granted by a Role in that namespace; only a read whose namespace
+// no composition can resolve (it comes from a prior stage's output) is cluster-wide.
+type ApiRefRBACStatus struct {
+	// Namespaces are the namespaces holding a Role and RoleBinding for this definition's apiRef reads
+	// (one per namespace a composition's reads land in), sorted. NOT capped: it is complete.
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// ClusterWide are the reads kept in the definition's ClusterRole because their namespace is
+	// resolved from a prior stage's output, so no composition can place them. Sorted. NOT capped: it is
+	// complete (one entry per group, resource and verb of the RESTAction). Cluster-scoped resources are
+	// not listed: they are cluster-wide by nature.
+	// +optional
+	ClusterWide []ApiRefClusterWideRow `json:"clusterWide,omitempty"`
+
+	// UnresolvedCompositions are the compositions whose apiRef request snowplow refused (reason
+	// ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20
+	// (UnresolvedDropped counts the rest). Their
+	// reads are not granted by this pass and their existing grants are kept: the Roles are only added to
+	// while any is listed. One composition never fails the definition.
+	// +optional
+	UnresolvedCompositions []ApiRefUnresolvedComposition `json:"unresolvedCompositions,omitempty"`
+
+	// UnresolvedDropped is how many more refused compositions exist beyond those listed in
+	// UnresolvedCompositions; 0 when all are listed. Always present with apiRefRBAC, so a list that is
+	// complete reads differently from one that was cut: the list and this count add up to the total.
+	UnresolvedDropped int `json:"unresolvedDropped"`
+}
+
+// ApiRefUnresolvedComposition is one composition whose reads could not be resolved.
+type ApiRefUnresolvedComposition struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Reason    string `json:"reason"`
+}
+
+// ApiRefClusterWideRow is one namespaced read granted cluster-wide.
+type ApiRefClusterWideRow struct {
+	Group    string `json:"group"`
+	Resource string `json:"resource"`
+	Verb     string `json:"verb"`
 }
 
 //+kubebuilder:object:root=true

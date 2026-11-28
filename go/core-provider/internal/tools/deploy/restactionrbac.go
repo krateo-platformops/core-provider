@@ -17,6 +17,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -88,19 +90,25 @@ func restActionReadSet(ctx context.Context, opts DeployOptions) ([]restactionrba
 	if err != nil {
 		return nil, err
 	}
-	cli := restactionrbac.New(opts.SnowplowURL)
-	// snowplow's /rbac is gated by the same JWT middleware as /call: authenticate with an
-	// authn-issued service JWT (core-provider presents its own projected SA token to authn),
-	// mirroring how the CDC reaches snowplow for apiRef resolution. Without an authn URL the
-	// request is unauthenticated and snowplow answers 401.
-	if opts.AuthnURL != "" {
-		cli = cli.WithToken(authnClientFor(opts.AuthnURL).Token)
-	}
-	return cli.Inspect(ctx, restactionrbac.Params{
+	return ApiRefInspector(opts.SnowplowURL, opts.AuthnURL).Inspect(ctx, restactionrbac.Params{
 		APIRefName:      opts.ApiRefName,
 		APIRefNamespace: opts.ApiRefNamespace,
 		Extras:          extras,
 	})
+}
+
+// ApiRefInspector is the client for snowplow's GET /rbac.
+//
+// snowplow's /rbac is gated by the same JWT middleware as /call: authenticate with an authn-issued
+// service JWT (core-provider presents its own projected SA token to authn), mirroring how the CDC
+// reaches snowplow for apiRef resolution. Without an authn URL the request is unauthenticated and
+// snowplow answers 401.
+func ApiRefInspector(snowplowURL, authnURL string) *restactionrbac.Client {
+	cli := restactionrbac.New(snowplowURL)
+	if authnURL != "" {
+		cli = cli.WithToken(authnClientFor(authnURL).Token)
+	}
+	return cli
 }
 
 // hashRestActionRBACObjects contributes the ClusterRole + binding to the digest with the same
@@ -151,7 +159,42 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 			"count", d.Count, "rows", d.Resources)
 	}
 
-	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACNameOf(opts))
+	var cr *rbacv1.ClusterRole
+	var crb *rbacv1.ClusterRoleBinding
+	if opts.ApiRefPerNamespace {
+		// A local definition (#691): the ClusterRole holds the cluster-scoped reads and the rows whose
+		// namespace no composition can resolve. A read a composition's extras place in a namespace is
+		// a Role there, applied by ApplyApiRefRoles, never a rule here.
+		composed := restactionrbac.Compose(readSet, opts.ApiRefCompositions, cdcGroup(saName), restActionRBACNameOf(opts))
+		cr, crb = composed.ClusterRole, composed.ClusterRoleBinding
+		if opts.ApiRefKeepClusterRules && cr != nil {
+			live, err := dyn.Resource(clusterRoleGVR).Get(ctx, cr.Name, metav1.GetOptions{})
+			switch {
+			case err == nil:
+				var cur rbacv1.ClusterRole
+				if runtime.DefaultUnstructuredConverter.FromUnstructured(live.Object, &cur) == nil {
+					cr.Rules = unionRules(cur.Rules, cr.Rules)
+				}
+			case !apierrors.IsNotFound(err):
+				return fmt.Errorf("reading the apiRef ClusterRole to keep its rules: %w", err)
+			}
+		}
+	} else {
+		// A remote definition keeps the single ClusterRole: its compositions live on a cluster this
+		// path does not watch.
+		cr, crb = restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACNameOf(opts))
+	}
+	return applyClusterPair(ctx, dyn, opts, cr, crb, hsh, applyOpts)
+}
+
+// applyClusterPair applies the rendered ClusterRole and binding, or, when nothing is to be granted
+// cluster-wide, settles what an earlier release left there (see settleEmptyClusterPair).
+func applyClusterPair(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, cr *rbacv1.ClusterRole, crb *rbacv1.ClusterRoleBinding,
+	hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+	if (cr == nil || crb == nil) && opts.ApiRefPerNamespace {
+		return settleEmptyClusterPair(ctx, dyn, opts, hsh, applyOpts)
+	}
 	if cr == nil || crb == nil {
 		// Every row was non-read, so there is nothing to grant. Emitting a binding to an empty role
 		// would read as an intended grant someone had broken.
@@ -220,4 +263,45 @@ func deleteRestActionRBAC(ctx context.Context, kube client.Client, saName string
 	}
 	log.Debug("apiRef RBAC deleted", "name", name)
 	return nil
+}
+
+// settleEmptyClusterPair is the per-namespace path with NO cluster-wide row at all: every read resolved
+// to a namespace, so nothing belongs in a ClusterRole (#691). What an earlier release wrote there
+// (GenerateClusterScoped granted every read, namespaced ones included, cluster-wide) must not survive
+// beside the Roles, so it is deleted; a bare return would leave that grant in place for good.
+//
+// While some composition is unresolved (opts.ApiRefKeepClusterRules) what the ClusterRole holds may be
+// its: it is left exactly as it is. A deletion that fails for any reason but not-found is an error,
+// never "assume gone". The digest then reads what Lookup will read (an absent pair hashes as empty
+// objects of that name), so a deleted grant is a change in the digest, not a no-op. A dry run deletes
+// nothing and hashes the same.
+func settleEmptyClusterPair(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+	name := restActionRBACNameOf(opts)
+	cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}
+
+	if opts.ApiRefKeepClusterRules {
+		for _, k := range []struct {
+			gvr schema.GroupVersionResource
+			obj client.Object
+		}{{clusterRoleGVR, cr}, {clusterRoleBindingGVR, crb}} {
+			if err := kubecli.Get(ctx, dyn, k.gvr, k.obj); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("reading the apiRef ClusterRole pair to keep it: %w", err)
+			}
+		}
+		log.Info("apiRef RBAC: a composition is unresolved; the ClusterRole is kept as it is", "name", name)
+		return hashRestActionRBACObjects(cr, crb, hsh)
+	}
+
+	un := kubecli.UninstallOptions{DryRun: applyOpts.DryRun}
+	if _, err := uninstallRecorded(ctx, dyn, clusterRoleBindingGVR, "ClusterRoleBinding", auditrec.ActionRBACDelete, crb, un); err != nil {
+		return fmt.Errorf("deleting the apiRef ClusterRoleBinding: %w", err)
+	}
+	if _, err := uninstallRecorded(ctx, dyn, clusterRoleGVR, "ClusterRole", auditrec.ActionRBACDelete, cr, un); err != nil {
+		return fmt.Errorf("deleting the apiRef ClusterRole: %w", err)
+	}
+	log.Info("apiRef RBAC: no cluster-wide row; the ClusterRole and its binding are removed", "name", name)
+	return hashRestActionRBACObjects(&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}},
+		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}, hsh)
 }

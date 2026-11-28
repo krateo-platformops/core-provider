@@ -21,6 +21,7 @@ import (
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/ptr"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -340,6 +341,12 @@ func run() int {
 	}
 	if err := compositiondefinitions.SetupScaleToZero(mgr, live, log, compositiondefinitions.CDCtemplateDeploymentPath, writtenBy()); err != nil {
 		log.Error(err, "Cannot setup the scale-to-zero controller")
+		return 1
+	}
+	// #691. The apiRef Roles reconciler: the namespaced reads of a definition's apiRef are Roles in the
+	// namespaces its compositions' reads land in. It shares the definition reconciler's planner.
+	if err := compositiondefinitions.SetupApiRefRoles(mgr, dynamic.NewForConfigOrDie(mgr.GetConfig()), log); err != nil {
+		log.Error(err, "Cannot setup the apiRef Roles controller")
 		return 1
 	}
 	if err := kubernetestargets.Setup(mgr, kubernetestargets.Options{

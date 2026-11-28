@@ -10,6 +10,7 @@ import (
 	"time"
 
 	contexttools "github.com/krateo-platformops/core-provider/internal/tools/context"
+	"github.com/krateo-platformops/core-provider/internal/tools/restactionrbac"
 	"github.com/krateo-platformops/plumbing/labels"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 
@@ -79,6 +80,10 @@ type UndeployOptions struct {
 	// deploy is removed on undeploy. AuthnNamespace is the authn operator namespace it lives in.
 	ApiRefName     string
 	AuthnNamespace string
+	// ApiRefPerNamespace: the definition's apiRef reads are Roles in the compositions' namespaces
+	// (#691), which Undeploy then removes by label. A definition without an apiRef, or a remote one,
+	// has none.
+	ApiRefPerNamespace bool
 	// LocalPools says ControllerNamespace may hold pools (a local definition). Undeploy then stops a
 	// controller a pool runs, and waits for its ownership Lease, before removing what it runs with.
 	LocalPools bool
@@ -148,6 +153,17 @@ type DeployOptions struct {
 	ApiRefName      string
 	ApiRefNamespace string
 	ApiRefExtras    string
+	// ApiRefPerNamespace says the apiRef's namespaced reads are granted by Roles in the namespaces the
+	// compositions' reads land in (#691), not by the ClusterRole: set for a local definition. False
+	// keeps the one ClusterRole for every read.
+	ApiRefPerNamespace bool
+	// ApiRefCompositions is one resolved read-set per composition of the definition, from snowplow's
+	// /rbac with that composition's extras. Rows still namespaceUnknown in them stay cluster-wide.
+	ApiRefCompositions [][]restactionrbac.Resource
+	// ApiRefKeepClusterRules says some composition's reads could not be resolved (its request was
+	// refused), so what it contributed to the ClusterRole is unknown: the live rules are kept and the
+	// planned ones added, never narrowed (cannot determine is not empty).
+	ApiRefKeepClusterRules bool
 	// ApiRefDelegation is the definition's spec.apiRef.delegation, rendered onto the controller's authn
 	// mapping as spec.delegation (#405). nil renders no delegation key.
 	ApiRefDelegation *definitionsv1alpha1.ApiRefDelegation
@@ -866,6 +882,13 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
 		if err != nil {
 			return err
+		}
+		// ...and the Roles that grant its namespaced reads, found by label across every namespace. A
+		// failed LIST is an error here, never "none".
+		if opts.ApiRefPerNamespace {
+			if err = DeleteApiRefRoles(ctx, opts.DynamicClient, restActionRBACName(sa.Name)); err != nil {
+				return err
+			}
 		}
 	}
 

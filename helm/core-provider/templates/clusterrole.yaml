@@ -58,6 +58,15 @@ rules:
   verbs:
   - get
   - patch
+# #691. A composition's apiRef resolution is cached against the RESTAction's generation, which is
+# read with this identity, not through snowplow. Read-only, get only. Without it the generation reads
+# as unknown and the resolution is simply not cached (every pass asks snowplow again).
+- apiGroups:
+  - templates.krateo.io
+  resources:
+  - restactions
+  verbs:
+  - get
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
