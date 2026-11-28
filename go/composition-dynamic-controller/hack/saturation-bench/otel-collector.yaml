@@ -46,7 +46,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
       - name: collector
-        image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.120.0
+        image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.120.0@sha256:85ac41c2db88d0df9bd6145e608a3cb023f5d8443868adbfbbf66efb51087917
         args: ["--config=/etc/otel/config.yaml"]
         ports:
         - {containerPort: 4318}
