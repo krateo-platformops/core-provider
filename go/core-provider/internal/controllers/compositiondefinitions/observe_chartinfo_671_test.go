@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -57,9 +59,17 @@ func TestObserve_RecordsChartMaintainersAndTheVersionRead(t *testing.T) {
 		t.Fatal("status.chart not recorded")
 	}
 	want := compositiondefinitionsv1alpha1.ChartStatus{Version: "2.3.4", Maintainers: []compositiondefinitionsv1alpha1.ChartMaintainer{
-		{Name: "Ada", Email: "ada@example.com", URL: "https://example.com/ada"}, {Name: "Bob"}}}
+		{Name: "Ada", URL: "https://example.com/ada"}, {Name: "Bob"}}}
 	if !reflect.DeepEqual(*c, want) {
 		t.Errorf("status.chart = %+v, want %+v", *c, want)
+	}
+	// The chart declared ada@example.com; the marshalled status must not carry it or an email key.
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ada@example.com") || strings.Contains(string(b), "email") {
+		t.Errorf("marshalled status.chart carries the maintainer's email: %s", b)
 	}
 }
 

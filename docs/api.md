@@ -237,12 +237,14 @@ blueprint:
 status:
   chart:
     version: 0.3.0          # the Chart.yaml version the maintainers were read from
-    maintainers:            # helm's own shape (chart.Maintainer), nothing added
-      - {name: Ada, email: ada@example.com, url: https://example.com/ada}
+    maintainers:            # name and url only; never email
+      - {name: Ada, url: https://example.com/ada}
       - {name: Bob}
 ```
 
-- **Exactly helm's shape.** `name` is required; `email` and `url` are omitted when the chart gives none.
+- **Name and url only.** `name` is required; `url` is omitted when the chart gives none. A maintainer's
+  `email` is intentionally not copied: cluster status is dumped wholesale into snapshots, telemetry and
+  support bundles, so PII-shaped data does not enter it. Read the chart for contact details.
 - **Absent means unknown.** A chart that declares no maintainers has **no `maintainers` key** (never an
   empty list), so "the chart names nobody" and "a core-provider older than this field" both read as
   absent: the owner is unknown. `version` is still written in the first case: it states what was read.

@@ -3,7 +3,9 @@
 package compositiondefinitions
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -25,11 +27,25 @@ func TestEnvtest_671_ChartMaintainers(t *testing.T) {
 	d.rest(6)
 	got := d.cd().Status.Chart
 	want := compositiondefinitionsv1alpha1.ChartStatus{Version: "1.0.0", Maintainers: []compositiondefinitionsv1alpha1.ChartMaintainer{
-		{Name: "Ada", Email: "ada@example.com", URL: "https://example.com/ada"},
-		{Name: "Bob", Email: "bob@example.com"},
+		{Name: "Ada", URL: "https://example.com/ada"},
+		{Name: "Bob"},
 	}}
 	if got == nil || !reflect.DeepEqual(*got, want) {
 		t.Fatalf("status.chart = %+v, want %+v", got, want)
+	}
+	// The chart declared two emails; what the apiserver STORED must carry neither, nor an email key.
+	u, err := e.c.dyn.Resource(cdGVR644).Namespace(self642CDNS).Get(t.Context(), "owned", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(u.Object["status"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"ada@example.com", "bob@example.com", "email"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("the stored status carries %q: %s", leak, b)
+		}
 	}
 }
 
