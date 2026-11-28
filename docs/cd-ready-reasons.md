@@ -60,7 +60,7 @@ written by the managed reconciler on the same objects. The set is CLOSED.
 | SchemaFullyEnforced | `OwnedByAnotherDefinition` | Unknown | core-provider | — | a follower: another definition generates the CRD; the message names it |
 | SchemaFullyEnforced | `SchemaInferred` | Unknown | core-provider | — | the spec schema was inferred (ValuesSchemaAuthored=False): it has no authored constraints, so True, which means authored constraints all enforced, cannot be claimed (#568 D6) |
 | SpecSchemaCurrent | `Current` | True | core-provider | — | the served and generated spec schemas are identical |
-| SpecSchemaCurrent | `LooserSchemaPending` | False | core-provider | — | transient: the generated schema is provably looser and the next Update writes it |
+| SpecSchemaCurrent | `LooserSchemaPending` | False | core-provider | — | transient: the generated schema is provably looser, or differs from the served one only in its defaults (#686), and the next Update writes it |
 | SpecSchemaCurrent | `GeneratedSchemaNotLooser` | False | core-provider | — | until the chart version changes: the generated schema differs in a way not provably looser, so the served one is kept rather than risk refusing stored values |
 | SpecSchemaCurrent | `OwnedByAnotherDefinition` | Unknown | core-provider | — | a follower: another definition generates the CRD |
 | ApiRefRBACComplete | `ReadSetResolved` | True | core-provider | — | the apiRef's RESTAction read-set was resolved and its RBAC rendered |

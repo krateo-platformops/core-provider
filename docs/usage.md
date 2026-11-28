@@ -46,9 +46,14 @@ timestamp: 2026-08-07T00:00:00Z
     `path: schema default, no values.yaml key` (capped, `+N more`). Ready is unaffected.
     Maintainers: align `values.schema.json`'s defaults with `values.yaml`.
   - Compositions that already exist keep the values they store; defaulting fills
-    omitted fields only. A served CRD version is not rewritten in place when only its
-    defaults change (`SpecSchemaCurrent=False/GeneratedSchemaNotLooser` until the chart
-    version changes): the apiserver also applies defaults on read.
+    omitted fields only. A served CRD version whose generated spec schema differs from
+    the served one **only in `default` keys** (the `{}` object defaults included) is
+    rewritten in place at upgrade, without a chart-version change, and
+    `SpecSchemaCurrent` reads `True` afterwards. Reason: a field absent from a stored
+    composition is already filled from values.yaml by helm (the cdc passes the spec as
+    values, helm merges values.yaml under it), and values stored under the old defaults
+    stay as stored, so a defaults-only rewrite cannot change an existing composition's
+    render. Any other difference keeps the `GeneratedSchemaNotLooser` rule.
 - The `apiRefRBAC` feature (on by default) expects the **authn** component's
   serviceaccount login strategy (CRD `serviceaccount.authn.krateo.io`) and
   **snowplow** in-cluster; set `apiRefRBAC.enabled=false` on clusters without them

@@ -959,7 +959,7 @@
       "cases": [
         {
           "writer": "core-provider",
-          "meaning": "transient: the generated schema is provably looser and the next Update writes it",
+          "meaning": "transient: the generated schema is provably looser, or differs from the served one only in its defaults (#686), and the next Update writes it",
           "clearance": {
             "kind": "next pass",
             "detail": "the next Update writes the generated schema"

@@ -414,7 +414,7 @@ var (
 		Clearance{Steady, "the healthy end state"},
 		Doc{Since: "2.13.104"})
 	SpecSchemaLooserPending = on(TypeSpecSchemaCurrent, "LooserSchemaPending", metav1.ConditionFalse, WriterCoreProvider,
-		"transient: the generated schema is provably looser and the next Update writes it",
+		"transient: the generated schema is provably looser, or differs from the served one only in its defaults (#686), and the next Update writes it",
 		Clearance{NextPass, "the next Update writes the generated schema"},
 		Doc{Since: "2.13.104", Action: "Wait: the next update writes the new schema."})
 	SpecSchemaNotLooser = on(TypeSpecSchemaCurrent, "GeneratedSchemaNotLooser", metav1.ConditionFalse, WriterCoreProvider,

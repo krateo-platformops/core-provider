@@ -93,7 +93,8 @@ func TestCompareSpec(t *testing.T) {
 		{"twin: enum narrowed", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": withEnum("x", "y")}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": withEnum("x")}), false, false, "enum: changed"},
 		{"required shrunk", obj(map[string]apiextensionsv1.JSONSchemaProps{"o": req("a", "b")}), obj(map[string]apiextensionsv1.JSONSchemaProps{"o": req("a")}), false, true, ""},
 		{"twin: required grown", obj(map[string]apiextensionsv1.JSONSchemaProps{"o": req("a")}), obj(map[string]apiextensionsv1.JSONSchemaProps{"o": req("a", "b")}), false, false, "required: changed"},
-		{"default added (changes what objects read as)", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str()}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": withDefault()}), false, false, "default: added"},
+		// #686: a defaults-only difference is safe to write (see onlyDefaultsDiffer).
+		{"default added is defaults-only, safe (#686)", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str()}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": withDefault()}), false, true, ""},
 		{"property no longer declared", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str(), "b": str()}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str()}), false, false, ".b: no longer declared"},
 		{"property newly declared", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str()}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str(), "b": str()}), false, false, ".b: newly declared"},
 		{"a validation rule added", obj(map[string]apiextensionsv1.JSONSchemaProps{"a": str()}), obj(map[string]apiextensionsv1.JSONSchemaProps{"a": {Type: "string", XValidations: apiextensionsv1.ValidationRules{{Rule: "self != ''"}}}}), false, false, "x-kubernetes-validations: added"},

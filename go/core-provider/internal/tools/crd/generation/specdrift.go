@@ -31,6 +31,9 @@ type SpecDrift struct {
 	// NotLooser lists each difference that is not a known loosening, as "path: why", sorted. Empty
 	// with Equal false means every difference is a loosening and the refresh is safe.
 	NotLooser []string
+	// DefaultsOnly: the two differ ONLY in `default` keys (#686); NotLooser is then empty and the
+	// refresh is safe. See onlyDefaultsDiffer.
+	DefaultsOnly bool
 }
 
 // Looser reports whether the generated spec schema differs from the served one only by loosenings.
@@ -69,7 +72,56 @@ func CompareSpec(live, generated *apiextensionsv1.CustomResourceDefinition) (Spe
 	notLooser("spec", o, n, &out)
 	sort.Strings(out)
 	d.NotLooser = out
+	if len(out) > 0 && onlyDefaultsDiffer(o, n) {
+		d.NotLooser = nil
+		d.DefaultsOnly = true
+	}
 	return d, nil
+}
+
+// onlyDefaultsDiffer reports whether two spec schemas are identical once every schema-level `default`
+// is removed at every depth, the `{}` object defaults included (#686). Such a difference is SAFE TO
+// WRITE, in place, on a served version.
+//
+// Why it is safe. The generated defaults come from the chart's values.yaml (ApplyValuesDefaults). A
+// field absent from a stored composition is already filled from values.yaml by helm: the
+// composition-dynamic-controller passes the spec as values and helm merges values.yaml under it. So
+// when the apiserver now reads that field with values.yaml's default, the values handed to helm are
+// the same ones helm would have merged anyway, and the render does not change. Values already
+// stored (under the old defaults) stay as stored; defaulting never overwrites a present field. A
+// defaults-only rewrite therefore cannot change any existing composition's render. Nothing else is
+// covered: a type, enum, required or shape change alongside is not defaults-only and keeps the
+// allowlist's verdict.
+func onlyDefaultsDiffer(served, generated map[string]any) bool {
+	return reflect.DeepEqual(withoutDefaults(served), withoutDefaults(generated))
+}
+
+// withoutDefaults returns a copy of a schema node without any `default`, recursing into every
+// child. A key under `properties` is a field NAME, never a schema keyword, so a field called
+// "default" is kept and only its subschema is stripped.
+func withoutDefaults(v any) any {
+	return stripDefaultKeys(v, false)
+}
+
+func stripDefaultKeys(v any, namesMap bool) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, c := range x {
+			if k == "default" && !namesMap {
+				continue
+			}
+			out[k] = stripDefaultKeys(c, !namesMap && k == "properties")
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, c := range x {
+			out[i] = stripDefaultKeys(c, false)
+		}
+		return out
+	}
+	return v
 }
 
 // ReplaceSpec writes generated's spec schema into live's matching version, leaving every other
