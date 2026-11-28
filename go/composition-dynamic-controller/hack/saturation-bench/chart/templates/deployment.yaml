@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}-pause
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/part-of: satchart
 spec:
@@ -15,6 +16,30 @@ spec:
         app.kubernetes.io/name: {{ .Release.Name }}-pause
     spec:
       terminationGracePeriodSeconds: 0
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: pause
-          image: registry.k8s.io/pause:3.10
+          image: gcr.io/google_containers/pause:3.2
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi

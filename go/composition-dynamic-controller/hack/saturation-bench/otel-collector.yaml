@@ -37,14 +37,32 @@ spec:
   template:
     metadata: {labels: {app: otel}}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
       - name: collector
-        image: otel/opentelemetry-collector-contrib:0.120.0
+        image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.120.0
         args: ["--config=/etc/otel/config.yaml"]
         ports:
         - {containerPort: 4318}
         - {containerPort: 8889}
-        volumeMounts: [{name: config, mountPath: /etc/otel}]
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+          seccompProfile: {type: RuntimeDefault}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 1, memory: 512Mi}
+        volumeMounts: [{name: config, mountPath: /etc/otel, readOnly: true}]
       volumes:
       - name: config
         configMap: {name: otel-config}
