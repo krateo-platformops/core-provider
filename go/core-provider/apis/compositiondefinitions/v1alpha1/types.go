@@ -673,6 +673,14 @@ type CompositionDefinitionStatus struct {
 	// +optional
 	Contents *ChartContents `json:"contents,omitempty"`
 
+	// Chart is what core-provider read from the chart's own Chart.yaml when it read the chart for
+	// Contents (core-provider#671): who maintains the blueprint, and the chart version that was read.
+	// Written on the same pass and from the same loaded chart as Contents, never from a second fetch
+	// and never fabricated. ABSENT: this core-provider could not read the chart's Chart.yaml, or it is
+	// older than this field; a reader treats absent as "chart unread", not as "no maintainers".
+	// +optional
+	Chart *ChartStatus `json:"chart,omitempty"`
+
 	// ScaleToZero is the scale-to-zero reconciler's state for a definition that opted in (#393).
 	// Absent otherwise. Written ONLY by that reconciler, with a merge patch on this field; the
 	// definition's main reconciler reads it to report Ready and ControllerActive.
@@ -708,6 +716,36 @@ type CompositionDefinitionStatus struct {
 	// write came from a core-provider older than this field.
 	// +optional
 	WrittenBy *WrittenBy `json:"writtenBy,omitempty"`
+}
+
+// ChartStatus is what was read from a chart's Chart.yaml (core-provider#671).
+type ChartStatus struct {
+	// Version is the chart version the maintainers were read from (Chart.yaml version), so a
+	// consumer can say "owner as of chart X" when it differs from spec.chart.version. Written even
+	// when the chart declares no maintainers: it states what was read.
+	Version string `json:"version"`
+
+	// Maintainers is Chart.yaml's maintainers list, exactly helm's shape and nothing added. ABSENT
+	// (never an empty list) when the chart declares none, so "no maintainers" and "an older
+	// core-provider" both read as absent: the owner is unknown. A maintainer with no name is not
+	// listed (helm's own shape requires one).
+	// +optional
+	// +listType=atomic
+	Maintainers []ChartMaintainer `json:"maintainers,omitempty"`
+}
+
+// ChartMaintainer is helm's Chart.yaml maintainer (helm.sh/helm/v3 chart.Maintainer): name, email
+// and url, and nothing else.
+type ChartMaintainer struct {
+	// Name is the maintainer's name. Required, as in helm.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Email is the maintainer's email. Omitted when the chart gives none.
+	// +optional
+	Email string `json:"email,omitempty"`
+	// URL is the maintainer's URL. Omitted when the chart gives none.
+	// +optional
+	URL string `json:"url,omitempty"`
 }
 
 // WrittenBy names a binary by its build stamp (core-provider#669).

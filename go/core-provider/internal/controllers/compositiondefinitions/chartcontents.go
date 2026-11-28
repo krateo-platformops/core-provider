@@ -14,3 +14,12 @@ func recordChartContents(cr *compositiondefinitionsv1alpha1.CompositionDefinitio
 	}
 	cr.Status.Contents = &c
 }
+
+// recordChartInfo sets cr.Status.Chart to c when it differs, so an unchanged Chart.yaml writes no
+// status change (core-provider#671). It is set on the in-memory object the pass already writes.
+func recordChartInfo(cr *compositiondefinitionsv1alpha1.CompositionDefinition, c *compositiondefinitionsv1alpha1.ChartStatus) {
+	if c == nil || (cr.Status.Chart != nil && reflect.DeepEqual(*cr.Status.Chart, *c)) {
+		return
+	}
+	cr.Status.Chart = c
+}
