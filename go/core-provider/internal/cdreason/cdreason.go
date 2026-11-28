@@ -360,6 +360,11 @@ const (
 	// was inferred from its values.yaml files (#568 D6; inference is opt-in, krateo.io/values-schema:
 	// infer). Ready is unaffected: an inferred definition reads Available.
 	TypeValuesSchemaAuthored rtv1.ConditionType = "ValuesSchemaAuthored"
+	// TypeSchemaDefaultsMatchValues: whether the chart's values.schema.json declares defaults that
+	// disagree with its values.yaml (#686). The generated CRD defaults from values.yaml, what helm
+	// uses, so this says where the schema's own defaults are NOT what a composition gets. Ready is
+	// unaffected.
+	TypeSchemaDefaultsMatchValues rtv1.ConditionType = "SchemaDefaultsMatchValues"
 	// TypeMigratedValuesValid: whether every instance on the served version still satisfies that
 	// version's schema after a version migration moved instances onto it (#614). The apiserver
 	// ratchets validation on update, so a migration can carry a value the new version refuses; this
@@ -465,6 +470,19 @@ var (
 		Clearance{Steady, "while another definition generates the CRD"},
 		Doc{Since: "2.13.117", Action: "See the blueprint the message names: its schema is the one in use.", Actors: []Actor{ActorYou}, DetailFields: []string{"status.owner"}})
 
+	SchemaDefaultsAligned = on(TypeSchemaDefaultsMatchValues, "Aligned", metav1.ConditionTrue, WriterCoreProvider,
+		"every default in the chart's values.schema.json equals the value at the same path in values.yaml, or the schema declares none",
+		Clearance{Steady, "the healthy end state"},
+		Doc{Since: Unreleased})
+	SchemaDefaultsDiffer = on(TypeSchemaDefaultsMatchValues, "SchemaDefaultsDiffer", metav1.ConditionFalse, WriterCoreProvider,
+		"the schema declares a default that values.yaml does not agree with: a different value, or no key at that path; the generated CRD defaults from values.yaml, what helm uses, so a composition and a helm install of the chart agree; the message names each path (capped), and any values.yaml value the schema refuses as a default (recomputed on every Observe)",
+		Clearance{Indefinite, "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"},
+		Doc{Since: Unreleased, Action: "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.", Actors: []Actor{ActorMaintainers}})
+	SchemaDefaultsOwnedElsewhere = on(TypeSchemaDefaultsMatchValues, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
+		"a follower: another definition generates the CRD; the message names it",
+		Clearance{Steady, "while another definition generates the CRD"},
+		Doc{Since: Unreleased, Action: "See the blueprint the message names: its schema is the one in use.", Actors: []Actor{ActorYou}, DetailFields: []string{"status.owner"}})
+
 	MigratedValuesAllValid = on(TypeMigratedValuesValid, "AllValid", metav1.ConditionTrue, WriterCoreProvider,
 		"every instance on the served version passed a dry-run create through it after the last migration; nothing reopens this until the next migration",
 		Clearance{Steady, "until the next migration"},
@@ -540,6 +558,7 @@ func nonReady() []Reason {
 	}
 	return append(out, AuthnDelegationRendered, AuthnDelegationUnsupported, AuthnMappingApplied, AuthnNotInstalled, AuthnMappingMissing, AuthnMappingNotObserved,
 		ValuesSchemaAuthored, ValuesSchemaInferred, ValuesSchemaOwnedElsewhere,
+		SchemaDefaultsAligned, SchemaDefaultsDiffer, SchemaDefaultsOwnedElsewhere,
 		MigratedValuesAllValid, MigratedValuesRefused, MigratedValuesUnchecked)
 }
 
