@@ -132,6 +132,30 @@ With `otel.enabled=true`, `unstructured_runtime.ratelimit.local.capacity` and `.
 show what the rule is doing. See the
 [metrics reference](../go/composition-dynamic-controller/telemetry/metrics-reference.md).
 
+### Derived-RBAC cache (on by default)
+
+Each composition controller derives its composition's RBAC by asking chart-inspector, whose answer is a
+helm dry-run render that GETs every rendered object (#697). The controller remembers the answer per
+composition and, while nothing that determines it has changed, re-applies the remembered rules on each
+resync instead of asking again. The rules are still applied every pass, so a deleted or edited Role,
+ClusterRole or binding is restored within one resync either way.
+
+What counts as a change: the composition's values, the helm release revision, the chart (url, repo,
+version, registry credentials, TLS setting), the CompositionDefinition's generation, and chart-inspector's
+build version (its `X-Chart-Inspector-Version` response header; an inspector that sends none is version
+`""`, so the first upgrade to one that does costs one call). A chart that mentions `lookup` anywhere in its
+templates, helpers, subcharts or default values, or a composition whose own values do, is never cached:
+`lookup` reads cluster state that nothing keys. The scan is deliberately wide (a comment matches); a false
+positive only turns the cache off for that chart. A chart that cannot be read is treated the same way.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `COMPOSITION_CONTROLLER_DERIVED_RBAC_CACHE` | `true` | `false` makes every pass ask chart-inspector, as before #697. |
+
+Measure it with `composition_rbac_generation_decisions_total{reason}`: `skipped` is a pass that did not call
+chart-inspector; `key_changed`, `lookup` and `unscannable` made a call (`composition_rbac_generation_total`
+counts the calls).
+
 ## The env ConfigMap contract
 
 The engine reads env from a ConfigMap rendered by

@@ -52,10 +52,10 @@ type Metrics struct {
 	chartInspectorErrors   metric.Int64Counter
 
 	// RBAC Generation metrics
-	rbacGenerationDuration metric.Float64Histogram
-	rbacGenerationTotal    metric.Int64Counter
-	rbacGenerationErrors   metric.Int64Counter
-	rbacGenerationSkipped  metric.Int64Counter
+	rbacGenerationDuration  metric.Float64Histogram
+	rbacGenerationTotal     metric.Int64Counter
+	rbacGenerationErrors    metric.Int64Counter
+	rbacGenerationDecisions metric.Int64Counter
 
 	// RBAC Apply metrics
 	rbacApplyDuration metric.Float64Histogram
@@ -212,9 +212,9 @@ func newMetrics(meter metric.Meter, log logging.Logger, deploymentName string) (
 		return nil, err
 	}
 
-	m.rbacGenerationSkipped, err = meter.Int64Counter(
-		"composition_rbac_generation_skipped_total",
-		metric.WithDescription("Passes that re-applied the cached derived RBAC instead of asking chart-inspector, because nothing that determines its answer had changed (#697)"),
+	m.rbacGenerationDecisions, err = meter.Int64Counter(
+		"composition_rbac_generation_decisions_total",
+		metric.WithDescription("Observe passes by what the derived-RBAC cache decided (#697): reason=skipped re-applied the cached rules without asking chart-inspector; lookup (the chart calls lookup), key_changed and unscannable asked it"),
 	)
 	if err != nil {
 		return nil, err
@@ -424,13 +424,13 @@ func (m *Metrics) IncRBACGenerationTotal(ctx context.Context) {
 	m.rbacGenerationTotal.Add(ctx, 1, metric.WithAttributes(m.instanceAttrs()...))
 }
 
-// IncRBACGenerationSkipped counts a pass that did not call chart-inspector (#697). Against
-// composition_rbac_generation_total, which counts the calls, it is the measure of what the cache saves.
-func (m *Metrics) IncRBACGenerationSkipped(ctx context.Context) {
-	if m == nil || m.rbacGenerationSkipped == nil {
+// IncRBACGenerationDecision counts an Observe pass under the reason the derived-RBAC cache decided as
+// it did (#697). reason=skipped passes made no chart-inspector call; every other reason made one.
+func (m *Metrics) IncRBACGenerationDecision(ctx context.Context, reason string) {
+	if m == nil || m.rbacGenerationDecisions == nil {
 		return
 	}
-	m.rbacGenerationSkipped.Add(ctx, 1, metric.WithAttributes(m.instanceAttrs()...))
+	m.rbacGenerationDecisions.Add(ctx, 1, metric.WithAttributes(append(m.instanceAttrs(), attribute.String("reason", reason))...))
 }
 
 func (m *Metrics) IncRBACGenerationErrors(ctx context.Context) {

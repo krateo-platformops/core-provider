@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,14 +31,29 @@ import (
 // too wide costs one extra call, one too narrow grants the wrong RBAC. See derivedRBACKeyFor for each
 // input and where chart-inspector reads it.
 //
-// ONE INPUT CANNOT BE KEYED: cluster state read through a chart's `lookup`. The render is a server-side
-// dry run, so a template may branch on what exists in the cluster, and the cdc cannot know that. The
-// release revision covers the chart's own children changing; nothing covers an object the chart merely
-// looks up. So an entry also expires after derivedRBACMaxAge, bounding that staleness (and a
-// chart-inspector upgrade, whose version the cdc has no way to read without a call) to one interval.
-// COMPOSITION_CONTROLLER_DERIVED_RBAC_MAX_AGE=0 turns the cache off.
+// TWO INPUTS ARE NOT IN THE KEY BECAUSE THEY ARE EXACT ELSEWHERE:
+//
+//   - A chart's `lookup`. The render is a server-side dry run, so a template that calls `lookup` reads
+//     cluster state nothing in the key covers. A composition whose chart (or any subchart, helper or
+//     default values file) mentions `lookup` is NEVER cached: every pass asks. See chartLookupScanner.
+//   - chart-inspector's own version, which is in the key (inspectorVersions).
+//
+// COMPOSITION_CONTROLLER_DERIVED_RBAC_CACHE=false turns the cache off.
 
-const derivedRBACMaxAgeEnvvar = "COMPOSITION_CONTROLLER_DERIVED_RBAC_MAX_AGE"
+const derivedRBACCacheEnvvar = "COMPOSITION_CONTROLLER_DERIVED_RBAC_CACHE"
+
+// derivedRBACVersionProbeEvery is how often the cdc asks chart-inspector for its version when no render
+// has told it: an operational throttle on a request that costs no render, not a bound on correctness.
+// An upgraded inspector is noticed within this interval, and by the first call that reaches it sooner.
+const derivedRBACVersionProbeEvery = 15 * time.Second
+
+// The reasons a pass is counted under (composition_rbac_generation_decisions_total{reason}).
+const (
+	rbacDecisionSkipped    = "skipped"     // unchanged key: cached rules re-applied, chart-inspector not asked
+	rbacDecisionLookup     = "lookup"      // the chart calls `lookup`: never cached, asked
+	rbacDecisionKeyChanged = "key_changed" // no entry or a different key: asked
+	rbacDecisionUnscanned  = "unscannable" // the key or the chart could not be read: asked, never assumed
+)
 
 // derivedRBACKey is comparable: two keys are the same computation exactly when they are ==.
 type derivedRBACKey struct {
@@ -80,35 +96,53 @@ type derivedRBACKey struct {
 	SAName       string
 	SANamespace  string
 	InspectorURL string
+	// InspectorVersion is the build version chart-inspector last reported; "" for one that sends none.
+	InspectorVersion string
 }
 
 type derivedRBACEntry struct {
 	key   derivedRBACKey
 	rules *rbac.RBAC
-	at    time.Time
 }
 
 // derivedRBACCache is safe for concurrent use: a pooled process runs several compositions at once.
-// A nil cache never hits and never stores, which is what a handler built without one gets.
+// A nil cache, or one built disabled, never hits and never stores.
 type derivedRBACCache struct {
 	mu      sync.Mutex
 	entries map[types.UID]derivedRBACEntry
-	maxAge  time.Duration
-	now     func() time.Time
+	on      bool
+	// versions learns chart-inspector's build version. nil: every version reads "".
+	versions *inspectorVersions
+	// lookups says whether a chart calls `lookup`. nil: nothing is known, so nothing is cached.
+	lookups *chartLookupScanner
 }
 
-// newDerivedRBACCache returns a cache whose entries expire after maxAge. maxAge <= 0 disables it.
-func newDerivedRBACCache(maxAge time.Duration, now func() time.Time) *derivedRBACCache {
-	if now == nil {
-		now = time.Now
+// newDerivedRBACCache returns a cache; enabled false makes it a no-op.
+func newDerivedRBACCache(enabled bool) *derivedRBACCache {
+	return &derivedRBACCache{entries: map[types.UID]derivedRBACEntry{}, on: enabled}
+}
+
+// newProductionDerivedRBACCache is the cache NewHandler installs: the real chart scanner and a
+// version probe throttled to derivedRBACVersionProbeEvery.
+func newProductionDerivedRBACCache(enabled bool) *derivedRBACCache {
+	c := newDerivedRBACCache(enabled)
+	c.versions = &inspectorVersions{every: derivedRBACVersionProbeEvery}
+	c.lookups = newChartLookupScanner()
+	return c
+}
+
+func (c *derivedRBACCache) enabled() bool { return c != nil && c.on }
+
+// observeVersion records the chart-inspector version a render response carried. Safe on a nil cache.
+func (c *derivedRBACCache) observeVersion(v string) {
+	if c == nil {
+		return
 	}
-	return &derivedRBACCache{entries: map[types.UID]derivedRBACEntry{}, maxAge: maxAge, now: now}
+	c.versions.observe(v)
 }
-
-func (c *derivedRBACCache) enabled() bool { return c != nil && c.maxAge > 0 }
 
 // lookup returns a PRIVATE copy of the cached rules when the entry for uid was computed under exactly
-// key and has not expired.
+// key.
 func (c *derivedRBACCache) lookup(uid types.UID, key derivedRBACKey) (*rbac.RBAC, bool) {
 	if !c.enabled() {
 		return nil, false
@@ -116,7 +150,7 @@ func (c *derivedRBACCache) lookup(uid types.UID, key derivedRBACKey) (*rbac.RBAC
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[uid]
-	if !ok || e.key != key || c.now().Sub(e.at) >= c.maxAge {
+	if !ok || e.key != key {
 		return nil, false
 	}
 	return e.rules.DeepCopy(), true
@@ -128,7 +162,7 @@ func (c *derivedRBACCache) store(uid types.UID, key derivedRBACKey, rules *rbac.
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[uid] = derivedRBACEntry{key: key, rules: rules.DeepCopy(), at: c.now()}
+	c.entries[uid] = derivedRBACEntry{key: key, rules: rules.DeepCopy()}
 }
 
 // forget drops uid's entry: the composition is gone, or its last computation failed.
@@ -150,8 +184,9 @@ func (c *derivedRBACCache) size() int {
 	return len(c.entries)
 }
 
-// derivedRBACKeyFor builds the key for this pass. ok is false when an input cannot be read, and the
-// caller then asks chart-inspector: not knowing is never a reason to apply cached rules.
+// derivedRBACKeyFor builds the key for this pass. A non-empty reason (an rbacDecision* constant) means
+// the pass is not cacheable, and the caller then asks chart-inspector: not knowing is never a reason
+// to apply cached rules.
 //
 // Inputs, and where chart-inspector (go/chart-inspector/internal/handlers/resources/get/resources.go)
 // reads each:
@@ -159,6 +194,7 @@ func (c *derivedRBACCache) size() int {
 //   - releaseName: the query parameter it installs under.
 //   - release revision: not read by chart-inspector, but cluster state its DryRunServer render sees
 //     (lookup, and the GET of each rendered object).
+//   - chart-inspector's build version (X-Chart-Inspector-Version), learned from /healthz and from every render.
 //   - chart URL / version / repo / TLS / credentials: compositionDefinition.Spec.Chart.* and the
 //     password Secret it reads. The cdc keys what it resolved for its own version AND the definition's
 //     current version.
@@ -166,21 +202,26 @@ func (c *derivedRBACCache) size() int {
 //   - values: helmutils.ValuesFromSpec(composition) then InjectGlobalValues, which also puts the
 //     composition's name, namespace, UID, apiVersion, kind, resource, the paused annotation and the
 //     krateo namespace into the values.
-func (h *handler) derivedRBACKeyFor(mg *unstructured.Unstructured, pkg *archive.Info, releaseName string, revision int) (derivedRBACKey, bool) {
+func (h *handler) derivedRBACKeyFor(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, releaseName string, revision int) (key derivedRBACKey, reason string) {
 	if pkg == nil || pkg.CompositionDefinitionInfo == nil || mg.GetUID() == "" {
-		return derivedRBACKey{}, false
+		return derivedRBACKey{}, rbacDecisionUnscanned
 	}
 	values, err := helmutils.ValuesFromSpec(mg)
 	if err != nil {
-		return derivedRBACKey{}, false
+		return derivedRBACKey{}, rbacDecisionUnscanned
 	}
 	if err := values.InjectGlobalValues(mg, h.pluralizer, krateoNamespace); err != nil {
-		return derivedRBACKey{}, false
+		return derivedRBACKey{}, rbacDecisionUnscanned
 	}
 	// json.Marshal writes map keys in sorted order, so equal values digest equally.
 	raw, err := json.Marshal(values)
 	if err != nil {
-		return derivedRBACKey{}, false
+		return derivedRBACKey{}, rbacDecisionUnscanned
+	}
+	// A template that runs `tpl` over a value renders what the value holds, so a `lookup` written
+	// into the composition's own spec reads cluster state just as one in the chart does.
+	if lookupWord.Match(raw) {
+		return derivedRBACKey{}, rbacDecisionLookup
 	}
 	valuesSum := sha256.Sum256(raw)
 
@@ -213,7 +254,8 @@ func (h *handler) derivedRBACKeyFor(mg *unstructured.Unstructured, pkg *archive.
 		SAName:               h.saName,
 		SANamespace:          h.saNamespace,
 		InspectorURL:         h.chartInspectorUrl,
-	}, true
+		InspectorVersion:     h.derivedRBAC.versions.current(ctx, h.chartInspectorUrl),
+	}, ""
 }
 
 // rbacCacheUse says an applyDerivedRBAC caller wants the cache, and what it knows that the function

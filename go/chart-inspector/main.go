@@ -156,8 +156,9 @@ func main() {
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 
 	server := &http.Server{
-		Addr:        fmt.Sprintf(":%d", *port),
-		Handler:     mux,
+		Addr: fmt.Sprintf(":%d", *port),
+		// Every response carries the build version, which the cdc keys its derived-RBAC cache on (#697).
+		Handler:     handlers.WithVersionHeader(buildVersion, mux),
 		ReadTimeout: 10 * time.Second,
 		// Rendering a large umbrella (e.g. the installer) is a helm dry-run install plus a Pass-B
 		// `lookup` sweep over the whole cluster; on a fully-deployed cluster that response takes ~1 min

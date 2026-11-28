@@ -57,10 +57,8 @@ import (
 var (
 	krateoNamespace = env.String(krateoNamespaceEnvVar, krateoNamespaceDefault)
 	helmMaxHistory  = env.Int(helmMaxHistoryEnvvar, 3)
-	// derivedRBACMaxAge bounds how long a chart-inspector answer is reused while its key is unchanged
-	// (#697): the one input the key cannot hold is cluster state a chart reads with `lookup`. 0 turns
-	// the reuse off. See derivedrbaccache.go.
-	derivedRBACMaxAge = env.Duration(derivedRBACMaxAgeEnvvar, 10*time.Minute)
+	// derivedRBACEnabled is the off switch of the derived-RBAC cache (#697); on by default.
+	derivedRBACEnabled = env.Bool(derivedRBACCacheEnvvar, true)
 	// helmOperationTimeout is the Timeout of every helm install, upgrade, rollback and uninstall
 	// (#410). helm applies it to EACH wait, not to the operation as a whole: execHook calls
 	// WatchUntilReady(resources, timeout) once per hook, in weight order (measured on kind: two
@@ -201,7 +199,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		metrics:            opts.Metrics,
 		writtenBy:          opts.WrittenBy,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
-		derivedRBAC:        newDerivedRBACCache(derivedRBACMaxAge, time.Now),
+		derivedRBAC:        newProductionDerivedRBACCache(derivedRBACEnabled),
 	}
 }
 
@@ -2020,27 +2018,53 @@ func (h *handler) applyDerivedRBACWith(ctx context.Context, mg *unstructured.Uns
 		key       derivedRBACKey
 		cacheable bool
 		generated *rbac.RBAC
+		reason    string
 	)
-	if use != nil && h.derivedRBAC.enabled() {
-		key, cacheable = h.derivedRBACKeyFor(mg, pkg, releaseName, use.revision)
+	cached := use != nil && h.derivedRBAC.enabled()
+	if cached {
+		key, reason = h.derivedRBACKeyFor(ctx, mg, pkg, releaseName, use.revision)
+		if reason == "" {
+			// Once per chart identity, not per pass. Unknown is "asks", never "no lookup".
+			switch uses, err := h.derivedRBAC.lookups.usesLookup(ctx, pkg); {
+			case err != nil:
+				xcontext.Logger(ctx).Debug("Could not scan the chart for `lookup`; asking chart-inspector", "error", err.Error())
+				reason = rbacDecisionUnscanned
+			case uses:
+				reason = rbacDecisionLookup
+			}
+		}
+		cacheable = reason == ""
 	}
 	if cacheable {
 		if rules, hit := h.derivedRBAC.lookup(mg.GetUID(), key); hit {
 			generated = rules
-			metrics.FromContext(ctx).IncRBACGenerationSkipped(ctx)
+			reason = rbacDecisionSkipped
 			xcontext.Logger(ctx).Debug("Derived RBAC unchanged since the last chart-inspector answer; re-applying it without asking chart-inspector",
 				"key", key.String())
 			markChartRenderable(ctx, mg)
+		} else {
+			reason = rbacDecisionKeyChanged
 		}
 	}
+	if cached {
+		metrics.FromContext(ctx).IncRBACGenerationDecision(ctx, reason)
+	}
 	if generated == nil {
-		generated, err = h.generateDerivedRBAC(ctx, mg, pkg, releaseName, compositionGVR)
+		var served *string
+		generated, err = h.generateDerivedRBAC(ctx, mg, pkg, releaseName, compositionGVR, func(v string) {
+			served = &v
+			h.derivedRBAC.observeVersion(v)
+		})
 		if err != nil {
 			// A changed key's answer failed: whatever was kept belongs to a key that no longer holds.
 			h.derivedRBAC.forget(mg.GetUID())
 			return 0, err
 		}
 		if cacheable {
+			// Keyed by the version that ANSWERED, not the one read before asking.
+			if served != nil {
+				key.InspectorVersion = *served
+			}
 			h.derivedRBAC.store(mg.GetUID(), key, generated)
 		}
 	}
@@ -2068,8 +2092,9 @@ func (h *handler) applyDerivedRBACWith(ctx context.Context, mg *unstructured.Uns
 // generateDerivedRBAC asks chart-inspector for the composition's derived RBAC and builds the objects.
 // Its failure handling (ChartRenderable, RBACComplete, the wrapped error) is what applyDerivedRBAC
 // always did; it is unchanged by #697.
-func (h *handler) generateDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, releaseName string, compositionGVR schema.GroupVersionResource) (*rbac.RBAC, error) {
+func (h *handler) generateDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, releaseName string, compositionGVR schema.GroupVersionResource, onVersion func(string)) (*rbac.RBAC, error) {
 	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
+	chartInspector.WithVersionObserver(onVersion)
 	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
 	generated, err := rbgen.
 		WithBaseName(releaseName).

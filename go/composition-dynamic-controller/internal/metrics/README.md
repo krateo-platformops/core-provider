@@ -14,7 +14,7 @@ This document describes how to integrate the metrics instrumentation into the Co
 - `composition_rbac_generation_duration_seconds` - Histogram of RBAC generation duration
 - `composition_rbac_generation_total` - Counter of RBAC generation operations
 - `composition_rbac_generation_errors` - Counter of RBAC generation failures
-- `composition_rbac_generation_skipped_total` - Counter of passes that re-applied the cached derived RBAC without calling chart-inspector (#697); `composition_rbac_generation_total` counts the calls
+- `composition_rbac_generation_decisions_total{reason}` - Counter of Observe passes by what the derived-RBAC cache decided (#697): `skipped` re-applied the cached rules without asking chart-inspector; `lookup` (the chart calls `lookup`), `key_changed` and `unscannable` asked it. `composition_rbac_generation_total` counts the calls
 
 ### RBAC Apply Metrics
 - `composition_rbac_apply_duration_seconds` - Histogram of RBAC apply duration
