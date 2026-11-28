@@ -1031,6 +1031,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// never a factor in Ready.
 	if !deleted {
 		recordChartContents(cr, chart.Contents(pkgInfo, dir))
+		// #671: the chart's own maintainers and version, from the same chart. A Chart.yaml that cannot
+		// be read leaves status.chart as it was; it is never a reason to fail the pass.
+		if info, err := chart.Info(pkgInfo, dir); err != nil {
+			log.Debug("reading the chart's Chart.yaml for status.chart", "error", err)
+		} else {
+			recordChartInfo(cr, info)
+		}
 	}
 	// #568 child 6: the one seam for the spec schema. An authored values.schema.json wins; without
 	// one, it is inferred only when the definition opted in (krateo.io/values-schema: infer), and

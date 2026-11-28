@@ -235,6 +235,8 @@ status:
 - After a chart version change, the previous contents stay, with their own `chartVersion`, until the
   new chart is readable and its render replaces them.
 - It never affects Ready.
+- Beside it, `status.chart` records the chart's `Chart.yaml` maintainers and version, read in the same
+  pass (core-provider#671): see [api.md](./api.md#statuschart-who-maintains-the-blueprint-671).
 
 ## Is a definition's `Ready` about its current spec?
 

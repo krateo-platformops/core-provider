@@ -62,11 +62,17 @@ const noSchema644 = "\x00none"
 // add serves chart name at version with valuesSchema (noSchema644: no values.schema.json at all).
 func (s *charts644) add(t *testing.T, name, version, valuesSchema string) {
 	t.Helper()
+	s.addChart(t, name, version, valuesSchema, "")
+}
+
+// addChart is add with extra lines appended to Chart.yaml (for example a maintainers list, #671).
+func (s *charts644) addChart(t *testing.T, name, version, valuesSchema, chartYAMLExtra string) {
+	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	for f, body := range map[string]string{
-		"Chart.yaml":         "apiVersion: v2\nname: " + name + "\nversion: " + version + "\n",
+		"Chart.yaml":         "apiVersion: v2\nname: " + name + "\nversion: " + version + "\n" + chartYAMLExtra,
 		"values.yaml":        "{}\n",
 		"values.schema.json": valuesSchema,
 		"templates/t.yaml":   twoConfigMaps,

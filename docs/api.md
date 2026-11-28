@@ -227,6 +227,36 @@ composition CRD that predates it prunes it), means: read the table at `HEAD` and
 - `version` is written as the build carries it: release images are built with the bare git tag;
   it is never rewritten to look like one.
 
+### `status.chart`: who maintains the blueprint (#671)
+
+Every CompositionDefinition records its chart's own `Chart.yaml` maintainers and the chart version they
+were read from, so a consumer (incident-agent, through observability) can name who must act on a failed
+blueprint:
+
+```yaml
+status:
+  chart:
+    version: 0.3.0          # the Chart.yaml version the maintainers were read from
+    maintainers:            # helm's own shape (chart.Maintainer), nothing added
+      - {name: Ada, email: ada@example.com, url: https://example.com/ada}
+      - {name: Bob}
+```
+
+- **Exactly helm's shape.** `name` is required; `email` and `url` are omitted when the chart gives none.
+- **Absent means unknown.** A chart that declares no maintainers has **no `maintainers` key** (never an
+  empty list), so "the chart names nobody" and "a core-provider older than this field" both read as
+  absent: the owner is unknown. `version` is still written in the first case: it states what was read.
+  A maintainer with no `name` is not listed (helm's shape requires one, and the CRD refuses an entry
+  without it).
+- **`version` is the chart read, not `spec.chart.version`.** When they differ, say "owner as of chart
+  `status.chart.version`" rather than presenting a stale owner as current. A new chart version replaces
+  the previous maintainers, including with none.
+- **Read once.** Written in the pass that reads the chart for `status.contents`, from the same loaded
+  chart: no second fetch, never fabricated. A chart whose `Chart.yaml` cannot be read, and a definition
+  being deleted, leave `status.chart` as it was.
+- **Never a write of its own.** It is set on the object the pass writes anyway and only when it differs
+  from what is stored: a pass that changes nothing else leaves `resourceVersion` unchanged.
+
 ### The GVK a blueprint must pin
 
 **Read it from the status; never re-derive it.**

@@ -473,6 +473,52 @@ spec:
                 description: 'ApiVersion: the api version of the custom resource -
                   Last applied apiVersion'
                 type: string
+              chart:
+                description: |-
+                  Chart is what core-provider read from the chart's own Chart.yaml when it read the chart for
+                  Contents (core-provider#671): who maintains the blueprint, and the chart version that was read.
+                  Written on the same pass and from the same loaded chart as Contents, never from a second fetch
+                  and never fabricated. ABSENT: this core-provider could not read the chart's Chart.yaml, or it is
+                  older than this field; a reader treats absent as "chart unread", not as "no maintainers".
+                properties:
+                  maintainers:
+                    description: |-
+                      Maintainers is Chart.yaml's maintainers list, exactly helm's shape and nothing added. ABSENT
+                      (never an empty list) when the chart declares none, so "no maintainers" and "an older
+                      core-provider" both read as absent: the owner is unknown. A maintainer with no name is not
+                      listed (helm's own shape requires one).
+                    items:
+                      description: |-
+                        ChartMaintainer is helm's Chart.yaml maintainer (helm.sh/helm/v3 chart.Maintainer): name, email
+                        and url, and nothing else.
+                      properties:
+                        email:
+                          description: Email is the maintainer's email. Omitted when
+                            the chart gives none.
+                          type: string
+                        name:
+                          description: Name is the maintainer's name. Required, as
+                            in helm.
+                          minLength: 1
+                          type: string
+                        url:
+                          description: URL is the maintainer's URL. Omitted when the
+                            chart gives none.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  version:
+                    description: |-
+                      Version is the chart version the maintainers were read from (Chart.yaml version), so a
+                      consumer can say "owner as of chart X" when it differs from spec.chart.version. Written even
+                      when the chart declares no maintainers: it states what was read.
+                    type: string
+                required:
+                - version
+                type: object
               conditions:
                 description: Conditions of the resource.
                 items:
