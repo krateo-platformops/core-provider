@@ -29,7 +29,7 @@ func TestOwnershipLeaseTimingsRenderOnceForBothBinaries(t *testing.T) {
 		want  []string
 		read  deploy.OwnershipLeaseTimings
 	}{
-		{"the chart's default, Diego 2026-11-25", nil, []string{`"30s"`, `"20s"`, `"5s"`},
+		{"the chart's default (#660)", nil, []string{`"30s"`, `"20s"`, `"5s"`},
 			deploy.OwnershipLeaseTimings{Duration: 30 * time.Second, RenewDeadline: 20 * time.Second, RetryPeriod: 5 * time.Second}},
 		{"a cluster's own", map[string]any{"cdc": map[string]any{"ownershipLease": map[string]any{"duration": "41s", "renewDeadline": "27s", "retryPeriod": "7s"}}},
 			[]string{`"41s"`, `"27s"`, `"7s"`},
@@ -89,6 +89,7 @@ func TestOwnershipLeaseTimingsChartRefusesAnInvalidSet(t *testing.T) {
 		{"30s", "20s", "20s", "renewDeadline must be greater than retryPeriod x 1.2"},
 		{"30s", "20s", "0s", "greater than zero"},
 		{"30", "20s", "5s", "each a Go duration"},
+		{"0.5", "0.3s", "0.1s", "each a Go duration"},
 		{"30s", "20s", "", "all three are required"},
 	} {
 		if err := render(true, c.d, c.r, c.p); err == nil {
@@ -100,7 +101,8 @@ func TestOwnershipLeaseTimingsChartRefusesAnInvalidSet(t *testing.T) {
 			t.Errorf("%s/%s/%s without the schema: %v; want the template's refusal naming the three (%s) and saying %q", c.d, c.r, c.p, err, named, c.says)
 		}
 	}
-	for _, ok := range [][3]string{{"60s", "40s", "15s"}, {"1m30s", "1m", "20s"}, {"7s", "6100ms", "5s"}, {"15s", "10s", "2s"}} {
+	for _, ok := range [][3]string{{"60s", "40s", "15s"}, {"1m30s", "1m", "20s"}, {"7s", "6100ms", "5s"}, {"15s", "10s", "2s"},
+		{"0.5s", "0.3s", "0.1s"}, {"1500ms", "1s", "0.5s"}, {"1m30s", "1m", "0.5s"}, {"1.5s", "1s", ".5s"}} {
 		for _, withSchema := range []bool{true, false} {
 			if err := render(withSchema, ok[0], ok[1], ok[2]); err != nil {
 				t.Errorf("control %v (schema %v): %v", ok, withSchema, err)

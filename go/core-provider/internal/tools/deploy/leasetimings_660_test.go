@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
 
-// #660, Diego 2026-11-25: the default is 30s/20s/5s, and what core-provider derives from it. Every
+// #660: the default is 30s/20s/5s, and what core-provider derives from it. Every
 // expected value is a literal.
 func TestDefaultOwnershipLeaseTimings(t *testing.T) {
 	d := DefaultOwnershipLeaseTimings()

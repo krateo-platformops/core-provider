@@ -243,7 +243,7 @@ worker starts:
   `spec.holderIdentity` being its pod name, not pod readiness;
 - a Lease it cannot read or write (e.g. missing RBAC) fails `/readyz`, naming the
   Lease;
-- losing the Lease (no renewal within `renewDeadline`, 20s by default) cancels in-flight reconciles at once
+- losing the Lease (no renewal within `renewDeadline`, 20s by default, twice the 10s before #660, which makes a starved control plane's slow renewals less likely to cost the Lease) cancels in-flight reconciles at once
   and exits the process, which restarts and waits for the Lease again;
 - an unset `COMPOSITION_CONTROLLER_LEASE_NAME` (a ConfigMap rendered before this)
   runs without a Lease, as before. A set name with no `POD_NAMESPACE`/`POD_NAME`

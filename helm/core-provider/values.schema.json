@@ -670,7 +670,7 @@
         },
         "ownershipLease": {
           "type": "object",
-          "title": "Ownership Lease timings of every composition controller (#660), as Go durations: client-go's leaseDuration / renewDeadline / retryPeriod. ONE value for both binaries: rendered under the same env names (COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION, _RENEW_DEADLINE, _RETRY_PERIOD) into every controller's ConfigMap and into core-provider's, which measures every wait on these Leases by them. A holder renews every retryPeriod (one Lease write per controller per retryPeriod at rest); a pod that dies without releasing its Lease is waited for up to duration. Required as a set: duration > renewDeadline > retryPeriod x 1.2, every one > 0; the chart refuses to render, and both binaries to start, otherwise.",
+          "title": "Ownership Lease timings of every composition controller (#660), as Go durations: client-go's leaseDuration / renewDeadline / retryPeriod. ONE value for both binaries: rendered under the same env names (COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION, _RENEW_DEADLINE, _RETRY_PERIOD) into every controller's ConfigMap and into core-provider's, which measures every wait on these Leases by them. A holder renews every retryPeriod (one Lease write per controller per retryPeriod at rest); a pod that dies without releasing its Lease is waited for up to duration + 2.2 x retryPeriod. Each is a positive Go duration (time.ParseDuration's grammar: 30s, 0.5s, 1500ms, 1m30s); zero is refused by the template. Required as a set: duration > renewDeadline > retryPeriod x 1.2, every one > 0; the chart refuses to render, and both binaries to start, otherwise.",
           "additionalProperties": false,
           "required": [
             "duration",
@@ -680,19 +680,19 @@
           "properties": {
             "duration": {
               "type": "string",
-              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "pattern": "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$",
               "title": "leaseDuration: how long a holder that stops renewing keeps the Lease, so how long a successor waits for a pod that died without releasing it",
               "default": "30s"
             },
             "renewDeadline": {
               "type": "string",
-              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "pattern": "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$",
               "title": "renewDeadline: how long a holder keeps trying to renew before it gives the Lease up and stops reconciling",
               "default": "20s"
             },
             "retryPeriod": {
               "type": "string",
-              "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(ns|us|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*$",
+              "pattern": "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$",
               "title": "retryPeriod: how often a holder renews (its Lease write rate at rest) and a candidate retries",
               "default": "5s"
             }

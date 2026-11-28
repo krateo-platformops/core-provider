@@ -403,20 +403,23 @@ from the same chart value the controllers read (#660, below) and passes them dow
 "unheld for Quiet" is its `Quiet()`, `2.5 x retryPeriod`.
 
 **The timings are one chart value (#660).** `cdc.ownershipLease.{duration,renewDeadline,retryPeriod}`
-(default 30s/20s/5s, Diego 2026-11-25) is rendered by one helper (`core-provider.ownershipLeaseEnv`) under
+(default 30s/20s/5s) is rendered by one helper (`core-provider.ownershipLeaseEnv`) under
 the same three env names, `COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION`, `_RENEW_DEADLINE` and
 `_RETRY_PERIOD`, into every controller's process env (dedicated and pool) and into core-provider's own
 ConfigMap, so the two binaries cannot disagree. A set client-go's elector would refuse (duration >
 renewDeadline > retryPeriod x 1.2, every one > 0) is refused by the chart (schema and template) and by
 both binaries at startup, naming the three. Why: a holder renews every retryPeriod, one Lease PUT per
 controller per retryPeriod. At 2s that was 0.5/s per controller, ~25/s for 50 controllers, the largest
-write load at rest of a SQLite (kine) tenant control plane (measured on acmp, 2.13.105: 24.8 Lease PUTs/s
+write load at rest of a SQLite (kine) tenant control plane (measured at 2.13.105: 24.8 Lease PUTs/s
 of 171 requests/s); at 5s it is 0.2/s, ~10/s for 50. The costs: a controller pod that dies without
-releasing its Lease and is replaced by a pod of another name is waited for up to the duration, 30s
-instead of 15s. A graceful rollout releases at once, but the successor, which retries every retryPeriod
+releasing its Lease and is replaced by a pod of another name is waited for up to the duration plus 2.2 x retryPeriod, 41s
+instead of 19.4s (the replacement measures expiry from its own first read of the Lease, then notices it at its next
+jittered attempt; a replacement slower to start than the duration waits only for that attempt). G still covers it. A graceful rollout releases at once, but the successor, which retries every retryPeriod
 jittered up to 2.2 x retryPeriod, takes the released Lease within 11s instead of 4.4s. A container
 restart in the same pod reacquires at once (it is the holder already). G, the grace before a pool
-member reads Unavailable, is 42.5s instead of 20s.
+member reads Unavailable, is 42.5s instead of 20s. Besides the write cut, renewDeadline 20s (was 10s) doubles how
+long a holder tolerates slow renewals before it gives the Lease up and exits: on a CPU-starved SQLite tenant
+control plane, the difference between a slow API server and a controller restart loop.
 
 | member | Ready | ControllerActive |
 |---|---|---|

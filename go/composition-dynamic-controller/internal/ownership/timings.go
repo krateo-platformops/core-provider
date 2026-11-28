@@ -29,7 +29,7 @@ type Timings struct {
 }
 
 // DefaultTimings are what a controller runs with when its env sets none (a hand-run binary): the chart's
-// default, Diego 2026-11-25 for #660, and core-provider's DefaultOwnershipLeaseTimings. Not
+// default, #660, and core-provider's DefaultOwnershipLeaseTimings. Not
 // unstructured-runtime's 15s/10s/2s, so a controller and core-provider agree even then.
 func DefaultTimings() Timings {
 	return Timings{LeaseDuration: 30 * time.Second, RenewDeadline: 20 * time.Second, RetryPeriod: 5 * time.Second}

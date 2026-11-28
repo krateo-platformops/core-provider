@@ -190,16 +190,16 @@ KRATEO_NAMESPACE: {{ .Release.Namespace }}
 
 {{- /*
 core-provider.durationNs: a Go duration, as values.schema.json's pattern admits it (one or more
-<number><unit>, units ns/us/ms/s/m/h), in nanoseconds, as a float. helm has no duration parser; this sums
+<number><unit>, the number with or without a fraction, units ns/us/µs/ms/s/m/h), in nanoseconds, as a float. helm has no duration parser; this sums
 the parts the way time.ParseDuration does, so the chart can apply client-go's rule to the ownership Lease
 timings before anything is rendered from them (#660).
 */ -}}
 {{- define "core-provider.durationNs" -}}
-{{- $unit := dict "ns" 1.0 "us" 1000.0 "ms" 1000000.0 "s" 1000000000.0 "m" 60000000000.0 "h" 3600000000000.0 -}}
+{{- $unit := dict "ns" 1.0 "us" 1000.0 "µs" 1000.0 "μs" 1000.0 "ms" 1000000.0 "s" 1000000000.0 "m" 60000000000.0 "h" 3600000000000.0 -}}
 {{- $total := 0.0 -}}
-{{- range regexFindAll "[0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h)" (toString .) -1 -}}
-{{- $num := regexFind "^[0-9]+(\\.[0-9]+)?" . | float64 -}}
-{{- $total = addf $total (mulf $num (get $unit (regexReplaceAll "^[0-9]+(\\.[0-9]+)?" . ""))) -}}
+{{- range regexFindAll "([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)" (toString .) -1 -}}
+{{- $num := regexFind "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)" . | float64 -}}
+{{- $total = addf $total (mulf $num (get $unit (regexReplaceAll "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)" . ""))) -}}
 {{- end -}}
 {{- $total -}}
 {{- end }}
@@ -218,7 +218,7 @@ the same rule the binaries apply at startup.
 {{- $r := toString ($l.renewDeadline | default "") -}}
 {{- $p := toString ($l.retryPeriod | default "") -}}
 {{- $set := printf "cdc.ownershipLease duration=%q renewDeadline=%q retryPeriod=%q" $d $r $p -}}
-{{- $re := "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" -}}
+{{- $re := "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$" -}}
 {{- if not (and (regexMatch $re $d) (regexMatch $re $r) (regexMatch $re $p)) -}}
 {{- fail (printf "%s: all three are required, each a Go duration such as 30s (#660)" $set) -}}
 {{- end -}}

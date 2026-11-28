@@ -33,7 +33,7 @@ const (
 	EnvOwnershipLeaseRetryPeriod   = "COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RETRY_PERIOD"
 )
 
-// DefaultOwnershipLeaseTimings are the chart's default (Diego, 2026-11-25, #660), which a controller also
+// DefaultOwnershipLeaseTimings are the chart's default (#660), which a controller also
 // runs with when its env sets none: 30s, 20s, 5s. One renewal per controller every 5s (0.2/s, from 0.5/s
 // at unstructured-runtime's 15s/10s/2s).
 func DefaultOwnershipLeaseTimings() OwnershipLeaseTimings {

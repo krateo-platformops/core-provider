@@ -526,10 +526,13 @@ cdc:
   # ~10/s for 50.
   #
   # The costs: a controller pod that dies WITHOUT releasing its Lease, and is replaced by a pod of another
-  # name, is waited for up to `duration` (30s, was 15s) before the replacement reconciles. A graceful
+  # name, is waited for up to `duration` + 2.2 x `retryPeriod` (41s, was 19.4s; the replacement measures expiry from
+  # its own first read of the Lease and notices it at its next jittered attempt) before it reconciles. A graceful
   # rollout releases at once, but the new pod takes the Lease at its next attempt, within 2.2 x
   # retryPeriod (client-go's jitter): 11s, was 4.4s. A container restart in the same pod reacquires at
-  # once (it already holds it). A pool member reads Unavailable after G, 42.5s (was 20s).
+  # once (it already holds it). A pool member reads Unavailable after G, 42.5s (was 20s), which covers that 41s.
+  # The benefit besides the write cut: renewDeadline 20s (was 10s) doubles a holder's tolerance for slow
+  # renewals on a starved control plane (a SQLite tenant) before it gives the Lease up and exits.
   #
   # The three are a set, all required: duration > renewDeadline > retryPeriod x 1.2 (client-go's
   # JitterFactor), every one > 0. The chart refuses to render, and both binaries refuse to start, on a
