@@ -22,6 +22,7 @@ import (
 	hasher "github.com/krateo-platformops/plumbing/kubeutil/hasher"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -218,5 +219,137 @@ func TestApiRefClusterRoleKeepsWhileARefusalLasts691Envtest(t *testing.T) {
 	// The refusal clears and the row is no longer needed: it goes.
 	if got := apply([][]restactionrbac.Resource{{}}, false); contains(got, "secrets") {
 		t.Fatalf("after the refusal cleared and the row is not needed the rule must go, got %v", got)
+	}
+}
+
+// UPGRADE (#691): an earlier release wrote ONE ClusterRole granting every read cluster-wide, the
+// namespaced ones included. A definition whose reads ALL resolve to namespaces (acmp's selfservice:
+// httproutes, vclusters, pods) has nothing left to put in a ClusterRole, and what the old release wrote
+// must not survive beside the Roles. A fixture that always keeps a cluster-scoped row never gets here.
+func TestApiRefClusterRoleUpgradeRemovesTheOldGrant691Envtest(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Fatal("KUBEBUILDER_ASSETS is not set: a skip would read as a pass")
+	}
+	env := &envtest.Environment{}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+	kube, err := client.New(cfg, client.Options{Scheme: clientgoscheme.Scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn := dynamic.NewForConfigOrDie(cfg)
+	ctx := context.Background()
+	if err := kube.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	// What the pre-#691 release's snowplow answered and wrote: pods listed in a namespace, as a
+	// cluster-wide rule.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"readSet": []restactionrbac.Resource{{Version: "v1", Resource: "pods", Namespace: "team-a", Verb: "list"}}})
+	}))
+	defer srv.Close()
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-4", Resource: "fireworksapps"}
+	sa := resourceNamer(gvr.Resource, gvr.Version)
+	name := ApiRefRBACName(gvr)
+	comps := [][]restactionrbac.Resource{{{Version: "v1", Resource: "pods", Namespace: "team-a", Verb: "list"}}}
+	base := DeployOptions{GVR: gvr, ApiRefName: "ra", ApiRefNamespace: "krateo-system", SnowplowURL: srv.URL}
+
+	exists := func(gvr schema.GroupVersionResource) bool {
+		_, err := dyn.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	seed := func() {
+		t.Helper()
+		hsh := hasher.NewFNVObjectHash()
+		if err := applyRestActionRBAC(ctx, dyn, base, sa, &hsh, kubecli.ApplyOptions{}); err != nil { // GenerateClusterScoped
+			t.Fatal(err)
+		}
+		cr := &rbacv1.ClusterRole{}
+		if err := kube.Get(ctx, types.NamespacedName{Name: name}, cr); err != nil || !contains(clusterRoleResources(cr), "pods") {
+			t.Fatalf("seed: the old ClusterRole must grant pods cluster-wide: %v %v", err, cr.Rules)
+		}
+	}
+	seed()
+
+	// The real path first: the new code applied over the old ClusterRole leaves no pods rule.
+	hsh := hasher.NewFNVObjectHash()
+	nsOpts := base
+	nsOpts.ApiRefPerNamespace, nsOpts.ApiRefCompositions = true, comps
+	if err := applyRestActionRBAC(ctx, dyn, nsOpts, sa, &hsh, kubecli.ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cr := &rbacv1.ClusterRole{}
+	if err := kube.Get(ctx, types.NamespacedName{Name: name}, cr); err != nil || contains(clusterRoleResources(cr), "pods") {
+		t.Fatalf("after the upgrade the ClusterRole still grants pods cluster-wide: %v %v", err, cr.Rules)
+	}
+
+	// Nothing cluster-wide at all (the state Compose gives when every row resolved to a namespace):
+	// the old pair is DELETED, the Roles exist, a second pass changes nothing, and the digest is what
+	// Lookup reads from the cluster.
+	seed()
+	def := types.NamespacedName{Namespace: "default", Name: "d"}
+	composed := restactionrbac.Compose(nil, comps, "krateo:cdc:"+sa, name)
+	if err := ApplyApiRefRoles(ctx, dyn, gvr, def, composed, false); err != nil {
+		t.Fatal(err)
+	}
+	if composed.ClusterRole != nil {
+		t.Fatal("fixture: every row resolves to a namespace, there must be no ClusterRole")
+	}
+	h1 := hasher.NewFNVObjectHash()
+	if err := applyClusterPair(ctx, dyn, nsOpts, nil, nil, &h1, kubecli.ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if exists(clusterRoleGVR) || exists(clusterRoleBindingGVR) {
+		t.Fatal("the pre-#691 ClusterRole or binding survived beside the Roles")
+	}
+	if _, err := dyn.Resource(roleGVR).Namespace("team-a").Get(ctx, name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("the Role must exist: %v", err)
+	}
+	h2 := hasher.NewFNVObjectHash()
+	if err := applyClusterPair(ctx, dyn, nsOpts, nil, nil, &h2, kubecli.ApplyOptions{}); err != nil {
+		t.Fatalf("a second pass must be idempotent: %v", err)
+	}
+	live := hasher.NewFNVObjectHash()
+	lookupOpts := nsOpts
+	if err := lookupRestActionRBAC(ctx, kube, lookupOpts, &live); err != nil {
+		t.Fatal(err)
+	}
+	if h1.GetHash() != h2.GetHash() || h1.GetHash() != live.GetHash() {
+		t.Errorf("digests: first %s, second %s, Lookup %s: a deleted grant must read as Lookup reads it", h1.GetHash(), h2.GetHash(), live.GetHash())
+	}
+
+	// A composition unresolved: what the ClusterRole holds may be its, so it is kept as it is.
+	seed()
+	keep := nsOpts
+	keep.ApiRefKeepClusterRules = true
+	hk := hasher.NewFNVObjectHash()
+	if err := applyClusterPair(ctx, dyn, keep, nil, nil, &hk, kubecli.ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(clusterRoleGVR) || !exists(clusterRoleBindingGVR) {
+		t.Fatal("with a composition unresolved the ClusterRole pair must be kept")
+	}
+
+	// A dry run (Observe) deletes nothing.
+	hd := hasher.NewFNVObjectHash()
+	if err := applyClusterPair(ctx, dyn, nsOpts, nil, nil, &hd, kubecli.ApplyOptions{DryRun: []string{"All"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(clusterRoleGVR) {
+		t.Fatal("a dry run deleted the ClusterRole")
+	}
+
+	// TEARDOWN on the new path: Undeploy's deleteRestActionRBAC still removes the pair.
+	if err := deleteRestActionRBAC(ctx, kube, sa); err != nil {
+		t.Fatal(err)
+	}
+	if exists(clusterRoleGVR) || exists(clusterRoleBindingGVR) {
+		t.Fatal("Undeploy's deleteRestActionRBAC left the ClusterRole or binding")
 	}
 }
