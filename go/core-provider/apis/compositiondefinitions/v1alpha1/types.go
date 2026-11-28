@@ -820,22 +820,29 @@ type ScaleToZeroStatus struct {
 // no composition can resolve (it comes from a prior stage's output) is cluster-wide.
 type ApiRefRBACStatus struct {
 	// Namespaces are the namespaces holding a Role and RoleBinding for this definition's apiRef reads
-	// (one per namespace a composition's reads land in), sorted.
+	// (one per namespace a composition's reads land in), sorted. NOT capped: it is complete.
 	// +optional
 	Namespaces []string `json:"namespaces,omitempty"`
 
 	// ClusterWide are the reads kept in the definition's ClusterRole because their namespace is
-	// resolved from a prior stage's output, so no composition can place them. Sorted. Cluster-scoped
-	// resources are not listed: they are cluster-wide by nature.
+	// resolved from a prior stage's output, so no composition can place them. Sorted. NOT capped: it is
+	// complete (one entry per group, resource and verb of the RESTAction). Cluster-scoped resources are
+	// not listed: they are cluster-wide by nature.
 	// +optional
 	ClusterWide []ApiRefClusterWideRow `json:"clusterWide,omitempty"`
 
 	// UnresolvedCompositions are the compositions whose apiRef request snowplow refused (reason
-	// ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20. Their
+	// ExtrasTooLarge: HTTP 431, or InvalidApiRef: 400), sorted by namespace/name and capped at 20
+	// (UnresolvedDropped counts the rest). Their
 	// reads are not granted by this pass and their existing grants are kept: the Roles are only added to
 	// while any is listed. One composition never fails the definition.
 	// +optional
 	UnresolvedCompositions []ApiRefUnresolvedComposition `json:"unresolvedCompositions,omitempty"`
+
+	// UnresolvedDropped is how many more refused compositions exist beyond those listed in
+	// UnresolvedCompositions; 0 when all are listed. Always present with apiRefRBAC, so a list that is
+	// complete reads differently from one that was cut: the list and this count add up to the total.
+	UnresolvedDropped int `json:"unresolvedDropped"`
 }
 
 // ApiRefUnresolvedComposition is one composition whose reads could not be resolved.

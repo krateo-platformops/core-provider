@@ -3,6 +3,7 @@ package compositiondefinitions
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateo-platformops/core-provider/internal/cdreason"
@@ -56,9 +57,11 @@ func (e *external) planApiRef(ctx context.Context, cr *compositiondefinitionsv1a
 
 func apiRefRBACStatus(plan *apiRefPlan) *compositiondefinitionsv1alpha1.ApiRefRBACStatus {
 	st := &compositiondefinitionsv1alpha1.ApiRefRBACStatus{Namespaces: plan.namespaces()}
+	// List and count come from the same sorted slice, so they add up to the total.
 	st.UnresolvedCompositions = plan.Unresolved
 	if len(st.UnresolvedCompositions) > maxNamedCompositions {
 		st.UnresolvedCompositions = st.UnresolvedCompositions[:maxNamedCompositions]
+		st.UnresolvedDropped = len(plan.Unresolved) - maxNamedCompositions
 	}
 	for _, cw := range plan.clusterWide() {
 		st.ClusterWide = append(st.ClusterWide, compositiondefinitionsv1alpha1.ApiRefClusterWideRow{Group: cw.Group, Resource: cw.Resource, Verb: cw.Verb})
@@ -108,6 +111,9 @@ func recordApiRefRBAC(cr *compositiondefinitionsv1alpha1.CompositionDefinition, 
 					names += ", "
 				}
 				names += u.Namespace + "/" + u.Name
+			}
+			if st.UnresolvedDropped > 0 {
+				names += fmt.Sprintf(" +%d more", st.UnresolvedDropped)
 			}
 			cr.SetConditions(r.WithMessage("snowplow refused the request of these compositions, whose Roles are kept as they are and not narrowed: " + names))
 			return

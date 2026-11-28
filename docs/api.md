@@ -62,6 +62,13 @@ lists the namespaces with a Role. When snowplow cannot be asked, `ApiRefRBACComp
 `Unknown/RolesNotDetermined` and no Role is changed; a request snowplow refuses as too large (431) is
 `False/ExtrasTooLarge`. A remote definition keeps the single ClusterRole.
 
+`status.apiRefRBAC` is `namespaces` (complete, not capped), `clusterWide` (complete, not capped),
+`unresolvedCompositions [{namespace, name, reason}]` (sorted by namespace/name, at most 20) and
+`unresolvedDropped` (an integer, always present with `apiRefRBAC`: how many more refused compositions
+exist beyond the listed ones, 0 when the list is complete, so the list and the count add up to the
+total). The `ExtrasTooLarge` condition message names the same compositions in the same order and ends
+with `+N more` when `unresolvedDropped` is N.
+
 **`status.controller` names the Deployment that runs this definition's controller (#580). Read it;
 do not derive `<resource>-<version>-controller`.** A Kind in a pool (`spec.controller.pool`) has no
 such Deployment: its controller runs in `cdc-pool-<pool>`.

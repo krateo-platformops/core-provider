@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -56,10 +58,11 @@ func restAction(gen int64) *unstructured.Unstructured {
 }
 
 type planSnowplow struct {
-	srv    *httptest.Server
-	calls  atomic.Int64
-	status atomic.Int32
-	big    string // the composition whose request is answered 431
+	srv       *httptest.Server
+	calls     atomic.Int64
+	status    atomic.Int32
+	big       string // the composition whose request is answered 431
+	bigPrefix string // every composition whose name starts with it is answered 431
 }
 
 func newPlanSnowplow(t *testing.T) *planSnowplow {
@@ -73,7 +76,7 @@ func newPlanSnowplow(t *testing.T) *planSnowplow {
 		ex := map[string]any{}
 		_ = json.Unmarshal([]byte(r.URL.Query().Get("extras")), &ex)
 		ns, _ := ex["compositionNamespace"].(string)
-		if n, _ := ex["compositionName"].(string); s.big != "" && n == s.big {
+		if n, _ := ex["compositionName"].(string); (s.big != "" && n == s.big) || (s.bigPrefix != "" && strings.HasPrefix(n, s.bigPrefix)) {
 			w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
 			return
 		}
@@ -249,5 +252,45 @@ func TestPlan_AComposition431IsNamedAndDoesNotFailThePlan(t *testing.T) {
 	recordApiRefRBAC(cd, nil)
 	if c := cd.GetCondition(conditionTypeApiRefRBACComplete); c.Reason != "ExtrasTooLarge" || c.Status != metav1.ConditionFalse {
 		t.Errorf("condition = %s/%s", c.Status, c.Reason)
+	}
+}
+
+// Refused compositions are capped in the status and the message alike, and the count of what was cut
+// is always there: 25 refused is 20 listed and 5 dropped, in the order the message names them; none
+// refused is 0 dropped.
+func TestApiRefRBACStatus_CountsWhatTheCapCut(t *testing.T) {
+	var objs []runtime.Object
+	objs = append(objs, restAction(1), planComposition("ok", "fine"))
+	sp := newPlanSnowplow(t)
+	sp.bigPrefix = "huge-"
+	for i := 0; i < 25; i++ {
+		objs = append(objs, planComposition("ns", fmt.Sprintf("huge-%02d", i)))
+	}
+	withSnowplowURL(t, sp.srv.URL)
+	plan, err := plannerFor691(sp, planDyn(objs...)).plan(context.Background(), planDefinition(), planGVR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := apiRefRBACStatus(plan)
+	if len(st.UnresolvedCompositions) != 20 || st.UnresolvedDropped != 5 {
+		t.Fatalf("listed %d, dropped %d; want 20 and 5", len(st.UnresolvedCompositions), st.UnresolvedDropped)
+	}
+	cd := planDefinition()
+	cd.Status.ApiRefRBAC = st
+	recordApiRefRBAC(cd, nil)
+	msg := cd.GetCondition(conditionTypeApiRefRBACComplete).Message
+	if !strings.HasSuffix(msg, "ns/huge-19 +5 more") || strings.Contains(msg, "huge-20") {
+		t.Errorf("message = %q, want it to end with the 20th name and +5 more", msg)
+	}
+	if st.UnresolvedCompositions[0].Name != "huge-00" || !strings.Contains(msg, "ns/huge-00, ns/huge-01") {
+		t.Errorf("the list and the message must be in the same order: %q", msg)
+	}
+
+	// None refused: the count is present and 0, and nothing is appended to a message.
+	none, err := plannerFor691(newPlanSnowplow(t), planDyn(restAction(1), planComposition("a", "c1"))).plan(context.Background(), planDefinition(), planGVR)
+	if err == nil {
+		if s := apiRefRBACStatus(none); s.UnresolvedDropped != 0 || len(s.UnresolvedCompositions) != 0 {
+			t.Errorf("nothing refused: %+v", s)
+		}
 	}
 }
