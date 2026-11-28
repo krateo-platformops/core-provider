@@ -169,6 +169,7 @@ func (e *external) retiredUndeployOptions(cr *compositiondefinitionsv1alpha1.Com
 		SkipCRD:                true,
 		AuthnNamespace:         AuthnNamespace,
 		LocalPools:             !clusterkube.IsRemote(cr.Spec.Deploy),
+		ApiRefPerNamespace:     !clusterkube.IsRemote(cr.Spec.Deploy),
 		LeaseTimings:           e.leaseTimings,
 	}
 }

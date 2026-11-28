@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/snowplow"
+	"github.com/krateo-platformops/plumbing/apiref"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -32,13 +33,6 @@ func (r *SnowplowAPIResolver) Resolve(ctx context.Context, mg *unstructured.Unst
 
 // mergedExtras layers per-instance composition context over the static author extras.
 func (r *SnowplowAPIResolver) mergedExtras(mg *unstructured.Unstructured) map[string]any {
-	out := make(map[string]any, len(r.extras)+3)
-	for k, v := range r.extras {
-		out[k] = v
-	}
-	// per-instance context wins over static extras
-	out["compositionName"] = mg.GetName()
-	out["compositionNamespace"] = mg.GetNamespace()
-	out["compositionId"] = string(mg.GetUID())
-	return out
+	// One builder, shared with core-provider's /rbac request (core-provider#691): the two must agree.
+	return apiref.CompositionExtras(r.extras, mg.GetName(), mg.GetNamespace(), string(mg.GetUID()))
 }

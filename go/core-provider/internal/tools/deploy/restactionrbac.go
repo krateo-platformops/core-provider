@@ -88,19 +88,25 @@ func restActionReadSet(ctx context.Context, opts DeployOptions) ([]restactionrba
 	if err != nil {
 		return nil, err
 	}
-	cli := restactionrbac.New(opts.SnowplowURL)
-	// snowplow's /rbac is gated by the same JWT middleware as /call: authenticate with an
-	// authn-issued service JWT (core-provider presents its own projected SA token to authn),
-	// mirroring how the CDC reaches snowplow for apiRef resolution. Without an authn URL the
-	// request is unauthenticated and snowplow answers 401.
-	if opts.AuthnURL != "" {
-		cli = cli.WithToken(authnClientFor(opts.AuthnURL).Token)
-	}
-	return cli.Inspect(ctx, restactionrbac.Params{
+	return ApiRefInspector(opts.SnowplowURL, opts.AuthnURL).Inspect(ctx, restactionrbac.Params{
 		APIRefName:      opts.ApiRefName,
 		APIRefNamespace: opts.ApiRefNamespace,
 		Extras:          extras,
 	})
+}
+
+// ApiRefInspector is the client for snowplow's GET /rbac.
+//
+// snowplow's /rbac is gated by the same JWT middleware as /call: authenticate with an authn-issued
+// service JWT (core-provider presents its own projected SA token to authn), mirroring how the CDC
+// reaches snowplow for apiRef resolution. Without an authn URL the request is unauthenticated and
+// snowplow answers 401.
+func ApiRefInspector(snowplowURL, authnURL string) *restactionrbac.Client {
+	cli := restactionrbac.New(snowplowURL)
+	if authnURL != "" {
+		cli = cli.WithToken(authnClientFor(authnURL).Token)
+	}
+	return cli
 }
 
 // hashRestActionRBACObjects contributes the ClusterRole + binding to the digest with the same
@@ -151,7 +157,19 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 			"count", d.Count, "rows", d.Resources)
 	}
 
-	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACNameOf(opts))
+	var cr *rbacv1.ClusterRole
+	var crb *rbacv1.ClusterRoleBinding
+	if opts.ApiRefPerNamespace {
+		// A local definition (#691): the ClusterRole holds the cluster-scoped reads and the rows whose
+		// namespace no composition can resolve. A read a composition's extras place in a namespace is
+		// a Role there, applied by ApplyApiRefRoles, never a rule here.
+		composed := restactionrbac.Compose(readSet, opts.ApiRefCompositions, cdcGroup(saName), restActionRBACNameOf(opts))
+		cr, crb = composed.ClusterRole, composed.ClusterRoleBinding
+	} else {
+		// A remote definition keeps the single ClusterRole: its compositions live on a cluster this
+		// path does not watch.
+		cr, crb = restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACNameOf(opts))
+	}
 	if cr == nil || crb == nil {
 		// Every row was non-read, so there is nothing to grant. Emitting a binding to an empty role
 		// would read as an intended grant someone had broken.

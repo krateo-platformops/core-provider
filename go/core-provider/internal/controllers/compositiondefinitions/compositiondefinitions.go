@@ -186,11 +186,13 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		return fmt.Errorf("error getting the Lease informer: %w", err)
 	}
 	leases.synced = leaseInformer.HasSynced
+	dyn := dynamic.NewForConfigOrDie(mgr.GetConfig())
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
 		reconciler.WithExternalConnecter(&connector{
 			client:     kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-			dynamic:    dynamic.NewForConfigOrDie(mgr.GetConfig()),
+			dynamic:    dyn,
+			planner:    plannerFor(dyn),
 			kube:       cli,
 			apiReader:  mgr.GetAPIReader(),
 			log:        l,
@@ -396,6 +398,9 @@ type connector struct {
 
 	// leaseTimings: see Options.LeaseTimings.
 	leaseTimings deploy.OwnershipLeaseTimings
+
+	// planner resolves each composition's apiRef read-set (#691), shared with the Roles reconciler.
+	planner *apiRefPlanner
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -417,6 +422,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		writtenBy:       c.writtenBy,
 
 		audit:       c.audit,
+		planner:     c.planner,
 		mgmt:        c.kube,
 		mgmtDynamic: c.dynamic,
 		apiReader:   c.apiReader,
@@ -457,6 +463,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 }
 
 type external struct {
+	// planner: see connector.planner.
+	planner *apiRefPlanner
 	// audit records this reconcile's writes (core-provider#423); nil records nothing.
 	audit *auditrec.Recorder
 	// mgmt is the management-cluster client: it holds the CompositionDefinition
@@ -1357,6 +1365,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 		DryRunServer:           true,
 	}
+	if perr := e.planApiRef(ctx, cr, gvr, &opts); perr != nil {
+		return reconciler.ExternalObservation{}, perr
+	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
@@ -1843,6 +1854,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
+	if perr := e.planApiRef(ctx, cr, gvr, &opts); perr != nil {
+		return perr
+	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
@@ -2271,6 +2285,9 @@ func (e *external) deployController(ctx context.Context, cr *compositiondefiniti
 		KeepLiveReplicas:       scaleToZeroOptedIn(cr),
 	}
 
+	if perr := e.planApiRef(ctx, cr, gvr, &opts); perr != nil {
+		return gvr, perr
+	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	recordApiRefRBAC(cr, err)
 	recordAuthnDelegation(cr, authnSupport)
@@ -2612,6 +2629,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 				AuthnNamespace:         AuthnNamespace,
 				LocalPools:             !remote,
+				ApiRefPerNamespace:     !remote,
 				LeaseTimings:           e.leaseTimings,
 			}); errors.Is(uerr, deploy.ErrPoolMemberNotDrained) {
 				// Not best effort: its pool may still be running it, and what follows removes the CRD.
@@ -2650,6 +2668,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
 			AuthnNamespace:         AuthnNamespace,
 			LocalPools:             !remote,
+			ApiRefPerNamespace:     !remote,
 			LeaseTimings:           e.leaseTimings,
 		}
 

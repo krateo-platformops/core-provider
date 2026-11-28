@@ -469,6 +469,42 @@ spec:
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.
             properties:
+              apiRefRBAC:
+                description: |-
+                  ApiRefRBAC says where this definition's apiRef read grants are, and which stay cluster-wide
+                  (core-provider#691). Set while the definition declares an apiRef on a local cluster, in the same
+                  pass that sets ApiRefRBACComplete; read it instead of that condition's message. Absent without an
+                  apiRef, and from a core-provider older than this field.
+                properties:
+                  clusterWide:
+                    description: |-
+                      ClusterWide are the reads kept in the definition's ClusterRole because their namespace is
+                      resolved from a prior stage's output, so no composition can place them. Sorted. Cluster-scoped
+                      resources are not listed: they are cluster-wide by nature.
+                    items:
+                      description: ApiRefClusterWideRow is one namespaced read granted
+                        cluster-wide.
+                      properties:
+                        group:
+                          type: string
+                        resource:
+                          type: string
+                        verb:
+                          type: string
+                      required:
+                      - group
+                      - resource
+                      - verb
+                      type: object
+                    type: array
+                  namespaces:
+                    description: |-
+                      Namespaces are the namespaces holding a Role and RoleBinding for this definition's apiRef reads
+                      (one per namespace a composition's reads land in), sorted.
+                    items:
+                      type: string
+                    type: array
+                type: object
               apiVersion:
                 description: 'ApiVersion: the api version of the custom resource -
                   Last applied apiVersion'

@@ -29,6 +29,11 @@ const (
 	// CauseSnowplowError: snowplow, or something in front of it, answered in a way nothing here
 	// recognises. That includes cyclic stages, which snowplow reports as a plain 500.
 	CauseSnowplowError Cause = "SnowplowError"
+	// CauseExtrasTooLarge: snowplow, or a gateway in front of it, refused the request with 431 because
+	// a composition's extras do not fit in the request's headers (agentgateway bounds ALL headers,
+	// :path and the bearer included, at about 16 KiB; a direct Service allows about 1 MiB). It is a
+	// refusal, never a reason to fall back to a cluster-wide grant (#691).
+	CauseExtrasTooLarge Cause = "ExtrasTooLarge"
 	// CauseNotConfigured: core-provider has no snowplow URL, so apiRef RBAC is switched off in the
 	// chart while a definition declares an apiRef.
 	CauseNotConfigured Cause = "SnowplowNotConfigured"
@@ -87,6 +92,8 @@ func fromResponse(status int, body []byte) error {
 		e.Cause = CauseRESTActionForbidden
 	case status == http.StatusUnprocessableEntity:
 		e.Cause, e.err = CauseStageUnresolvable, ErrIncomplete
+	case status == http.StatusRequestHeaderFieldsTooLarge:
+		e.Cause = CauseExtrasTooLarge
 	case status == http.StatusBadRequest:
 		e.Cause = CauseInvalidApiRef
 	case status == http.StatusUnauthorized:

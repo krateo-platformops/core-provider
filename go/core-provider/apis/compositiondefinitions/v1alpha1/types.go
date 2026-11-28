@@ -697,6 +697,13 @@ type CompositionDefinitionStatus struct {
 	// +optional
 	ScaleToZero *ScaleToZeroStatus `json:"scaleToZero,omitempty"`
 
+	// ApiRefRBAC says where this definition's apiRef read grants are, and which stay cluster-wide
+	// (core-provider#691). Set while the definition declares an apiRef on a local cluster, in the same
+	// pass that sets ApiRefRBACComplete; read it instead of that condition's message. Absent without an
+	// apiRef, and from a core-provider older than this field.
+	// +optional
+	ApiRefRBAC *ApiRefRBACStatus `json:"apiRefRBAC,omitempty"`
+
 	// ServedVersionsPendingPrune records, per served version of this definition's CRD that has
 	// become prune-eligible (no definition references it, no instance is labelled with it, no stored
 	// helm revision names it), when it first became so (#454). A version is pruned only after it has
@@ -806,6 +813,29 @@ type ScaleToZeroStatus struct {
 	// must opt in).
 	// +optional
 	HeldBy []string `json:"heldBy,omitempty"`
+}
+
+// ApiRefRBACStatus is where a definition's apiRef reads are granted. A read that a composition's
+// extras place in a namespace is granted by a Role in that namespace; only a read whose namespace
+// no composition can resolve (it comes from a prior stage's output) is cluster-wide.
+type ApiRefRBACStatus struct {
+	// Namespaces are the namespaces holding a Role and RoleBinding for this definition's apiRef reads
+	// (one per namespace a composition's reads land in), sorted.
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// ClusterWide are the reads kept in the definition's ClusterRole because their namespace is
+	// resolved from a prior stage's output, so no composition can place them. Sorted. Cluster-scoped
+	// resources are not listed: they are cluster-wide by nature.
+	// +optional
+	ClusterWide []ApiRefClusterWideRow `json:"clusterWide,omitempty"`
+}
+
+// ApiRefClusterWideRow is one namespaced read granted cluster-wide.
+type ApiRefClusterWideRow struct {
+	Group    string `json:"group"`
+	Resource string `json:"resource"`
+	Verb     string `json:"verb"`
 }
 
 //+kubebuilder:object:root=true

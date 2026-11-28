@@ -1075,6 +1075,74 @@
     },
     {
       "condition": "ApiRefRBACComplete",
+      "reason": "ClusterWideRows",
+      "status": "True",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "steady",
+        "detail": "while the RESTAction has such reads"
+      },
+      "sinceVersion": "unreleased",
+      "action": "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.",
+      "actors": [
+        "maintainers"
+      ],
+      "detailFields": [
+        "status.apiRefRBAC.clusterWide"
+      ],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "the apiRef's read-set was resolved and its RBAC rendered, but some namespaced reads take their namespace from a prior stage's output, which no composition can resolve before the RESTAction runs: they stay in the definition's ClusterRole, named in status.apiRefRBAC.clusterWide; every other read is a Role in the namespace the compositions' reads land in",
+          "clearance": {
+            "kind": "steady",
+            "detail": "while the RESTAction has such reads"
+          },
+          "sinceVersion": "unreleased",
+          "action": "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.",
+          "actors": [
+            "maintainers"
+          ],
+          "detailFields": [
+            "status.apiRefRBAC.clusterWide"
+          ]
+        }
+      ]
+    },
+    {
+      "condition": "ApiRefRBACComplete",
+      "reason": "RolesNotDetermined",
+      "status": "Unknown",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "next pass",
+        "detail": "retried until snowplow answers"
+      },
+      "sinceVersion": "unreleased",
+      "action": "Wait: it is retried. If it lasts, an admin checks that snowplow is running.",
+      "detailFields": [],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "snowplow could not be asked, or failed, while resolving a composition's reads, so which namespaces need a Role is not known; the Roles that exist are left exactly as they are (not knowing is not the same as needing none) and the pass is retried",
+          "clearance": {
+            "kind": "next pass",
+            "detail": "retried until snowplow answers"
+          },
+          "sinceVersion": "unreleased",
+          "action": "Wait: it is retried. If it lasts, an admin checks that snowplow is running.",
+          "detailFields": []
+        }
+      ]
+    },
+    {
+      "condition": "ApiRefRBACComplete",
       "reason": "RESTActionNotFound",
       "status": "False",
       "verdict": null,
@@ -1308,6 +1376,43 @@
           "sinceVersion": "2.13.72",
           "action": "An admin checks snowplow and anything in front of it: the message names the answer.",
           "actors": [
+            "admin"
+          ],
+          "detailFields": []
+        }
+      ]
+    },
+    {
+      "condition": "ApiRefRBACComplete",
+      "reason": "ExtrasTooLarge",
+      "status": "False",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "indefinite",
+        "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
+      },
+      "sinceVersion": "unreleased",
+      "action": "Shrink the blueprint's API reference extras, or an admin raises the request-header limit of the gateway in front of snowplow.",
+      "actors": [
+        "maintainers",
+        "admin"
+      ],
+      "detailFields": [],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "a composition's extras are too large for snowplow's /rbac request (HTTP 431: the request's headers, the path and the bearer included, exceed a limit of snowplow or of the gateway in front of it); its Roles are not written, and nothing is granted cluster-wide in its place",
+          "clearance": {
+            "kind": "indefinite",
+            "detail": "until the composition's extras fit, or the limit is raised; retried on every pass"
+          },
+          "sinceVersion": "unreleased",
+          "action": "Shrink the blueprint's API reference extras, or an admin raises the request-header limit of the gateway in front of snowplow.",
+          "actors": [
+            "maintainers",
             "admin"
           ],
           "detailFields": []

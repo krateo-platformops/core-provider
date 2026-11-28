@@ -431,6 +431,18 @@ var (
 		Clearance{Steady, "the healthy end state"},
 		Doc{Since: "2.13.72"})
 
+	// ApiRefClusterWide: the read-set is resolved and granted, with the rows whose namespace no composition
+	// can resolve kept cluster-wide and named in status.apiRefRBAC.clusterWide (#691). It stays True: the
+	// grant is complete, and wider than namespaced only for those rows.
+	ApiRefClusterWide = on(TypeApiRefRBACComplete, "ClusterWideRows", metav1.ConditionTrue, WriterCoreProvider,
+		"the apiRef's read-set was resolved and its RBAC rendered, but some namespaced reads take their namespace from a prior stage's output, which no composition can resolve before the RESTAction runs: they stay in the definition's ClusterRole, named in status.apiRefRBAC.clusterWide; every other read is a Role in the namespace the compositions' reads land in",
+		Clearance{Steady, "while the RESTAction has such reads"},
+		Doc{Since: Unreleased, Action: "To scope these reads to a namespace, derive the stage's namespace from the composition (its name, namespace or id) rather than from an earlier stage's output.", Actors: []Actor{ActorMaintainers}, DetailFields: []string{"status.apiRefRBAC.clusterWide"}})
+	ApiRefRolesNotDetermined = on(TypeApiRefRBACComplete, "RolesNotDetermined", metav1.ConditionUnknown, WriterCoreProvider,
+		"snowplow could not be asked, or failed, while resolving a composition's reads, so which namespaces need a Role is not known; the Roles that exist are left exactly as they are (not knowing is not the same as needing none) and the pass is retried",
+		Clearance{NextPass, "retried until snowplow answers"},
+		Doc{Since: Unreleased, Action: "Wait: it is retried. If it lasts, an admin checks that snowplow is running."})
+
 	AuthnDelegationRendered = on(TypeAuthnDelegation, "Rendered", metav1.ConditionTrue, WriterCoreProvider,
 		"the authn mapping CRD serves spec.delegation and it is rendered onto the mapping",
 		Clearance{Steady, "the healthy end state"},
@@ -528,6 +540,10 @@ var apiRefRBACFailures = map[restactionrbac.Cause]Reason{
 		"snowplow, or something in front of it, answered in a way nothing here recognises (including cyclic stages)",
 		Clearance{Indefinite, "until snowplow, or what is in front of it, answers as expected; retried on every pass"},
 		Doc{Since: "2.13.72", Action: "An admin checks snowplow and anything in front of it: the message names the answer.", Actors: []Actor{ActorAdmin}}),
+	restactionrbac.CauseExtrasTooLarge: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseExtrasTooLarge), metav1.ConditionFalse, WriterCoreProvider,
+		"a composition's extras are too large for snowplow's /rbac request (HTTP 431: the request's headers, the path and the bearer included, exceed a limit of snowplow or of the gateway in front of it); its Roles are not written, and nothing is granted cluster-wide in its place",
+		Clearance{Indefinite, "until the composition's extras fit, or the limit is raised; retried on every pass"},
+		Doc{Since: Unreleased, Action: "Shrink the blueprint's API reference extras, or an admin raises the request-header limit of the gateway in front of snowplow.", Actors: []Actor{ActorMaintainers, ActorAdmin}}),
 	restactionrbac.CauseNotConfigured: on(TypeApiRefRBACComplete, rtv1.ConditionReason(restactionrbac.CauseNotConfigured), metav1.ConditionFalse, WriterCoreProvider,
 		"core-provider has no snowplow URL (apiRef RBAC is off in the chart) while the definition declares an apiRef",
 		Clearance{Indefinite, "until core-provider has a snowplow URL, or the apiRef is removed"},
@@ -547,12 +563,12 @@ func nonReady() []Reason {
 		ControllerRunning, ControllerScaledToZero, ControllerUnavailable, ControllerNotObserved,
 		SchemaFullyEnforced, SchemaConstraintsNotEnforced, SchemaEnforcedOwnedElsewhere, SchemaInferred,
 		SpecSchemaCurrent, SpecSchemaLooserPending, SpecSchemaNotLooser, SpecSchemaOwnedElsewhere,
-		ApiRefReadSetResolved,
+		ApiRefReadSetResolved, ApiRefClusterWide, ApiRefRolesNotDetermined,
 	}
 	for _, c := range []restactionrbac.Cause{
 		restactionrbac.CauseRESTActionNotFound, restactionrbac.CauseRESTActionForbidden, restactionrbac.CauseStageUnresolvable,
 		restactionrbac.CauseInvalidApiRef, restactionrbac.CauseUnauthorized, restactionrbac.CauseSnowplowUnavailable,
-		restactionrbac.CauseSnowplowError, restactionrbac.CauseNotConfigured,
+		restactionrbac.CauseSnowplowError, restactionrbac.CauseExtrasTooLarge, restactionrbac.CauseNotConfigured,
 	} {
 		out = append(out, apiRefRBACFailures[c])
 	}
