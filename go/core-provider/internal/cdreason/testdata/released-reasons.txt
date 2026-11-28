@@ -57,3 +57,6 @@ Synced/True/ReconcileSuccess/provider-runtime	2.0.0
 ValuesSchemaAuthored/False/InferredFromValues/core-provider	2.13.117
 ValuesSchemaAuthored/True/Authored/core-provider	2.13.117
 ValuesSchemaAuthored/Unknown/OwnedByAnotherDefinition/core-provider	2.13.117
+SchemaDefaultsMatchValues/False/SchemaDefaultsDiffer/core-provider	2.13.137
+SchemaDefaultsMatchValues/True/Aligned/core-provider	2.13.137
+SchemaDefaultsMatchValues/Unknown/OwnedByAnotherDefinition/core-provider	2.13.137

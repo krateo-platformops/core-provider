@@ -1660,7 +1660,7 @@
         "kind": "steady",
         "detail": "the healthy end state"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.137",
       "action": "",
       "detailFields": [],
       "cases": [
@@ -1671,7 +1671,7 @@
             "kind": "steady",
             "detail": "the healthy end state"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.137",
           "action": "",
           "detailFields": []
         }
@@ -1689,7 +1689,7 @@
         "kind": "indefinite",
         "detail": "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.137",
       "action": "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.",
       "actors": [
         "maintainers"
@@ -1703,7 +1703,7 @@
             "kind": "indefinite",
             "detail": "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.137",
           "action": "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.",
           "actors": [
             "maintainers"
@@ -1724,7 +1724,7 @@
         "kind": "steady",
         "detail": "while another definition generates the CRD"
       },
-      "sinceVersion": "unreleased",
+      "sinceVersion": "2.13.137",
       "action": "See the blueprint the message names: its schema is the one in use.",
       "actors": [
         "you"
@@ -1740,7 +1740,7 @@
             "kind": "steady",
             "detail": "while another definition generates the CRD"
           },
-          "sinceVersion": "unreleased",
+          "sinceVersion": "2.13.137",
           "action": "See the blueprint the message names: its schema is the one in use.",
           "actors": [
             "you"

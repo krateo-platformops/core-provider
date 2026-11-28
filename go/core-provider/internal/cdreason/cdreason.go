@@ -473,15 +473,15 @@ var (
 	SchemaDefaultsAligned = on(TypeSchemaDefaultsMatchValues, "Aligned", metav1.ConditionTrue, WriterCoreProvider,
 		"every default in the chart's values.schema.json equals the value at the same path in values.yaml, or the schema declares none",
 		Clearance{Steady, "the healthy end state"},
-		Doc{Since: Unreleased})
+		Doc{Since: "2.13.137"})
 	SchemaDefaultsDiffer = on(TypeSchemaDefaultsMatchValues, "SchemaDefaultsDiffer", metav1.ConditionFalse, WriterCoreProvider,
 		"the schema declares a default that values.yaml does not agree with: a different value, or no key at that path; the generated CRD defaults from values.yaml, what helm uses, so a composition and a helm install of the chart agree; the message names each path (capped), and any values.yaml value the schema refuses as a default (recomputed on every Observe)",
 		Clearance{Indefinite, "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"},
-		Doc{Since: Unreleased, Action: "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.", Actors: []Actor{ActorMaintainers}})
+		Doc{Since: "2.13.137", Action: "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.", Actors: []Actor{ActorMaintainers}})
 	SchemaDefaultsOwnedElsewhere = on(TypeSchemaDefaultsMatchValues, "OwnedByAnotherDefinition", metav1.ConditionUnknown, WriterCoreProvider,
 		"a follower: another definition generates the CRD; the message names it",
 		Clearance{Steady, "while another definition generates the CRD"},
-		Doc{Since: Unreleased, Action: "See the blueprint the message names: its schema is the one in use.", Actors: []Actor{ActorYou}, DetailFields: []string{"status.owner"}})
+		Doc{Since: "2.13.137", Action: "See the blueprint the message names: its schema is the one in use.", Actors: []Actor{ActorYou}, DetailFields: []string{"status.owner"}})
 
 	MigratedValuesAllValid = on(TypeMigratedValuesValid, "AllValid", metav1.ConditionTrue, WriterCoreProvider,
 		"every instance on the served version passed a dry-run create through it after the last migration; nothing reopens this until the next migration",
