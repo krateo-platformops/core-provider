@@ -1,0 +1,19 @@
+# Base values for core-provider in BOTH arms. run.sh overrides only the saturation env, per arm.
+otel:
+  enabled: true
+  tracing: false
+  endpoint: http://otel.otel.svc.cluster.local:4318
+# One replica: it requests a whole CPU, so two plus a rolling-update surge do not fit a small pool.
+chartInspector:
+  replicaCount: 1
+cdc:
+  env:
+    HOME: /tmp
+    # More than one worker, or the gate has nothing to cut: its floor is 1.
+    COMPOSITION_CONTROLLER_WORKERS: "16"
+    COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT: "30s"
+    # 2s, so a short cut is not missed between two exports of the capacity gauge.
+    OTEL_EXPORT_INTERVAL: "2s"
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 512Mi}

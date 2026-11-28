@@ -1,0 +1,5 @@
+apiVersion: v2
+name: satchart
+description: Workload for the cdc saturation benchmark. Three ConfigMaps and one single-replica Deployment of the pause image, so a reconcile is a real helm render and install, and a real set of API writes.
+version: 0.1.0
+appVersion: "0.1.0"
