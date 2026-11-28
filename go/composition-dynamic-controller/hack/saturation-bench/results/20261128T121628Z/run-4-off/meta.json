@@ -1,0 +1,22 @@
+{
+  "run": 4,
+  "arm": "off",
+  "pod": "satcharts-v0-1-0-controller-675fc6b669-tf2gx",
+  "node": "gke-sat-bench-5355f6-default-pool-26bfcf9d-zk7m",
+  "image_id": "ghcr.io/krateo-platformops/composition-dynamic-controller@sha256:ae54ea35441a1613917d3b9c6da79db67e26b8876f37d7f2eb33a7bcb9392477",
+  "chart": "2.13.135",
+  "n": 150,
+  "cpu_limit": "250m",
+  "workers": 16,
+  "t0": 1795872708,
+  "t_ready_poll": 1795872964,
+  "t_end": 1795873267,
+  "idle_secs": 300,
+  "idle_grace": 60,
+  "timed_out": false,
+  "ready": 150,
+  "light_n": 10,
+  "light_ready": 10,
+  "t_light_start": 1795873551,
+  "t_light_end": 1795873853
+}
