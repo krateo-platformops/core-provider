@@ -294,7 +294,7 @@ func TestWaitLeaseReleased(t *testing.T) {
 	v1 := page("v1-0-0")
 	nn := types.NamespacedName{Namespace: idxNS, Name: "v1-0-0.pages.composition.krateo.io"}
 	wait := func(dyn *fake.FakeDynamicClient, d time.Duration) error {
-		return waitLeaseReleased(context.Background(), dyn, nn, d, timings1510)
+		return waitLeaseReleased(context.Background(), dyn, nn, d, timings1510, nil)
 	}
 	for name, dyn := range map[string]*fake.FakeDynamicClient{
 		"never taken": idxCluster(), "released": idxCluster(lease(v1, "", "1", 1)),
@@ -371,7 +371,7 @@ func TestWaitLeaseReleasedByTheTimingsGiven(t *testing.T) {
 	nn := types.NamespacedName{Namespace: idxNS, Name: "v1-0-0.pages.composition.krateo.io"}
 	start := time.Now()
 	if err := waitLeaseReleased(context.Background(), idxCluster(lease(v1, "", "1", 4)), nn, 20*time.Second,
-		OwnershipLeaseTimings{Duration: 4 * time.Second, RenewDeadline: 3 * time.Second, RetryPeriod: time.Second}); err != nil {
+		OwnershipLeaseTimings{Duration: 4 * time.Second, RenewDeadline: 3 * time.Second, RetryPeriod: time.Second}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if d := time.Since(start); d < 2500*time.Millisecond || d >= 4500*time.Millisecond {
@@ -402,5 +402,72 @@ func TestMemberDrainBound(t *testing.T) {
 		if got := memberDrainBound(c.t); got != c.want {
 			t.Errorf("%s: %s, want %s", c.t, got, c.want)
 		}
+	}
+}
+
+// #660: the Quiet a release waits is the longer of this process's and the member's own, read from the
+// member's env ConfigMap.
+func TestLeaseQuietFromTheMember(t *testing.T) {
+	v1 := page("v1-0-0")
+	process := func(d, r, p time.Duration) OwnershipLeaseTimings {
+		return OwnershipLeaseTimings{Duration: d, RenewDeadline: r, RetryPeriod: p}
+	}
+	cm := func(kv map[string]string) *unstructured.Unstructured {
+		return envCM("web", v1, func(u *unstructured.Unstructured) {
+			data, _, _ := unstructured.NestedStringMap(u.Object, "data")
+			for k, v := range kv {
+				data[k] = v
+			}
+			_ = unstructured.SetNestedStringMap(u.Object, data, "data")
+		})
+	}
+	three := func(d, r, p string) map[string]string {
+		return map[string]string{EnvOwnershipLeaseDuration: d, EnvOwnershipLeaseRenewDeadline: r, EnvOwnershipLeaseRetryPeriod: p}
+	}
+	quiet := func(dyn *fake.FakeDynamicClient, p OwnershipLeaseTimings) (time.Duration, error) {
+		m, err := memberLeaseTimings(context.Background(), dyn, idxNS, v1)
+		if err != nil {
+			return 0, err
+		}
+		return leaseQuiet(p, m), nil
+	}
+	long, short := process(30*time.Second, 20*time.Second, 5*time.Second), process(15*time.Second, 10*time.Second, 2*time.Second)
+	for _, c := range []struct {
+		name    string
+		dyn     *fake.FakeDynamicClient
+		process OwnershipLeaseTimings
+		want    time.Duration
+	}{
+		{"the member's is longer: an old process on 15/10/2 releasing a 30/20/5 member", idxCluster(cm(three("30s", "20s", "5s"))), short, 12500 * time.Millisecond},
+		{"the member has no timings (rendered before #660): the process's", idxCluster(cm(nil)), short, 5 * time.Second},
+		{"the member has no ConfigMap: the process's", idxCluster(), long, 12500 * time.Millisecond},
+		{"the process's is longer: it stays", idxCluster(cm(three("15s", "10s", "2s"))), long, 12500 * time.Millisecond},
+		{"a fractional member", idxCluster(cm(three("1m30s", "1m", "0.5s"))), short, 5 * time.Second},
+	} {
+		got, err := quiet(c.dyn, c.process)
+		if err != nil || got != c.want {
+			t.Errorf("%s: quiet = %s, %v; want %s", c.name, got, err, c.want)
+		}
+	}
+	for name, dyn := range map[string]*fake.FakeDynamicClient{
+		"keys present but invalid (renewDeadline above duration)": idxCluster(cm(three("10s", "20s", "5s"))),
+		"keys present, not a duration":                            idxCluster(cm(three("30", "20s", "5s"))),
+		"only some of the three":                                  idxCluster(cm(map[string]string{EnvOwnershipLeaseDuration: "30s"})),
+	} {
+		if q, err := quiet(dyn, short); err == nil {
+			t.Errorf("%s: quiet = %s, want an error, never a guessed value", name, q)
+		}
+	}
+	read := idxCluster(cm(three("30s", "20s", "5s")))
+	read.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("apiserver unavailable")
+	})
+	if q, err := quiet(read, short); err == nil {
+		t.Errorf("a failed read: quiet = %s, want an error", q)
+	}
+	// releasePoolMember stops, keeping the grants, rather than waiting on a guessed Quiet.
+	dyn := idxCluster(cm(three("10s", "20s", "5s")), lease(v1, "", "1", 4))
+	if _, err := releasePoolMember(context.Background(), dyn, idxNS, v1, "", time.Second, short); !errors.Is(err, ErrPoolMemberNotDrained) {
+		t.Errorf("an invalid member timing: err = %v, want ErrPoolMemberNotDrained", err)
 	}
 }

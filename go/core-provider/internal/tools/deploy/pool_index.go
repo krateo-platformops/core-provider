@@ -306,7 +306,11 @@ func releasePoolMember(ctx context.Context, dyn dynamic.Interface, namespace str
 	if len(left) == 0 || stays {
 		return left, nil
 	}
-	if err := waitLeaseReleased(ctx, dyn, types.NamespacedName{Namespace: namespace, Name: templates.ControllerLeaseName(gvr.Group, gvr.Version, gvr.Resource)}, timeout, timings); err != nil {
+	member, err := memberLeaseTimings(ctx, dyn, namespace, gvr)
+	if err != nil {
+		return left, fmt.Errorf("%w: %s: %w; its env ConfigMap, RBAC and Lease grant are kept", ErrPoolMemberNotDrained, gvr, err)
+	}
+	if err := waitLeaseReleased(ctx, dyn, types.NamespacedName{Namespace: namespace, Name: templates.ControllerLeaseName(gvr.Group, gvr.Version, gvr.Resource)}, timeout, timings, member); err != nil {
 		return left, fmt.Errorf("%s left pool %v: %w", gvr, left, err)
 	}
 	return left, nil
@@ -350,13 +354,23 @@ func memberDrainBound(t OwnershipLeaseTimings) time.Duration {
 // second pool pod (a rolling update), or a member that had only been waiting, has either taken it by
 // then, and is waited for in turn, or has seen the key leave the index.
 //
+// The Quiet is the member's own, not only this process's (leaseQuiet): a candidate retries on the
+// member's retryPeriod, whatever this process was started with.
+//
 // At the bound it returns ErrPoolMemberNotDrained: a Lease still held is never read as released. A Lease
 // this process may not read is ErrDrainUnobservable, for #270's reason: waiting never grants it.
-func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.NamespacedName, timeout time.Duration, timings OwnershipLeaseTimings) error {
+func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.NamespacedName, timeout time.Duration, timings OwnershipLeaseTimings, member *OwnershipLeaseTimings) error {
+	quiet := leaseQuiet(timings, member)
+	fallbackDuration := timings.Duration
+	if member != nil {
+		fallbackDuration = member.Duration
+	}
 	if timeout <= 0 {
 		timeout = memberDrainBound(timings)
+		if member != nil {
+			timeout = max(timeout, memberDrainBound(*member))
+		}
 	}
-	quiet := timings.Quiet()
 	deadline := time.Now().Add(timeout)
 	var record, holder string
 	var seen, free time.Time // when this record was first seen; since when nobody holds it
@@ -374,7 +388,7 @@ func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.N
 			holder, _, _ = unstructured.NestedString(l.Object, "spec", "holderIdentity")
 			secs, ok, _ := unstructured.NestedInt64(l.Object, "spec", "leaseDurationSeconds")
 			if !ok || secs <= 0 {
-				secs = int64(timings.Duration / time.Second)
+				secs = int64(fallbackDuration / time.Second)
 			}
 			if r := l.GetResourceVersion(); r != record {
 				record, seen = r, now
@@ -402,4 +416,45 @@ func waitLeaseReleased(ctx context.Context, dyn dynamic.Interface, lease types.N
 		case <-time.After(drainPollInterval):
 		}
 	}
+}
+
+// memberLeaseTimings reads the timings gvr's controller runs with from the env ConfigMap core-provider
+// rendered for it (#660): the same three keys, parsed by OwnershipLeaseTimingsFromEnv. nil when there is
+// nothing to read: no ConfigMap, or one rendered before #660 (none of the three keys). A ConfigMap that
+// cannot be read, or whose keys are partial or invalid, is an error: on a teardown path a value that
+// cannot be determined is never guessed.
+func memberLeaseTimings(ctx context.Context, dyn dynamic.Interface, namespace string, gvr schema.GroupVersionResource) (*OwnershipLeaseTimings, error) {
+	cm, err := dyn.Resource(configMapGVR).Namespace(namespace).Get(ctx, MemberEnvConfigMapName(gvr), metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("reading %s's env ConfigMap for its ownership Lease timings: %w", gvr, err)
+	}
+	data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+	lookup := func(k string) (string, bool) { v, ok := data[k]; return v, ok }
+	if _, a := lookup(EnvOwnershipLeaseDuration); !a {
+		if _, b := lookup(EnvOwnershipLeaseRenewDeadline); !b {
+			if _, c := lookup(EnvOwnershipLeaseRetryPeriod); !c {
+				return nil, nil
+			}
+		}
+	}
+	t, err := OwnershipLeaseTimingsFromEnv(lookup)
+	if err != nil {
+		return nil, fmt.Errorf("%s's env ConfigMap: %w", gvr, err)
+	}
+	return &t, nil
+}
+
+// leaseQuiet is the longest of this process's Quiet and the member's: a candidate for the Lease retries
+// on the member's retryPeriod, so a process on shorter timings (an old pod during an upgrade) must not
+// read the Lease as released before the member's own candidates could have taken it. A longer Quiet only
+// delays a revoke; the maximum is never shorter than either. A member with no timings of its own (nil)
+// is the process's.
+func leaseQuiet(process OwnershipLeaseTimings, member *OwnershipLeaseTimings) time.Duration {
+	if member == nil {
+		return process.Quiet()
+	}
+	return max(process.Quiet(), member.Quiet())
 }
