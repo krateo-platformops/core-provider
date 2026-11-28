@@ -28,6 +28,32 @@ timestamp: 2026-08-07T00:00:00Z
   - Any other annotation value is not an opt-in: the definition stays
     `ValuesSchemaMissing`, and the message names the value.
   - Rules, CLI vs opt-in, and limitations: [values-schema inference](./values-schema-inference.md).
+- **Defaults come from `values.yaml`, not from the schema** (#686). The generated CRD
+  defaults each field from the chart's root `values.yaml`, because that is what
+  `helm install` uses: helm never applies a `values.schema.json` `default`. So a
+  Composition and a plain `helm install` of the chart agree by construction.
+  - A property whose path has a scalar, list or map in `values.yaml` defaults to that
+    value, whatever the schema's `default` says.
+  - A schema `default` with no `values.yaml` key at its path gets **no** CRD default
+    (helm would not apply it either). The same holds for defaults inside `items` and
+    `additionalProperties`.
+  - An object keeps crdgen's `default: {}` only where a descendant has a
+    `values.yaml`-sourced default; an object with none gets no `default`.
+  - A `values.yaml` value the schema refuses (type, enum, bound) is not made a
+    default, since the apiserver would refuse the whole CRD.
+  - `SchemaDefaultsMatchValues` says where the two disagree: `True/Aligned`, or
+    `False/SchemaDefaultsDiffer` naming each `path: schema=<v> values.yaml=<v>` or
+    `path: schema default, no values.yaml key` (capped, `+N more`). Ready is unaffected.
+    Maintainers: align `values.schema.json`'s defaults with `values.yaml`.
+  - Compositions that already exist keep the values they store; defaulting fills
+    omitted fields only. A served CRD version whose generated spec schema differs from
+    the served one **only in `default` keys** (the `{}` object defaults included) is
+    rewritten in place at upgrade, without a chart-version change, and
+    `SpecSchemaCurrent` reads `True` afterwards. Reason: a field absent from a stored
+    composition is already filled from values.yaml by helm (the cdc passes the spec as
+    values, helm merges values.yaml under it), and values stored under the old defaults
+    stay as stored, so a defaults-only rewrite cannot change an existing composition's
+    render. Any other difference keeps the `GeneratedSchemaNotLooser` rule.
 - The `apiRefRBAC` feature (on by default) expects the **authn** component's
   serviceaccount login strategy (CRD `serviceaccount.authn.krateo.io`) and
   **snowplow** in-cluster; set `apiRefRBAC.enabled=false` on clusters without them

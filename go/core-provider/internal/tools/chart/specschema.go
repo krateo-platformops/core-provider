@@ -1,9 +1,11 @@
 package chart
 
 import (
+	"bytes"
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/krateo-platformops/plumbing/valuesschema"
+	"sigs.k8s.io/yaml"
 )
 
 // #568 child 6 (D1, Diego 2026-11-17/18): the ONE seam through which a CompositionDefinition's spec
@@ -47,6 +50,14 @@ type SpecSchemaResult struct {
 	Bytes  []byte
 	Source SchemaSource
 	Report *valuesschema.Report
+	// Values is the chart's root values.yaml, decoded (#686): what helm merges under a user's values,
+	// so what the generated CRD must default to. Nil when the chart ships none. ValuesErr is set
+	// instead when the file exists and cannot be read or parsed: the schema is still usable (a
+	// definition being deleted must not depend on it), but nothing may be GENERATED from the pair,
+	// because "could not read values.yaml" must not be treated as "values.yaml has no keys", which
+	// would strip every default.
+	Values    map[string]any
+	ValuesErr error
 }
 
 // OptIn reads the opt-in annotation: infer is true only for exactly ValuesSchemaInfer; invalid is the
@@ -73,7 +84,9 @@ func SpecSchema(fsys fs.FS, dir string, infer bool) (SpecSchemaResult, error) {
 		if err != nil {
 			return SpecSchemaResult{}, fmt.Errorf("reading the chart's values.schema.json: %w", err)
 		}
-		return SpecSchemaResult{Bytes: b, Source: SchemaAuthored}, nil
+		res := SpecSchemaResult{Bytes: b, Source: SchemaAuthored}
+		res.Values, res.ValuesErr = ChartValues(fsys, dir)
+		return res, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) || !infer {
 		return SpecSchemaResult{}, err
@@ -83,7 +96,33 @@ func SpecSchema(fsys fs.FS, dir string, infer bool) (SpecSchemaResult, error) {
 		return SpecSchemaResult{}, fmt.Errorf("inferring a values schema (%s: %s): %w", ValuesSchemaAnnotation, ValuesSchemaInfer, err)
 	}
 	report := r.Report
-	return SpecSchemaResult{Bytes: r.Schema, Source: SchemaInferred, Report: &report}, nil
+	res := SpecSchemaResult{Bytes: r.Schema, Source: SchemaInferred, Report: &report}
+	res.Values, res.ValuesErr = ChartValues(fsys, dir)
+	return res, nil
+}
+
+// ChartValues reads and decodes the chart's root values.yaml (#686). A chart without one returns
+// (nil, nil): helm then has no defaults either. Numbers decode as json.Number so an integer keeps its
+// exact text.
+func ChartValues(fsys fs.FS, dir string) (map[string]any, error) {
+	b, err := fs.ReadFile(fsys, path.Join(dir, "values.yaml"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the chart's values.yaml: %w", err)
+	}
+	j, err := yaml.YAMLToJSON(b)
+	if err != nil {
+		return nil, fmt.Errorf("parsing the chart's values.yaml: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(j))
+	dec.UseNumber()
+	var out map[string]any
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding the chart's values.yaml: %w", err)
+	}
+	return out, nil
 }
 
 // inferMemoised is valuesschema.Infer memoised by the digest of exactly the files inference reads

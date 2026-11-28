@@ -250,7 +250,7 @@ func TestTableIsWellFormed(t *testing.T) {
 				t.Errorf("%s: a True Ready rolls up healthy, declared %q", key, r.ParentVerdict())
 			}
 		case rtv1.TypeSynced, TypeControllerActive, TypeSchemaFullyEnforced, TypeSpecSchemaCurrent,
-			TypeApiRefRBACComplete, TypeAuthnDelegation, TypeAuthnMappingApplied, TypeValuesSchemaAuthored, TypeMigratedValuesValid:
+			TypeApiRefRBACComplete, TypeAuthnDelegation, TypeAuthnMappingApplied, TypeValuesSchemaAuthored, TypeSchemaDefaultsMatchValues, TypeMigratedValuesValid:
 			if r.ParentVerdict() != NotRead {
 				t.Errorf("%s: the rollup reads only Ready, declared %q", key, r.ParentVerdict())
 			}

@@ -37,6 +37,8 @@ func specSchemaCurrentCondition(d crdutils.SpecDrift) rtv1.Condition {
 	switch {
 	case d.Equal:
 		return cdreason.SpecSchemaCurrent.WithMessage(fmt.Sprintf("the CRD serves %s with the spec schema generated from the chart", d.Version))
+	case d.DefaultsOnly:
+		return cdreason.SpecSchemaLooserPending.WithMessage(fmt.Sprintf("the spec schema generated for %s differs from the served one only in its defaults (now the chart's values.yaml's); it is being written", d.Version))
 	case d.Looser():
 		return cdreason.SpecSchemaLooserPending.WithMessage(fmt.Sprintf("the spec schema generated for %s is looser than the served one; it is being written", d.Version))
 	default:

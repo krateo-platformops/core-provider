@@ -959,7 +959,7 @@
       "cases": [
         {
           "writer": "core-provider",
-          "meaning": "transient: the generated schema is provably looser and the next Update writes it",
+          "meaning": "transient: the generated schema is provably looser, or differs from the served one only in its defaults (#686), and the next Update writes it",
           "clearance": {
             "kind": "next pass",
             "detail": "the next Update writes the generated schema"
@@ -1638,6 +1638,109 @@
             "detail": "while another definition generates the CRD"
           },
           "sinceVersion": "2.13.117",
+          "action": "See the blueprint the message names: its schema is the one in use.",
+          "actors": [
+            "you"
+          ],
+          "detailFields": [
+            "status.owner"
+          ]
+        }
+      ]
+    },
+    {
+      "condition": "SchemaDefaultsMatchValues",
+      "reason": "Aligned",
+      "status": "True",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "steady",
+        "detail": "the healthy end state"
+      },
+      "sinceVersion": "unreleased",
+      "action": "",
+      "detailFields": [],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "every default in the chart's values.schema.json equals the value at the same path in values.yaml, or the schema declares none",
+          "clearance": {
+            "kind": "steady",
+            "detail": "the healthy end state"
+          },
+          "sinceVersion": "unreleased",
+          "action": "",
+          "detailFields": []
+        }
+      ]
+    },
+    {
+      "condition": "SchemaDefaultsMatchValues",
+      "reason": "SchemaDefaultsDiffer",
+      "status": "False",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "indefinite",
+        "detail": "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"
+      },
+      "sinceVersion": "unreleased",
+      "action": "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.",
+      "actors": [
+        "maintainers"
+      ],
+      "detailFields": [],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "the schema declares a default that values.yaml does not agree with: a different value, or no key at that path; the generated CRD defaults from values.yaml, what helm uses, so a composition and a helm install of the chart agree; the message names each path (capped), and any values.yaml value the schema refuses as a default (recomputed on every Observe)",
+          "clearance": {
+            "kind": "indefinite",
+            "detail": "until the chart's values.schema.json and values.yaml agree; recomputed on every Observe"
+          },
+          "sinceVersion": "unreleased",
+          "action": "Align values.schema.json's defaults with values.yaml; new compositions use values.yaml's.",
+          "actors": [
+            "maintainers"
+          ],
+          "detailFields": []
+        }
+      ]
+    },
+    {
+      "condition": "SchemaDefaultsMatchValues",
+      "reason": "OwnedByAnotherDefinition",
+      "status": "Unknown",
+      "verdict": null,
+      "writers": [
+        "core-provider"
+      ],
+      "clearance": {
+        "kind": "steady",
+        "detail": "while another definition generates the CRD"
+      },
+      "sinceVersion": "unreleased",
+      "action": "See the blueprint the message names: its schema is the one in use.",
+      "actors": [
+        "you"
+      ],
+      "detailFields": [
+        "status.owner"
+      ],
+      "cases": [
+        {
+          "writer": "core-provider",
+          "meaning": "a follower: another definition generates the CRD; the message names it",
+          "clearance": {
+            "kind": "steady",
+            "detail": "while another definition generates the CRD"
+          },
+          "sinceVersion": "unreleased",
           "action": "See the blueprint the message names: its schema is the one in use.",
           "actors": [
             "you"

@@ -1143,7 +1143,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		// Update acts on, so the message and the behaviour cannot disagree.
 		// #494 likewise: a held version and no room. The plan measures the write Update would make, so
 		// it needs the generated CRD Update would add.
-		generated, gerr := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
+		generated, gerr := crdFromChart(specSchema, chartGVK)
 		if gerr != nil {
 			return reconciler.ExternalObservation{}, fmt.Errorf("generating the CRD to plan the served-version add: %w", gerr)
 		}
@@ -1225,6 +1225,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			cr.SetConditions(schemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(specSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			cr.SetConditions(valuesSchemaOwnedElsewhereCondition(owner.Namespace, owner.Name))
+			cr.SetConditions(schemaDefaultsOwnedElsewhereCondition(owner.Namespace, owner.Name))
 			return e.observeFollower(ctx, cr, crd, gvr, chartGVK, pkg.PackageURL(), owner, specSchemaBytes)
 		}
 		// #387: the owner now, so a follower's Ready message no longer describes this definition.
@@ -1233,7 +1234,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}
 	}
 
-	generated, err := crdutils.GenerateCRDWithWarnings(specSchemaBytes, chartGVK)
+	generated, defaultsNotUsed, err := generatedFromChart(specSchema, chartGVK)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error generating CRD: %w", err)
 	}
@@ -1242,6 +1243,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// the current render (the cache returns the warnings with the CRD); Events fire only when the
 	// render actually ran.
 	cr.SetConditions(schemaSourceConditions(specSchema, generated.Warnings)...)
+	cr.SetConditions(schemaDefaultsCondition(specSchema, defaultsNotUsed)) // #686
 	emitSchemaEvents(e.rec, cr, generated.Warnings, generated.Fresh)
 	// #614: while instances are reported holding values the served version refuses (or unchecked),
 	// re-validate them, so the condition clears once they are fixed or gone.
@@ -1761,7 +1763,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error getting JSON schema: %w", err)
 	}
 	specSchemaBytes := specSchema.Bytes
-	crd, err := crdutils.GenerateCRD(specSchemaBytes, gvk)
+	crd, err := crdFromChart(specSchema, gvk)
 	if err != nil {
 		return fmt.Errorf("error generating CRD: %w", err)
 	}
@@ -1973,7 +1975,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error getting JSON schema: %w", err)
 	}
 	specSchemaBytes := specSchema.Bytes
-	crd, err := crdutils.GenerateCRD(specSchemaBytes, gvk)
+	crd, err := crdFromChart(specSchema, gvk)
 	if err != nil {
 		return fmt.Errorf("error generating CRD: %w", err)
 	}
