@@ -49,6 +49,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/statusprojection"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
@@ -56,6 +57,8 @@ import (
 var (
 	krateoNamespace = env.String(krateoNamespaceEnvVar, krateoNamespaceDefault)
 	helmMaxHistory  = env.Int(helmMaxHistoryEnvvar, 3)
+	// derivedRBACEnabled is the off switch of the derived-RBAC cache (#697); on by default.
+	derivedRBACEnabled = env.Bool(derivedRBACCacheEnvvar, true)
 	// helmOperationTimeout is the Timeout of every helm install, upgrade, rollback and uninstall
 	// (#410). helm applies it to EACH wait, not to the operation as a whole: execHook calls
 	// WatchUntilReady(resources, timeout) once per hook, in weight order (measured on kind: two
@@ -196,6 +199,7 @@ func NewHandler(opts *HandlerOptions) controller.ExternalClient {
 		metrics:            opts.Metrics,
 		writtenBy:          opts.WrittenBy,
 		cachedClients:      newHelmCachedClients(opts.Kubeconfig),
+		derivedRBAC:        newProductionDerivedRBACCache(derivedRBACEnabled),
 	}
 }
 
@@ -225,6 +229,9 @@ type handler struct {
 	chartInspectorUrl string
 	saName            string
 	saNamespace       string
+	// derivedRBAC is what the last chart-inspector answer for each composition was and what it was
+	// computed under (#697). nil: every Observe asks chart-inspector, as before.
+	derivedRBAC *derivedRBACCache
 	// audit records every helm child write (core-provider#423); nil records nothing.
 	audit *auditrec.Recorder
 	// metrics is HandlerOptions.Metrics; withPassContext puts it in each entry point's ctx.
@@ -518,7 +525,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (o
 	// composition for 22 hours, because the one block able to re-subject it was sequenced behind the
 	// operation that needed it. ApplyRBAC can always fix this: the static baseline grants
 	// rbac.authorization.k8s.io/{roles,rolebindings,clusterroles,clusterrolebindings}.
-	written, err := h.applyDerivedRBAC(ctx, mg, pkg, dyn, releaseName)
+	written, err := h.applyDerivedRBACWith(ctx, mg, pkg, dyn, releaseName, &rbacCacheUse{revision: rel.Revision})
 	if written > 0 {
 		markWrote(ctx, writeDerivedRBAC) // RBAC created or changed, possibly before an error
 	}
@@ -1635,6 +1642,8 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) error {
 	ctx = h.withPassContext(ctx)
 	mg = mg.DeepCopy()
+	// #697: the composition is going; so is what was remembered of its derived RBAC.
+	h.derivedRBAC.forget(mg.GetUID())
 	markOperation(ctx, operationDelete)
 
 	// RESOLVED HERE TOO (#335), for the same reason as Update -- and with a guard, because this is
@@ -1992,12 +2001,100 @@ func (h *handler) finishTeardown(ctx context.Context, mg *unstructured.Unstructu
 // binding naming a ServiceAccount that no longer exists — RBAC is name-based, so it resolves against
 // nothing and the controller silently runs on the static baseline alone (core-provider#166).
 func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, dyn dynamic.Interface, releaseName string) (written int, err error) {
+	return h.applyDerivedRBACWith(ctx, mg, pkg, dyn, releaseName, nil)
+}
+
+// applyDerivedRBACWith is applyDerivedRBAC, and with a non-nil use it skips the chart-inspector call
+// when nothing that determines its answer has changed since the last successful one (#697; see
+// derivedrbaccache.go). The cached rules are then APPLIED exactly as a fresh answer would be, so a
+// deleted or edited grant is restored on that pass too.
+func (h *handler) applyDerivedRBACWith(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, dyn dynamic.Interface, releaseName string, use *rbacCacheUse) (written int, err error) {
 	compositionGVR, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
 	if err != nil {
 		return 0, fmt.Errorf("converting GVK to GVR: %w", err)
 	}
 
+	var (
+		key       derivedRBACKey
+		cacheable bool
+		generated *rbac.RBAC
+		reason    string
+	)
+	cached := use != nil && h.derivedRBAC.enabled()
+	if cached {
+		key, reason = h.derivedRBACKeyFor(ctx, mg, pkg, releaseName, use.revision)
+		if reason == "" {
+			// Once per chart identity, not per pass. Unknown is "asks", never "no lookup".
+			switch uses, err := h.derivedRBAC.lookups.usesLookup(ctx, pkg); {
+			case err != nil:
+				xcontext.Logger(ctx).Debug("Could not scan the chart for `lookup`; asking chart-inspector", "error", err.Error())
+				reason = rbacDecisionUnscanned
+			case uses:
+				reason = rbacDecisionLookup
+			}
+		}
+		cacheable = reason == ""
+	}
+	if cacheable {
+		if rules, hit := h.derivedRBAC.lookup(mg.GetUID(), key); hit {
+			generated = rules
+			reason = rbacDecisionSkipped
+			xcontext.Logger(ctx).Debug("Derived RBAC unchanged since the last chart-inspector answer; re-applying it without asking chart-inspector",
+				"key", key.String())
+			markChartRenderable(ctx, mg)
+		} else {
+			reason = rbacDecisionKeyChanged
+		}
+	}
+	if cached {
+		metrics.FromContext(ctx).IncRBACGenerationDecision(ctx, reason)
+	}
+	if generated == nil {
+		var served *string
+		generated, err = h.generateDerivedRBAC(ctx, mg, pkg, releaseName, compositionGVR, func(v string) {
+			served = &v
+			h.derivedRBAC.observeVersion(v)
+		})
+		if err != nil {
+			// A changed key's answer failed: whatever was kept belongs to a key that no longer holds.
+			h.derivedRBAC.forget(mg.GetUID())
+			return 0, err
+		}
+		if cacheable {
+			// Keyed by the version that ANSWERED, not the one read before asking.
+			if served != nil {
+				key.InspectorVersion = *served
+			}
+			h.derivedRBAC.store(mg.GetUID(), key, generated)
+		}
+	}
+
+	rbInstaller := rbac.NewRBACInstaller(dyn)
+	var report rbac.ApplyReport
+	applyErr := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
+		var err error
+		report, err = rbInstaller.ApplyRBAC(generated)
+		return err
+	})
+	// #357: RBAC into a terminating namespace was skipped, not failed. Say so on the CR.
+	setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(true, report, applyErr))
+	if len(report.SkippedTerminating) > 0 {
+		xcontext.Logger(ctx).Info("Skipped RBAC into namespaces being deleted",
+			"skipped", describeSkipped(report.SkippedTerminating))
+	}
+	// Written is reported on the error path too: an apply can write some objects and then fail.
+	if applyErr != nil {
+		return report.Written, &rbacApplyFailed{err: applyErr}
+	}
+	return report.Written, nil
+}
+
+// generateDerivedRBAC asks chart-inspector for the composition's derived RBAC and builds the objects.
+// Its failure handling (ChartRenderable, RBACComplete, the wrapped error) is what applyDerivedRBAC
+// always did; it is unchanged by #697.
+func (h *handler) generateDerivedRBAC(ctx context.Context, mg *unstructured.Unstructured, pkg *archive.Info, releaseName string, compositionGVR schema.GroupVersionResource, onVersion func(string)) (*rbac.RBAC, error) {
 	chartInspector := chartinspector.NewChartInspector(h.chartInspectorUrl)
+	chartInspector.WithVersionObserver(onVersion)
 	rbgen := metrics.WrapRBACGen(rbacgen.NewRBACGen(h.saName, h.saNamespace, &chartInspector))
 	generated, err := rbgen.
 		WithBaseName(releaseName).
@@ -2026,31 +2123,13 @@ func (h *handler) applyDerivedRBAC(ctx context.Context, mg *unstructured.Unstruc
 		if !chartinspector.IsUnreachable(err) {
 			setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(false, rbac.ApplyReport{}, nil))
 		}
-		return 0, fmt.Errorf("generating RBAC using chart-inspector: %w", err)
+		return nil, fmt.Errorf("generating RBAC using chart-inspector: %w", err)
 	}
 	markChartRenderable(ctx, mg)
 	// #402: record this composition as an owner of every derived object, so its Delete can release
 	// them without the chart.
 	generated.SetOwner(mg.GetUID())
-
-	rbInstaller := rbac.NewRBACInstaller(dyn)
-	var report rbac.ApplyReport
-	applyErr := metrics.NewHelmMetrics(ctx).TimedRBAC(func() error {
-		var err error
-		report, err = rbInstaller.ApplyRBAC(generated)
-		return err
-	})
-	// #357: RBAC into a terminating namespace was skipped, not failed. Say so on the CR.
-	setRBACCompleteCondition(ctx, mg, rbacCompleteCondition(true, report, applyErr))
-	if len(report.SkippedTerminating) > 0 {
-		xcontext.Logger(ctx).Info("Skipped RBAC into namespaces being deleted",
-			"skipped", describeSkipped(report.SkippedTerminating))
-	}
-	// Written is reported on the error path too: an apply can write some objects and then fail.
-	if applyErr != nil {
-		return report.Written, &rbacApplyFailed{err: applyErr}
-	}
-	return report.Written, nil
+	return generated, nil
 }
 
 // isVersionMigrationHandover reports whether this composition CR is being deleted as part of a

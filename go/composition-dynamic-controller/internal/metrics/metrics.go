@@ -52,9 +52,10 @@ type Metrics struct {
 	chartInspectorErrors   metric.Int64Counter
 
 	// RBAC Generation metrics
-	rbacGenerationDuration metric.Float64Histogram
-	rbacGenerationTotal    metric.Int64Counter
-	rbacGenerationErrors   metric.Int64Counter
+	rbacGenerationDuration  metric.Float64Histogram
+	rbacGenerationTotal     metric.Int64Counter
+	rbacGenerationErrors    metric.Int64Counter
+	rbacGenerationDecisions metric.Int64Counter
 
 	// RBAC Apply metrics
 	rbacApplyDuration metric.Float64Histogram
@@ -206,6 +207,14 @@ func newMetrics(meter metric.Meter, log logging.Logger, deploymentName string) (
 	m.rbacGenerationErrors, err = meter.Int64Counter(
 		"composition_rbac_generation_errors",
 		metric.WithDescription("Total number of RBAC generation failures"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.rbacGenerationDecisions, err = meter.Int64Counter(
+		"composition_rbac_generation_decisions_total",
+		metric.WithDescription("Observe passes by what the derived-RBAC cache decided (#697): reason=skipped re-applied the cached rules without asking chart-inspector; lookup (the chart calls lookup), key_changed and unscannable asked it"),
 	)
 	if err != nil {
 		return nil, err
@@ -413,6 +422,15 @@ func (m *Metrics) IncRBACGenerationTotal(ctx context.Context) {
 		return
 	}
 	m.rbacGenerationTotal.Add(ctx, 1, metric.WithAttributes(m.instanceAttrs()...))
+}
+
+// IncRBACGenerationDecision counts an Observe pass under the reason the derived-RBAC cache decided as
+// it did (#697). reason=skipped passes made no chart-inspector call; every other reason made one.
+func (m *Metrics) IncRBACGenerationDecision(ctx context.Context, reason string) {
+	if m == nil || m.rbacGenerationDecisions == nil {
+		return
+	}
+	m.rbacGenerationDecisions.Add(ctx, 1, metric.WithAttributes(append(m.instanceAttrs(), attribute.String("reason", reason))...))
 }
 
 func (m *Metrics) IncRBACGenerationErrors(ctx context.Context) {

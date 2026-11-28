@@ -60,9 +60,41 @@ type ChartInspectorInterface interface {
 	Resources(ctx context.Context, params Parameters) ([]Resource, error)
 }
 
+// VersionHeader is the response header chart-inspector sets to its build version on every response
+// (core-provider#697). A CONTRACT WITH chart-inspector (internal/handlers.VersionHeader); the two
+// modules cannot share a declaration, so each pins the literal in a test. An inspector that predates
+// it sends none, and that is the version "".
+const VersionHeader = "X-Chart-Inspector-Version"
+
 type ChartInspector struct {
 	server     string
 	httpClient *http.Client
+	// onVersion, when set, is told the version header of every response Resources receives, "" for
+	// a response without one.
+	onVersion func(string)
+}
+
+// WithVersionObserver makes Resources report the VersionHeader of each response it receives.
+func (c *ChartInspector) WithVersionObserver(f func(string)) { c.onVersion = f }
+
+// Version asks chart-inspector for its build version through /healthz, which sets the header like
+// every other response and costs no render. "" is the version of an inspector that sends none.
+func (c *ChartInspector) Version(ctx context.Context) (string, error) {
+	u, err := url.JoinPath(c.server, "/healthz")
+	if err != nil {
+		return "", fmt.Errorf("joining server url: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", &UnreachableError{Err: fmt.Errorf("getting chartinspector: %w", err)}
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.Header.Get(VersionHeader), nil
 }
 
 var _ ChartInspectorInterface = &ChartInspector{}
@@ -154,6 +186,9 @@ func (c *ChartInspector) Resources(ctx context.Context, params Parameters) ([]Re
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, &UnreachableError{Err: fmt.Errorf("getting chartinspector: %w", err)}
+	}
+	if c.onVersion != nil {
+		c.onVersion(resp.Header.Get(VersionHeader))
 	}
 	// Closed on EVERY path, as http.Client requires of a caller. This defer used to sit below the
 	// non-200 return, so a refused or failed request's body was never closed.
