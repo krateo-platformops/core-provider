@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -165,6 +166,18 @@ func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts Deploy
 		// a Role there, applied by ApplyApiRefRoles, never a rule here.
 		composed := restactionrbac.Compose(readSet, opts.ApiRefCompositions, cdcGroup(saName), restActionRBACNameOf(opts))
 		cr, crb = composed.ClusterRole, composed.ClusterRoleBinding
+		if opts.ApiRefKeepClusterRules && cr != nil {
+			live, err := dyn.Resource(clusterRoleGVR).Get(ctx, cr.Name, metav1.GetOptions{})
+			switch {
+			case err == nil:
+				var cur rbacv1.ClusterRole
+				if runtime.DefaultUnstructuredConverter.FromUnstructured(live.Object, &cur) == nil {
+					cr.Rules = unionRules(cur.Rules, cr.Rules)
+				}
+			case !apierrors.IsNotFound(err):
+				return fmt.Errorf("reading the apiRef ClusterRole to keep its rules: %w", err)
+			}
+		}
 	} else {
 		// A remote definition keeps the single ClusterRole: its compositions live on a cluster this
 		// path does not watch.

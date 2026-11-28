@@ -48,6 +48,7 @@ func (e *external) planApiRef(ctx context.Context, cr *compositiondefinitionsv1a
 	}
 	opts.ApiRefPerNamespace = true
 	opts.ApiRefCompositions = plan.Compositions
+	opts.ApiRefKeepClusterRules = len(plan.Unresolved) > 0
 	cr.Status.ApiRefRBAC = apiRefRBACStatus(plan)
 	e.planner.noteObserved(client.ObjectKeyFromObject(cr), plan)
 	return nil

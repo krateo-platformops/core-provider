@@ -164,3 +164,59 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
+
+// A composition's request is refused after its read-set (with a prior-stage row, so a cluster-wide
+// rule) was granted: while it is refused the ClusterRole keeps that rule, and loses it only after the
+// refusal clears and the row is no longer needed.
+func TestApiRefClusterRoleKeepsWhileARefusalLasts691Envtest(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Fatal("KUBEBUILDER_ASSETS is not set: a skip would read as a pass")
+	}
+	env := &envtest.Environment{}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+	kube, err := client.New(cfg, client.Options{Scheme: clientgoscheme.Scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn := dynamic.NewForConfigOrDie(cfg)
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"readSet": []restactionrbac.Resource{{Version: "v1", Resource: "nodes", Verb: "get"}}})
+	}))
+	defer srv.Close()
+	gvr := schema.GroupVersionResource{Group: "composition.krateo.io", Version: "v1-0-3", Resource: "fireworksapps"}
+	withSecrets := [][]restactionrbac.Resource{{{Version: "v1", Resource: "secrets", Verb: "get", NamespaceUnknown: true}}}
+	apply := func(comps [][]restactionrbac.Resource, keep bool) []string {
+		t.Helper()
+		opts := DeployOptions{GVR: gvr, ApiRefName: "ra", ApiRefNamespace: "krateo-system", SnowplowURL: srv.URL,
+			ApiRefPerNamespace: true, ApiRefCompositions: comps, ApiRefKeepClusterRules: keep}
+		hsh := hasher.NewFNVObjectHash()
+		if err := applyRestActionRBAC(ctx, dyn, opts, "sa-v1-0-3", &hsh, kubecli.ApplyOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		cr := &rbacv1.ClusterRole{}
+		if err := kube.Get(ctx, types.NamespacedName{Name: ApiRefRBACName(gvr)}, cr); err != nil {
+			t.Fatal(err)
+		}
+		return clusterRoleResources(cr)
+	}
+	if got := apply(withSecrets, false); !contains(got, "secrets") {
+		t.Fatalf("control: the prior-stage row must be granted cluster-wide, got %v", got)
+	}
+	// Its composition is refused: it contributes nothing to the plan, and the rule stays.
+	if got := apply(nil, true); !contains(got, "secrets") {
+		t.Fatalf("while a composition is refused the ClusterRole narrowed to %v", got)
+	}
+	// Still refused, other compositions resolved with no such row: still kept.
+	if got := apply([][]restactionrbac.Resource{{}}, true); !contains(got, "secrets") {
+		t.Fatalf("narrowed while refused: %v", got)
+	}
+	// The refusal clears and the row is no longer needed: it goes.
+	if got := apply([][]restactionrbac.Resource{{}}, false); contains(got, "secrets") {
+		t.Fatalf("after the refusal cleared and the row is not needed the rule must go, got %v", got)
+	}
+}

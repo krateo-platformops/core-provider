@@ -160,6 +160,10 @@ type DeployOptions struct {
 	// ApiRefCompositions is one resolved read-set per composition of the definition, from snowplow's
 	// /rbac with that composition's extras. Rows still namespaceUnknown in them stay cluster-wide.
 	ApiRefCompositions [][]restactionrbac.Resource
+	// ApiRefKeepClusterRules says some composition's reads could not be resolved (its request was
+	// refused), so what it contributed to the ClusterRole is unknown: the live rules are kept and the
+	// planned ones added, never narrowed (cannot determine is not empty).
+	ApiRefKeepClusterRules bool
 	// ApiRefDelegation is the definition's spec.apiRef.delegation, rendered onto the controller's authn
 	// mapping as spec.delegation (#405). nil renders no delegation key.
 	ApiRefDelegation *definitionsv1alpha1.ApiRefDelegation

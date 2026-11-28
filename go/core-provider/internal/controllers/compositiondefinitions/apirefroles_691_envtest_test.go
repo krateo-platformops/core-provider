@@ -334,6 +334,9 @@ func TestApiRefRoles691Envtest(t *testing.T) {
 	if u := live.Status.ApiRefRBAC.UnresolvedCompositions; len(u) != 1 || u[0].Namespace != "team-d" || u[0].Name != "huge" || u[0].Reason != "ExtrasTooLarge" {
 		t.Errorf("status.apiRefRBAC.unresolvedCompositions = %+v", u)
 	}
+	if !opts.ApiRefKeepClusterRules {
+		t.Error("with a composition refused Deploy must be told to keep the ClusterRole's rules")
+	}
 	if !opts.ApiRefPerNamespace || len(opts.ApiRefCompositions) != 2 {
 		t.Errorf("Deploy is handed every composition slot (the refused one empty): perNamespace=%v sets=%d", opts.ApiRefPerNamespace, len(opts.ApiRefCompositions))
 	}
