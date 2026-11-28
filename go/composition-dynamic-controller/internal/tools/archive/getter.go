@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
@@ -26,6 +27,13 @@ type CompositionDefinitionInfo struct {
 	// Annotations are the CompositionDefinition's own annotations, as read by Get. Nil when the
 	// definition object was not read (the label-only shortcut), so a reader must treat nil as unknown.
 	Annotations map[string]string
+	// Generation and UID are the definition object's own. Generation moves with every change to its
+	// spec -- the chart's url, repo, version, credentials reference, TLS setting -- which is exactly
+	// what chart-inspector reads off the definition to render (go/chart-inspector
+	// handlers/resources/get/resources.go), so it is an input of the derived-RBAC cache key (#697).
+	// Zero when the definition object was not read.
+	Generation int64
+	UID        types.UID
 }
 
 type Auth struct {
@@ -304,6 +312,8 @@ func (g *dynamicGetter) get(uns *unstructured.Unstructured, withCredentials bool
 			Namespace:   compositionDefinition.GetNamespace(),
 			GVR:         compositionDefinitionGVR,
 			Annotations: annotationsOf(compositionDefinition),
+			Generation:  compositionDefinition.GetGeneration(),
+			UID:         compositionDefinition.GetUID(),
 		},
 	}, nil
 }

@@ -19,6 +19,32 @@ type RBAC struct {
 	ClusterRoleBinding *rbacv1.ClusterRoleBinding
 }
 
+// DeepCopy returns a copy that shares no pointer or map with r, so a caller can keep the rules it
+// computed and hand a private copy to every apply (#697). The apply path may set fields on what it
+// is given; a cache must not see them.
+func (r *RBAC) DeepCopy() *RBAC {
+	if r == nil {
+		return nil
+	}
+	out := &RBAC{
+		ClusterRole:        r.ClusterRole.DeepCopy(),
+		ClusterRoleBinding: r.ClusterRoleBinding.DeepCopy(),
+	}
+	if r.Namespaces != nil {
+		out.Namespaces = make([]*corev1.Namespace, len(r.Namespaces))
+		for i, ns := range r.Namespaces {
+			out.Namespaces[i] = ns.DeepCopy()
+		}
+	}
+	if r.Namespaced != nil {
+		out.Namespaced = make(map[string]Namespaced, len(r.Namespaced))
+		for k, v := range r.Namespaced {
+			out.Namespaced[k] = Namespaced{Role: v.Role.DeepCopy(), RoleBinding: v.RoleBinding.DeepCopy()}
+		}
+	}
+	return out
+}
+
 func CreateNamespace(name string, releaseName string, releaseNamespace string) *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{

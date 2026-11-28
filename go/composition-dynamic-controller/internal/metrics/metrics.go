@@ -55,6 +55,7 @@ type Metrics struct {
 	rbacGenerationDuration metric.Float64Histogram
 	rbacGenerationTotal    metric.Int64Counter
 	rbacGenerationErrors   metric.Int64Counter
+	rbacGenerationSkipped  metric.Int64Counter
 
 	// RBAC Apply metrics
 	rbacApplyDuration metric.Float64Histogram
@@ -206,6 +207,14 @@ func newMetrics(meter metric.Meter, log logging.Logger, deploymentName string) (
 	m.rbacGenerationErrors, err = meter.Int64Counter(
 		"composition_rbac_generation_errors",
 		metric.WithDescription("Total number of RBAC generation failures"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.rbacGenerationSkipped, err = meter.Int64Counter(
+		"composition_rbac_generation_skipped_total",
+		metric.WithDescription("Passes that re-applied the cached derived RBAC instead of asking chart-inspector, because nothing that determines its answer had changed (#697)"),
 	)
 	if err != nil {
 		return nil, err
@@ -413,6 +422,15 @@ func (m *Metrics) IncRBACGenerationTotal(ctx context.Context) {
 		return
 	}
 	m.rbacGenerationTotal.Add(ctx, 1, metric.WithAttributes(m.instanceAttrs()...))
+}
+
+// IncRBACGenerationSkipped counts a pass that did not call chart-inspector (#697). Against
+// composition_rbac_generation_total, which counts the calls, it is the measure of what the cache saves.
+func (m *Metrics) IncRBACGenerationSkipped(ctx context.Context) {
+	if m == nil || m.rbacGenerationSkipped == nil {
+		return
+	}
+	m.rbacGenerationSkipped.Add(ctx, 1, metric.WithAttributes(m.instanceAttrs()...))
 }
 
 func (m *Metrics) IncRBACGenerationErrors(ctx context.Context) {

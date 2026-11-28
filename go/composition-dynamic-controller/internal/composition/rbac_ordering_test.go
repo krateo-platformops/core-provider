@@ -106,7 +106,11 @@ func parseComposition(t *testing.T) *ast.File {
 func TestRBACApplyPrecedesStuckReleaseRecoveryInObserve(t *testing.T) {
 	fn := findFunc(t, parseComposition(t), "Observe")
 
-	rbacAt := posOf(fn, methodCallTo("applyDerivedRBAC"))
+	// applyDerivedRBACWith is the same call with the #697 cache in play; Observe is the one caller
+	// that uses it, and the ordering below is as true of it as of applyDerivedRBAC.
+	rbacAt := posOf(fn, func(n ast.Node) bool {
+		return methodCallTo("applyDerivedRBAC")(n) || methodCallTo("applyDerivedRBACWith")(n)
+	})
 	if rbacAt == token.NoPos {
 		t.Fatal("Observe no longer calls applyDerivedRBAC: the derived grants are never refreshed, " +
 			"so a binding left on a replaced ServiceAccount (#166) can never be repaired")
