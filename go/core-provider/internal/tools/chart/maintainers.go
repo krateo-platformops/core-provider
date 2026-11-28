@@ -16,6 +16,9 @@ import (
 // else and fetches nothing. A Chart.yaml that cannot be read or parsed, or that names no version,
 // returns an error and the caller leaves status.chart as it was: nothing is invented.
 //
+// A maintainer's email is deliberately not copied: status is dumped wholesale into snapshots,
+// telemetry and support bundles, so it must not carry PII-shaped data.
+//
 // A maintainer with an empty name is left out (helm's shape requires a name, and the CRD refuses an
 // entry without one, which would fail the whole status write). A chart with no maintainers returns
 // the version and a nil list, so the field stays absent rather than an empty list.
@@ -40,7 +43,7 @@ func chartStatus(md *helmchart.Metadata) (*v1alpha1.ChartStatus, error) {
 		if m == nil || m.Name == "" {
 			continue
 		}
-		cs.Maintainers = append(cs.Maintainers, v1alpha1.ChartMaintainer{Name: m.Name, Email: m.Email, URL: m.URL})
+		cs.Maintainers = append(cs.Maintainers, v1alpha1.ChartMaintainer{Name: m.Name, URL: m.URL})
 	}
 	return cs, nil
 }

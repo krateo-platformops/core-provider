@@ -734,15 +734,13 @@ type ChartStatus struct {
 	Maintainers []ChartMaintainer `json:"maintainers,omitempty"`
 }
 
-// ChartMaintainer is helm's Chart.yaml maintainer (helm.sh/helm/v3 chart.Maintainer): name, email
-// and url, and nothing else.
+// ChartMaintainer is a Chart.yaml maintainer reduced to name and url. helm's chart.Maintainer also
+// has an email; it is intentionally not copied: cluster status is dumped wholesale into snapshots,
+// telemetry and support bundles, so PII-shaped data does not enter it. The contact is in the chart.
 type ChartMaintainer struct {
 	// Name is the maintainer's name. Required, as in helm.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
-	// Email is the maintainer's email. Omitted when the chart gives none.
-	// +optional
-	Email string `json:"email,omitempty"`
 	// URL is the maintainer's URL. Omitted when the chart gives none.
 	// +optional
 	URL string `json:"url,omitempty"`

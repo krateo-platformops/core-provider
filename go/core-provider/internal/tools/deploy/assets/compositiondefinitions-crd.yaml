@@ -489,13 +489,10 @@ spec:
                       listed (helm's own shape requires one).
                     items:
                       description: |-
-                        ChartMaintainer is helm's Chart.yaml maintainer (helm.sh/helm/v3 chart.Maintainer): name, email
-                        and url, and nothing else.
+                        ChartMaintainer is a Chart.yaml maintainer reduced to name and url. helm's chart.Maintainer also
+                        has an email; it is intentionally not copied: cluster status is dumped wholesale into snapshots,
+                        telemetry and support bundles, so PII-shaped data does not enter it. The contact is in the chart.
                       properties:
-                        email:
-                          description: Email is the maintainer's email. Omitted when
-                            the chart gives none.
-                          type: string
                         name:
                           description: Name is the maintainer's name. Required, as
                             in helm.
