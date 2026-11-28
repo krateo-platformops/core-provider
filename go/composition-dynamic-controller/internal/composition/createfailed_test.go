@@ -184,6 +184,11 @@ func TestCreateFailedOnDerivedRBAC_AgainstObserve(t *testing.T) {
 			got, err := createFailedOnDerivedRBAC(ctx, mg, cause, now)
 
 			observed, ocause := fail()
+			// applyDerivedRBAC stamps each condition it writes with the real clock (the condition
+			// package's own time.Now, no `now` is passed in), and "Ready is kept ... until" is that
+			// stamp + the grace. Two fail() calls can straddle a second boundary, so give the Observe
+			// composition the instants of the Create one: both passes then see ONE instant.
+			sameInstant(t, mg, observed)
 			dyn := frFakeDyn(ndPortal(""))
 			oerr := failObserveOnDerivedRBAC(ctx, observed, ocause, now, srOpts(dyn))
 			if !controller.IsReadyAssessed(oerr) || err.Error() != oerr.Error() {
@@ -391,5 +396,24 @@ func TestFailedCreateConditions_InstallFailingKeepsReady(t *testing.T) {
 				t.Errorf("%q, want %q", s, tc.want)
 			}
 		})
+	}
+}
+
+// sameInstant copies the LastTransitionTime of every condition on from onto the condition of the same
+// type on to, so two compositions built by two calls of one function carry one set of timestamps.
+func sameInstant(t *testing.T, from, to *unstructured.Unstructured) {
+	t.Helper()
+	at := map[string]metav1.Time{}
+	for _, c := range unstructuredtools.GetConditions(from) {
+		at[c.Type] = c.LastTransitionTime
+	}
+	conds := unstructuredtools.GetConditions(to)
+	for i := range conds {
+		if ts, ok := at[conds[i].Type]; ok {
+			conds[i].LastTransitionTime = ts
+		}
+	}
+	if err := unstructuredtools.SetConditions(to, conds...); err != nil {
+		t.Fatal(err)
 	}
 }
