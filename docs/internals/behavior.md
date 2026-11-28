@@ -235,13 +235,15 @@ worker starts:
   update (maxUnavailable 0) stops the old pod only once the new one is Ready, so
   a readiness that waited for the Lease would never let the old pod go;
 - the old pod drains its in-flight reconciles, **then** releases the Lease; the
-  new pod takes it on its next attempt (2s). The two never reconcile at the same
-  time, so reconciling resumes about drain + 2s after the old pod stops, not when
-  the new pod turns Ready. The witness that a controller reconciles is the Lease's
+  new pod takes it on its next attempt, every `retryPeriod` jittered by client-go
+  to at most 2.2 x `retryPeriod` (`cdc.ownershipLease`, #660: 5s, so within 11s;
+  4.4s at the 2s before #660). The two never reconcile at the same time, so
+  reconciling resumes within drain + 2.2 x `retryPeriod` after the old pod stops,
+  not when the new pod turns Ready. The witness that a controller reconciles is the Lease's
   `spec.holderIdentity` being its pod name, not pod readiness;
 - a Lease it cannot read or write (e.g. missing RBAC) fails `/readyz`, naming the
   Lease;
-- losing the Lease (no renewal within 10s) cancels in-flight reconciles at once
+- losing the Lease (no renewal within `renewDeadline`, 20s by default, twice the 10s before #660, which makes a starved control plane's slow renewals less likely to cost the Lease) cancels in-flight reconciles at once
   and exits the process, which restarts and waits for the Lease again;
 - an unset `COMPOSITION_CONTROLLER_LEASE_NAME` (a ConfigMap rendered before this)
   runs without a Lease, as before. A set name with no `POD_NAMESPACE`/`POD_NAME`

@@ -76,6 +76,7 @@ func manager653(t *testing.T, e *env652, poll time.Duration, limiter workqueue.T
 		t.Fatal(err)
 	}
 	if err := Setup(mgr, Options{
+		LeaseTimings: envtestLeaseTimings,
 		ControllerOptions: controller.Options{
 			Logger: logging.NewNopLogger(), PollInterval: poll, MaxConcurrentReconciles: 5,
 			GlobalRateLimiter: limiter,
@@ -94,6 +95,11 @@ func manager653(t *testing.T, e *env652, poll time.Duration, limiter workqueue.T
 		return passes[key+"-configmap"]
 	}
 }
+
+// envtestLeaseTimings are the controllers' Lease timings every envtest here runs core-provider with
+// (Setup's Options.LeaseTimings, or the connector's and external's leaseTimings): the 15s/10s/2s the fake
+// pool (leases652) writes its Leases with, so G is 20s and Quiet 5s.
+var envtestLeaseTimings = deploy.OwnershipLeaseTimings{Duration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}
 
 // unlimited is a global rate limiter that delays nothing.
 func unlimited() workqueue.TypedRateLimiter[any] { return ratelimiter.NewGlobal(100000) }
@@ -203,7 +209,7 @@ func TestEnvtest_653_OneMemberDoesNotDecideAnother(t *testing.T) {
 		t.Errorf("ControllerActive %q", m)
 	}
 	t0 := time.Now()
-	G := deploy.LeaseTimings.MemberGrace()
+	G := 20 * time.Second // envtestLeaseTimings's: 15s + 2.5 x 2s
 	before := map[string]int{e.key(b, v1): passes(e.key(b, v1)), e.key(c, v1): passes(e.key(c, v1))}
 	// A second witness beside the watch: the live Ready of b and c, sampled. An up-to-date pass writes
 	// no status, so the watch alone can be silent.
@@ -233,9 +239,14 @@ func TestEnvtest_653_OneMemberDoesNotDecideAnother(t *testing.T) {
 	e.leases.dead[leaseName653(e, a)] = true
 	e.leases.mu.Unlock()
 	took := e.waitReady(t, a, "False/Unavailable", "False/Unavailable", 2*time.Minute)
-	t.Logf("a dead member read Unavailable after %s (lease duration %s + G %s)", took.Round(time.Second), deploy.LeaseTimings.Duration, G)
-	if want := deploy.LeaseTimings.Duration + G; took < want-2*time.Second {
+	t.Logf("a dead member read Unavailable after %s (lease duration 15s + G %s)", took.Round(time.Second), G)
+	if want := 15*time.Second + G; took < want-2*time.Second {
 		t.Errorf("Unavailable after %s, before the Lease could be stale for G (%s)", took, want)
+	}
+	// #660: and by the G of the timings Setup was given (20s), not another: at the default 30s/20s/5s G
+	// is 42.5s, and this would read Unavailable only after ~57s.
+	if bound := 15*time.Second + G + 10*time.Second; took > bound {
+		t.Errorf("Unavailable after %s, later than the Lease's 15s + G %s + 10s: G is not the one Setup was given", took, G)
 	}
 	if !strings.Contains(a.message("Ready"), "is not running in pool web: its ownership Lease "+ns652+"/"+leaseName653(e, a)+" has not been held since ") {
 		t.Errorf("Ready %q", a.message("Ready"))
@@ -369,8 +380,8 @@ func TestEnvtest_653_DeadMemberMeasured(t *testing.T) {
 		limiter func() workqueue.TypedRateLimiter[any]
 		bound   time.Duration // 0: measured only
 	}
-	L := deploy.LeaseTimings
-	arms := []arm{{"with the requeue, production's rate limiter", true, production, L.Duration + L.MemberGrace() + time.Minute + 10*time.Second}}
+	// envtestLeaseTimings: the 15s duration + G 20s, then the rate limiter's minute, and slack.
+	arms := []arm{{"with the requeue, production's rate limiter", true, production, 15*time.Second + 20*time.Second + time.Minute + 10*time.Second}}
 	if os.Getenv("MEASURE_653") != "" {
 		arms = append(arms,
 			arm{"with the requeue, no rate limit", true, unlimited, 0},

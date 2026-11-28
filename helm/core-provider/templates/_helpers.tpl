@@ -188,9 +188,64 @@ URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Relea
 KRATEO_NAMESPACE: {{ .Release.Namespace }}
 {{- end }}
 
+{{- /*
+core-provider.durationNs: a Go duration, as values.schema.json's pattern admits it (one or more
+<number><unit>, the number with or without a fraction, units ns/us/µs/ms/s/m/h), in nanoseconds, as a float. helm has no duration parser; this sums
+the parts the way time.ParseDuration does, so the chart can apply client-go's rule to the ownership Lease
+timings before anything is rendered from them (#660).
+*/ -}}
+{{- define "core-provider.durationNs" -}}
+{{- $unit := dict "ns" 1.0 "us" 1000.0 "µs" 1000.0 "μs" 1000.0 "ms" 1000000.0 "s" 1000000000.0 "m" 60000000000.0 "h" 3600000000000.0 -}}
+{{- $total := 0.0 -}}
+{{- range regexFindAll "([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)" (toString .) -1 -}}
+{{- $num := regexFind "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)" . | float64 -}}
+{{- $total = addf $total (mulf $num (get $unit (regexReplaceAll "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)" . ""))) -}}
+{{- end -}}
+{{- $total -}}
+{{- end }}
+
+{{- /*
+core-provider.ownershipLeaseEnv (#660): cdc.ownershipLease, the composition controllers' ownership Lease
+timings, as the three env keys BOTH binaries read: rendered into every controller's process env
+(cdcProcessEnvTail, dedicated and pool) and into core-provider's own ConfigMap (configmap.yaml), from this
+one helper, so the two can never disagree. A set client-go's elector would refuse (duration >
+renewDeadline > retryPeriod x 1.2, its JitterFactor, every one > 0) refuses the render, naming the three:
+the same rule the binaries apply at startup.
+*/ -}}
+{{- define "core-provider.ownershipLeaseEnv" -}}
+{{- $l := .Values.cdc.ownershipLease | default dict -}}
+{{- $d := toString ($l.duration | default "") -}}
+{{- $r := toString ($l.renewDeadline | default "") -}}
+{{- $p := toString ($l.retryPeriod | default "") -}}
+{{- $set := printf "cdc.ownershipLease duration=%q renewDeadline=%q retryPeriod=%q" $d $r $p -}}
+{{- $re := "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$" -}}
+{{- if not (and (regexMatch $re $d) (regexMatch $re $r) (regexMatch $re $p)) -}}
+{{- fail (printf "%s: all three are required, each a Go duration such as 30s (#660)" $set) -}}
+{{- end -}}
+{{- $dn := include "core-provider.durationNs" $d | float64 -}}
+{{- $rn := include "core-provider.durationNs" $r | float64 -}}
+{{- $pn := include "core-provider.durationNs" $p | float64 -}}
+{{- if or (le $dn 0.0) (le $rn 0.0) (le $pn 0.0) -}}
+{{- fail (printf "%s: every one must be greater than zero (#660)" $set) -}}
+{{- end -}}
+{{- if le $dn $rn -}}
+{{- fail (printf "%s: duration must be greater than renewDeadline (client-go's leader-election rule, #660)" $set) -}}
+{{- end -}}
+{{- /* client-go: RenewDeadline <= time.Duration(JitterFactor * float64(RetryPeriod)) is refused; the product truncates to whole nanoseconds. */ -}}
+{{- if le (int64 $rn) (int64 (mulf 1.2 $pn)) -}}
+{{- fail (printf "%s: renewDeadline must be greater than retryPeriod x 1.2 (client-go's JitterFactor, #660)" $set) -}}
+{{- end -}}
+# #660: the composition controllers' ownership Lease timings (values.yaml cdc.ownershipLease), read by
+# every controller and by core-provider under these names. One renewal per controller per retryPeriod.
+COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION: {{ $d | quote }}
+COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RENEW_DEADLINE: {{ $r | quote }}
+COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RETRY_PERIOD: {{ $p | quote }}
+{{- end }}
+
 {{- define "core-provider.cdcProcessEnvTail" -}}
 # Must match the container port named "health" in assets/cdc/deployment.yaml, which the probes use.
 COMPOSITION_CONTROLLER_HEALTH_PROBE_PORT: "{{ .Values.cdc.healthProbe.port }}"
+{{ include "core-provider.ownershipLeaseEnv" . }}
 # #410: bound on every helm operation, hooks included (values.yaml cdc.helmTimeout).
 COMPOSITION_CONTROLLER_HELM_TIMEOUT: {{ .Values.cdc.helmTimeout | quote }}
 {{- if .Values.cdc.metrics.enabled }}

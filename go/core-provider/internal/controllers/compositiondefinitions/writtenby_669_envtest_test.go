@@ -55,7 +55,7 @@ func (e *env644) reconciler669(w compositiondefinitionsv1alpha1.WrittenBy, n *at
 		reconciler.WithExternalConnecter(&connector{
 			dynamic: e.c.dyn, client: e.c.cs, kube: e.kube, apiReader: e.reader,
 			log: logging.NewNopLogger(), pluralizer: pluralizer644{e.c.cs.Discovery()},
-			writtenBy: w,
+			writtenBy: w, leaseTimings: envtestLeaseTimings,
 		}),
 		reconciler.WithCreationGracePeriod(0),
 	)

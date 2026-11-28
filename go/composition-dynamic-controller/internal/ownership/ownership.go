@@ -17,16 +17,17 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller/builder"
 )
 
-// Option returns the builder option that makes the controller hold leaseName, in the pod's own
-// namespace, as the pod.
+// Option returns the builder options that make the controller hold leaseName, in the pod's own
+// namespace, as the pod, with timings (TimingsFromEnv): the same for every member of a process.
 //
 // An empty leaseName returns nil and no error: core-provider before step 2 renders no Lease, and the
 // controller then runs exactly as it did. A Lease name WITH an empty pod namespace or name is an
 // error, never a silent fall back to no Lease: the guard was asked for, and running without it would
 // let a second controller reconcile alongside this one. Both come from the downward API in
 // assets/cdc/deployment.yaml (POD_NAMESPACE, POD_NAME), so they are missing only from a Deployment
-// that core-provider did not render.
-func Option(leaseName, podNamespace, podName string) (builder.FuncOption, error) {
+// that core-provider did not render. Timings that Validate refuses, zero included, are an error too:
+// zero would be unstructured-runtime's 15s/10s/2s, which core-provider does not wait by (#660).
+func Option(leaseName, podNamespace, podName string, timings Timings) ([]builder.FuncOption, error) {
 	if leaseName == "" {
 		return nil, nil
 	}
@@ -34,7 +35,13 @@ func Option(leaseName, podNamespace, podName string) (builder.FuncOption, error)
 		return nil, fmt.Errorf("COMPOSITION_CONTROLLER_LEASE_NAME is %q, but POD_NAMESPACE (%q) or POD_NAME (%q) is empty: "+
 			"cannot hold the ownership lease, and refusing to reconcile without it", leaseName, podNamespace, podName)
 	}
-	return builder.WithOwnership(podNamespace, leaseName, podName), nil
+	if err := timings.Validate(); err != nil {
+		return nil, fmt.Errorf("ownership lease %s: %w", leaseName, err)
+	}
+	return []builder.FuncOption{
+		builder.WithOwnership(podNamespace, leaseName, podName),
+		builder.WithOwnershipTimings(timings.LeaseDuration, timings.RenewDeadline, timings.RetryPeriod),
+	}, nil
 }
 
 // Lost reports whether Run ended because the controller lost its Lease. Its workers were stopped at

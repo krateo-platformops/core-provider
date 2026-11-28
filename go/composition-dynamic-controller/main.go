@@ -296,6 +296,17 @@ func main() {
 		WithValues("cpuPressureThreshold", *cpuPressureThreshold).
 		Info("Starting composition dynamic controller.")
 
+	// #660: the ownership Lease's timings, from the chart's cdc.ownershipLease (the env ConfigMap). An
+	// invalid set refuses to start, naming the three, before any controller is built: a pool would
+	// otherwise fail each member in turn, and client-go only after the informer's first list.
+	leaseTimings, err := ownership.TimingsFromEnv(os.LookupEnv)
+	if err != nil {
+		log.Error(err, "Invalid ownership lease timings.")
+		os.Exit(1)
+	}
+	log.Info("Ownership lease timings", "leaseDuration", leaseTimings.LeaseDuration.String(),
+		"renewDeadline", leaseTimings.RenewDeadline.String(), "retryPeriod", leaseTimings.RetryPeriod.String())
+
 	log.WithValues("deploymentName", *deploymentName).
 		WithValues("otelEnabled", *otelEnabled).
 		WithValues("otelServiceName", *otelServiceName).
@@ -422,6 +433,7 @@ func main() {
 		Workers:                 *workers,
 		PodNamespace:            os.Getenv("POD_NAMESPACE"),
 		PodName:                 os.Getenv("POD_NAME"),
+		OwnershipTimings:        leaseTimings,
 		MetricsBindAddress:      metricsBindAddress,
 		WrittenBy:               writtenBy(),
 	}

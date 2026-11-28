@@ -105,6 +105,9 @@ type PoolOptions struct {
 	DynClient dynamic.Interface
 	// KubeClient lists a pool's pods while it is being deleted.
 	KubeClient client.Client
+	// LeaseTimings are the ownership Lease timings the controllers run with (#660): a controller
+	// leaving a pool is waited for by them. Required where a controller leaves a pool (Deploy).
+	LeaseTimings OwnershipLeaseTimings
 }
 
 // PoolServiceAccount is the pool's ServiceAccount: the subject of every member's derived RBAC, its

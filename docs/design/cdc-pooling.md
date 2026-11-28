@@ -299,8 +299,9 @@ from a new LIST. A member is granted its env ConfigMap before the index names it
 **Leaving is stop-before-revoke**, the pool's form of #263: a retired version, a definition being
 deleted, one that stops naming `<p>` or names another pool. The env ConfigMap is annotated
 `krateo.io/cdc-pool-draining` (a restarted core-provider still knows), the key leaves the index, and
-core-provider waits until the controller's ownership Lease has been unheld for 5s (longer than the
-elector's longest wait between attempts), for at most 60s. Only then is the ConfigMap, the RBAC or the
+core-provider waits until the controller's ownership Lease has been unheld for Quiet, 2.5 x retryPeriod
+(12.5s at the default timings; longer than the elector's longest wait between attempts), for at most 60s,
+or G plus 15s when the timings make that longer (#660). Only then is the ConfigMap, the RBAC or the
 Lease grant removed or given to another identity. A Lease whose record does not change for its own
 duration belongs to a process that died, and counts as unheld:
 client-go's rule, measured on core-provider's clock from when it first saw the record, so no two clocks
@@ -385,17 +386,40 @@ definition reads `Ready=False`/`Unavailable` through the shared pool Deployment.
    it). That is latched: a later failure, a drain or a join does not fail it. The pod's readiness then
    means "this process runs", and no member can flip another.
 2. *core-provider reads each member's Lease*, `templates.ControllerLeaseName` (`<version>.<plural>.<group>`)
-   in the management namespace. The holder is a pod name, and the elector's timings are 15s duration,
-   10s renew deadline and 2s retry.
+   in the management namespace. The holder is a pod name, and the elector's timings are the chart's
+   `cdc.ownershipLease` (#660): 30s duration, 20s renew deadline and 5s retry by default (15s/10s/2s,
+   unstructured-runtime's, before #660).
 
 **States and text.** These apply only when the pool Deployment has rolled out. A Deployment rolling
 out, given up or unavailable keeps today's rows for every member, because then the process is the
-problem. `G` is `leaseDuration + 2.5 x retryPeriod` (20s at the default 15s/10s/2s): a successor takes a
+problem. `G` is `leaseDuration + 2.5 x retryPeriod` (42.5s at the default 30s/20s/5s; 20s at the
+15s/10s/2s before #660): a successor takes a
 released Lease within the elector's longest wait between attempts (2.2 x retryPeriod), and one whose
 holder died without releasing it within a full duration more, so neither a bump nor a pool pod's
-rolling update flips anyone. Every such wait is derived from `deploy.LeaseTimings`
-(`OwnershipLeaseTimings{Duration, RenewDeadline, RetryPeriod}`), the timings the controllers run with;
-#652's "unheld for 5s" is its `Quiet()`, `2.5 x retryPeriod`.
+rolling update flips anyone. Every such wait is derived from `deploy.OwnershipLeaseTimings{Duration,
+RenewDeadline, RetryPeriod}`, the timings the controllers run with: core-provider reads them at startup
+from the same chart value the controllers read (#660, below) and passes them down through its options
+(`compositiondefinitions.Options.LeaseTimings`, then `PoolOptions` and `UndeployOptions`); #652's
+"unheld for Quiet" is its `Quiet()`, `2.5 x retryPeriod`.
+
+**The timings are one chart value (#660).** `cdc.ownershipLease.{duration,renewDeadline,retryPeriod}`
+(default 30s/20s/5s) is rendered by one helper (`core-provider.ownershipLeaseEnv`) under
+the same three env names, `COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION`, `_RENEW_DEADLINE` and
+`_RETRY_PERIOD`, into every controller's process env (dedicated and pool) and into core-provider's own
+ConfigMap, so the two binaries cannot disagree. A set client-go's elector would refuse (duration >
+renewDeadline > retryPeriod x 1.2, every one > 0) is refused by the chart (schema and template) and by
+both binaries at startup, naming the three. Why: a holder renews every retryPeriod, one Lease PUT per
+controller per retryPeriod. At 2s that was 0.5/s per controller, ~25/s for 50 controllers, the largest
+write load at rest of a SQLite (kine) tenant control plane (measured at 2.13.105: 24.8 Lease PUTs/s
+of 171 requests/s); at 5s it is 0.2/s, ~10/s for 50. The costs: a controller pod that dies without
+releasing its Lease and is replaced by a pod of another name is waited for up to the duration plus 2.2 x retryPeriod, 41s
+instead of 19.4s (the replacement measures expiry from its own first read of the Lease, then notices it at its next
+jittered attempt; a replacement slower to start than the duration waits only for that attempt). G still covers it. A graceful rollout releases at once, but the successor, which retries every retryPeriod
+jittered up to 2.2 x retryPeriod, takes the released Lease within 11s instead of 4.4s. A container
+restart in the same pod reacquires at once (it is the holder already). G, the grace before a pool
+member reads Unavailable, is 42.5s instead of 20s. Besides the write cut, renewDeadline 20s (was 10s) doubles how
+long a holder tolerates slow renewals before it gives the Lease up and exits: on a CPU-starved SQLite tenant
+control plane, the difference between a slow API server and a controller restart loop.
 
 | member | Ready | ControllerActive |
 |---|---|---|
@@ -431,7 +455,7 @@ member that comes back is seen at once.
   `status.controller.pool` names it (#580). Today a pool Deployment wakes nobody: the watch's predicate
   needs the per-version labels it does not carry.
 - Lease events, filtered to a changed `holderIdentity` and to create/delete. A renewal changes neither,
-  so 15 members renewing every 2s wake nothing. The informer still sees the renewals, which is how
+  so 15 members renewing every retryPeriod (5s by default) wake nothing. The informer still sees the renewals, which is how
   freshness is measured.
 - A member that dies inside a live process without releasing its Lease leaves no event. Each Observe of
   a pool member records when its verdict can next change without one (a fresh Lease: when it would be

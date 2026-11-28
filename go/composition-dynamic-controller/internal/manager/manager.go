@@ -82,6 +82,9 @@ type Process struct {
 	// PodNamespace and PodName are where and as whom each member takes its ownership Lease.
 	PodNamespace string
 	PodName      string
+	// OwnershipTimings are every member's ownership Lease timings (ownership.TimingsFromEnv, #660):
+	// one set for the process, so a pool's members renew alike. Required for a member with a Lease.
+	OwnershipTimings ownership.Timings
 
 	// MetricsBindAddress serves the process's Prometheus registry ("" or "0": off). One server for
 	// the process: each member's controller would otherwise start its own on the same port.
@@ -199,13 +202,12 @@ func (p Process) build(ctx context.Context, m Member) (*controller.Controller, e
 		builder.WithSpanAttributes(controllerAttr),
 	}
 	// Pool step 2: reconcile only while holding this Kind x version's Lease.
-	ownershipOpt, err := ownership.Option(m.LeaseName, p.PodNamespace, p.PodName)
+	// The timings are the PROCESS's: every member of a pool renews on the same ones (#660).
+	ownershipOpts, err := ownership.Option(m.LeaseName, p.PodNamespace, p.PodName, p.OwnershipTimings)
 	if err != nil {
 		return nil, fmt.Errorf("configuring the ownership lease: %w", err)
 	}
-	if ownershipOpt != nil {
-		opts = append(opts, ownershipOpt)
-	}
+	opts = append(opts, ownershipOpts...)
 	if p.Governor != nil {
 		opts = append(opts, builder.WithRateLimitGovernor(p.Governor))
 	}

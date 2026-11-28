@@ -16,6 +16,7 @@ import (
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions"
 	"github.com/krateo-platformops/core-provider/internal/controllers/compositionmirror"
 	"github.com/krateo-platformops/core-provider/internal/controllers/kubernetestargets"
+	"github.com/krateo-platformops/core-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/ptr"
@@ -184,6 +185,17 @@ func run() int {
 		"otel-service-name", *metricsServiceName,
 		"otel-export-interval", metricsExportInterval.String())
 
+	// #660: the composition controllers' ownership Lease timings, from the chart value they read too
+	// (cdc.ownershipLease, rendered into this pod's ConfigMap under the controllers' env names). Every
+	// wait on those Leases is measured by them. An invalid set refuses to start, naming the three.
+	leaseTimings, err := deploy.OwnershipLeaseTimingsFromEnv(os.LookupEnv)
+	if err != nil {
+		log.Error(err, "Invalid ownership lease timings")
+		return 1
+	}
+	log.Info("Composition controllers' ownership lease timings", "duration", leaseTimings.Duration.String(),
+		"renewDeadline", leaseTimings.RenewDeadline.String(), "retryPeriod", leaseTimings.RetryPeriod.String())
+
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
 
@@ -304,6 +316,7 @@ func run() int {
 		log.Info("POD_NAMESPACE or POD_SERVICE_ACCOUNT is unset: audit records will name no actor and be marked incomplete")
 	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
+		LeaseTimings:       leaseTimings,
 		Audit:              auditRecorder,
 		ControllerOptions:  o,
 		Metrics:            telemetryMetrics,

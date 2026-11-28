@@ -209,6 +209,7 @@ func (e *env644) reconciler() *reconciler.Reconciler {
 		reconciler.WithExternalConnecter(&connector{
 			dynamic: e.c.dyn, client: e.c.cs, kube: e.kube, apiReader: e.reader,
 			log: logging.NewNopLogger(), pluralizer: pluralizer644{e.c.cs.Discovery()},
+			leaseTimings: envtestLeaseTimings,
 		}),
 		reconciler.WithCreationGracePeriod(0),
 	)

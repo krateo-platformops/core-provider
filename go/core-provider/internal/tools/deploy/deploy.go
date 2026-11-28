@@ -82,6 +82,9 @@ type UndeployOptions struct {
 	// LocalPools says ControllerNamespace may hold pools (a local definition). Undeploy then stops a
 	// controller a pool runs, and waits for its ownership Lease, before removing what it runs with.
 	LocalPools bool
+	// LeaseTimings are the ownership Lease timings the controllers run with (#660), by which that wait
+	// is measured. Required with LocalPools.
+	LeaseTimings OwnershipLeaseTimings
 	// DrainTimeout bounds how long Undeploy waits for the retiring controller's pod to disappear, or
 	// for a pool to release the controller's ownership Lease,
 	// before it deletes that pod's ServiceAccount and RBAC (#263). Zero means derive it from the
@@ -459,7 +462,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// first: everything below re-subjects what it runs with to another identity (#652).
 	leaseGuarded := false
 	if opts.Pools != nil && !opts.DryRunServer {
-		if _, err := releasePoolMember(ctx, opts.DynClient, opts.ControllerNamespace, opts.GVR, opts.Pool, 0); err != nil {
+		if _, err := releasePoolMember(ctx, opts.DynClient, opts.ControllerNamespace, opts.GVR, opts.Pool, 0, opts.Pools.LeaseTimings); err != nil {
 			return "", fmt.Errorf("leaving the pool that ran this controller: %w", err)
 		}
 		if leaseGuarded, err = deployedWithLease(ctx, opts.DynClient, opts.ControllerNamespace, opts.GVR); err != nil {
@@ -798,7 +801,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	// The same for a controller a pool runs: it has no Deployment, and its pod is the pool's. It is
 	// dropped from the pool's index, and its ownership Lease says when it has stopped (#652).
 	if opts.LocalPools {
-		if _, err := releasePoolMember(ctx, opts.DynamicClient, opts.ControllerNamespace, opts.GVR, "", opts.DrainTimeout); err != nil {
+		if _, err := releasePoolMember(ctx, opts.DynamicClient, opts.ControllerNamespace, opts.GVR, "", opts.DrainTimeout, opts.LeaseTimings); err != nil {
 			if errors.Is(err, ErrDrainUnobservable) {
 				log.Error(err, "Cannot observe the retiring pool member's drain, so its identity will "+
 					"NOT be revoked and will be left in place. Grant the controller 'get' on "+

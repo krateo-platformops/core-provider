@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 
@@ -41,6 +42,10 @@ var (
 	clusterName string
 	namespace   string
 )
+
+// integrationLeaseTimings are the controllers' Lease timings these tests run the deploy options with
+// (#660): zero is refused by design, so every UndeployOptions and PoolOptions here names a real set.
+var integrationLeaseTimings = OwnershipLeaseTimings{Duration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}
 
 func TestMain(m *testing.M) {
 	xenv.SetTestMode(true)
@@ -134,6 +139,7 @@ func TestDeploy(t *testing.T) {
 		}
 
 		opts := UndeployOptions{
+			LeaseTimings:           integrationLeaseTimings,
 			DiscoveryClient:        memory.NewMemCacheClient(discovery.NewDiscoveryClientForConfigOrDie(cfg.Client().RESTConfig())),
 			RBACFolderPath:         "testdata",
 			DeploymentTemplatePath: "testdata/deploy.yaml",
@@ -253,7 +259,7 @@ func TestLookup(t *testing.T) {
 		// What the controller passes for every local definition (compositiondefinitions.poolOptions):
 		// the pools of the controller's namespace, rendered from the shipped chart's own assets.
 		manifests := renderShippedChart(t, nil)
-		member.Pools = &PoolOptions{Namespace: namespace, DynClient: dyn, KubeClient: cli, Assets: PoolAssets{
+		member.Pools = &PoolOptions{Namespace: namespace, DynClient: dyn, KubeClient: cli, LeaseTimings: integrationLeaseTimings, Assets: PoolAssets{
 			SizingPath:             mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-sizing.json"),
 			ConfigmapTemplatePath:  mountedTemplate(t, manifests, "cdc-configmap.yaml", "pool-configmap.yaml"),
 			DeploymentTemplatePath: mountedTemplate(t, manifests, "cdc-deployment.yaml", "pool-deployment.yaml"),

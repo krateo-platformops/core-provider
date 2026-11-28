@@ -32,6 +32,7 @@ import (
 
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/health"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/metrics"
+	"github.com/krateo-platformops/composition-dynamic-controller/internal/ownership"
 	"github.com/krateo-platformops/composition-dynamic-controller/internal/tools/archive"
 	"github.com/krateo-platformops/composition-dynamic-controller/pkg/meta"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -229,6 +230,9 @@ func startPoolEnv(t *testing.T, grace time.Duration, gvrs ...schema.GroupVersion
 	proc.Config = cfg
 	proc.Log = runtimeLog{Logger: logging.NewNopLogger(), s: e.log}
 	proc.PodNamespace, proc.PodName = drainNS, drainPod
+	// #660: a duration of the process's own (not 15s, unstructured-runtime's default, so a member that
+	// ignored the process's timings is seen), with the renew and retry these tests were written against.
+	proc.OwnershipTimings = ownership.Timings{LeaseDuration: 17 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}
 	proc.PackageInfoGetter = e.get
 	proc.Pluralizer = plurals
 	proc.EventRecorder = *event.NewAPIRecorder(&events.FakeRecorder{})
@@ -350,6 +354,18 @@ func TestEnvtest_PoolDrainBlocksNobody(t *testing.T) {
 	e.eventuallyReady("both members ready")
 	e.busy(slow)
 	eventually(t, "quick holds its Lease", func() bool { return e.holder(quick) == drainPod })
+	eventually(t, "slow holds its Lease", func() bool { return e.holder(slow) == drainPod })
+	// #660: every member of the process renews on the process's timings.
+	for _, gvr := range []schema.GroupVersionResource{slow, quick} {
+		got := int32(-1) // unset
+		l, err := e.cs.CoordinationV1().Leases(drainNS).Get(context.Background(), leaseOf(gvr), metav1.GetOptions{})
+		if err == nil && l.Spec.LeaseDurationSeconds != nil {
+			got = *l.Spec.LeaseDurationSeconds
+		}
+		if got != 17 {
+			t.Fatalf("%s's Lease: %v, leaseDurationSeconds %d; want 17, the process's", gvr.Resource, err, got)
+		}
+	}
 
 	e.index(map[schema.GroupVersionResource]string{slow: "2", quick: "1", later: "1"}) // slow is replaced, later joins
 	eventually(t, "the pool's own account names the draining member", func() bool {

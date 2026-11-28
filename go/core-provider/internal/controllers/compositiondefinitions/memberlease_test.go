@@ -32,7 +32,8 @@ func lease653(holder string, renewed time.Time, secs int32) *coordinationv1.Leas
 func TestLeaseVerdict(t *testing.T) {
 	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	pod := "cdc-pool-web-7d9f-abcde"
-	G := deploy.LeaseTimings.MemberGrace()
+	tm := deploy.OwnershipLeaseTimings{Duration: 30 * time.Second, RenewDeadline: 20 * time.Second, RetryPeriod: 5 * time.Second}
+	G := 42500 * time.Millisecond // 30s + 2.5 x 5s
 	for _, c := range []struct {
 		name  string
 		rec   leaseRecord
@@ -52,9 +53,14 @@ func TestLeaseVerdict(t *testing.T) {
 		{"first list, renewed recently by its clock", leaseRecord{lease653(pod, t0.Add(-5*time.Second), 15), t0, true}, t0.Add(time.Second), memberRunning, time.Time{}},
 		{"first list, renewed long ago by its clock", leaseRecord{lease653(pod, t0.Add(-time.Hour), 15), t0, true}, t0.Add(time.Second), memberStarting, t0},
 		{"first list, no renewal seen in a duration since", leaseRecord{lease653(pod, t0.Add(-time.Second), 15), t0, true}, t0.Add(16 * time.Second), memberStarting, t0.Add(15 * time.Second)},
+		// #660: a Lease that does not say its duration is judged by the timings the controllers run with
+		// (30s here), not by unstructured-runtime's 15s.
+		{"no duration of its own: the timings'", leaseRecord{lease653(pod, t0, 0), t0, false}, t0.Add(20 * time.Second), memberRunning, time.Time{}},
+		{"no duration of its own, stale after the timings'", leaseRecord{lease653(pod, t0, 0), t0, false}, t0.Add(31 * time.Second), memberStarting, t0.Add(30 * time.Second)},
+		{"released less than G ago", leaseRecord{lease653("", t0, 15), t0, false}, t0.Add(42 * time.Second), memberStarting, t0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := leaseVerdict("krateo-system/l", "web", c.rec, c.now)
+			s := leaseVerdict("krateo-system/l", "web", c.rec, c.now, tm)
 			if s.kind != c.kind || !s.since.Equal(c.since) {
 				t.Errorf("kind %d since %s, want %d since %s", s.kind, s.since, c.kind, c.since)
 			}
@@ -94,7 +100,7 @@ func TestMemberConditions(t *testing.T) {
 // The clock: what wakes a definition, and when a Lease no one has seen yet counts from.
 func TestLeaseClock(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
-	c := newLeaseClock(func() time.Time { return now })
+	c := newLeaseClock(func() time.Time { return now }, deploy.OwnershipLeaseTimings{Duration: 30 * time.Second, RenewDeadline: 20 * time.Second, RetryPeriod: 5 * time.Second})
 	pod := "cdc-pool-web-a-b"
 	l := lease653(pod, now, 15)
 	if c.observe(l, true, false) {
@@ -116,7 +122,11 @@ func TestLeaseClock(t *testing.T) {
 	}
 	// Absent: it counts from the first time it was looked for, and stays put.
 	first := c.state("web", member653, "krateo-system")
-	now = now.Add(deploy.LeaseTimings.MemberGrace())
+	now = now.Add(42 * time.Second)
+	if s := c.state("web", member653, "krateo-system"); s.kind != memberStarting {
+		t.Errorf("absent for 42s, less than G (42.5s at 30s/20s/5s): %+v", s)
+	}
+	now = now.Add(500 * time.Millisecond)
 	if s := c.state("web", member653, "krateo-system"); s.kind != memberNotRunning || !s.since.Equal(first.since) {
 		t.Errorf("absent for G: %+v (first %+v)", s, first)
 	}
@@ -211,7 +221,7 @@ func TestMemberRecheck_IsClearedOffThePool(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			now := time.Now()
 			e := &external{kube: clientfake.NewClientBuilder().WithObjects(poolDep.DeepCopy()).Build(),
-				leases: newLeaseClock(func() time.Time { return now }), requeue: &memberRequeue{}}
+				leases: newLeaseClock(func() time.Time { return now }, deploy.OwnershipLeaseTimings{Duration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}), requeue: &memberRequeue{}}
 			hook := memberPollHook(e.requeue)
 			member := poolCD("team-a", "page", 1, "v1-0-0", "pages")
 			// Premise: as a member whose Lease nobody holds yet, it is starting, rechecked at G.

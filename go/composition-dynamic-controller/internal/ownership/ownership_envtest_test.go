@@ -102,15 +102,28 @@ func TestEnvtest_ASecondControllerForTheSameKindVersionIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// #660: the timings as main reads them, from the env the chart renders (literal names and values,
+	// short so the test is). The Lease must carry them: leaseDurationSeconds is what a successor waits.
+	timings, err := TimingsFromEnv(func(k string) (string, bool) {
+		v, ok := map[string]string{
+			"COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION":       "8s",
+			"COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RENEW_DEADLINE": "5s",
+			"COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_RETRY_PERIOD":   "1s",
+		}[k]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	build := func(pod string) (*controller.Controller, *countingClient) {
 		t.Helper()
-		opt, err := Option(lease, ns, pod)
-		if err != nil || opt == nil {
-			t.Fatalf("Option for %s: %v (option %v)", pod, err, opt != nil)
+		opts, err := Option(lease, ns, pod, timings)
+		if err != nil || opts == nil {
+			t.Fatalf("Option for %s: %v (options %v)", pod, err, opts != nil)
 		}
-		c, err := builder.Build(ctx, builder.Configuration{Config: cfg, GVR: gvr, ProviderName: "composition-dynamic-controller"},
-			builder.WithResyncInterval(time.Hour), builder.WithGracefulShutdownTimeout(5*time.Second), opt, builder.WithPluralizer(fixedPluralizer{gvr}),
+		opts = append(opts, builder.WithResyncInterval(time.Hour), builder.WithGracefulShutdownTimeout(5*time.Second), builder.WithPluralizer(fixedPluralizer{gvr}),
 			builder.WithLogger(logging.NewLogrLogger(logr.FromSlogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})).WithValues("pod", pod))))
+		c, err := builder.Build(ctx, builder.Configuration{Config: cfg, GVR: gvr, ProviderName: "composition-dynamic-controller"}, opts...)
 		if err != nil {
 			t.Fatalf("building %s: %v", pod, err)
 		}
@@ -134,6 +147,14 @@ func TestEnvtest_ASecondControllerForTheSameKindVersionIsRefused(t *testing.T) {
 	if h := holder(); h != "pod-a" {
 		t.Fatalf("Lease %s/%s holder = %q, want pod-a", ns, lease, h)
 	}
+	got := int32(-1) // unset
+	l, err := cs.CoordinationV1().Leases(ns).Get(ctx, lease, metav1.GetOptions{})
+	if err == nil && l.Spec.LeaseDurationSeconds != nil {
+		got = *l.Spec.LeaseDurationSeconds
+	}
+	if got != 8 {
+		t.Fatalf("Lease %s/%s: %v, leaseDurationSeconds %d; want 8, the env's COMPOSITION_CONTROLLER_OWNERSHIP_LEASE_DURATION", ns, lease, err, got)
+	}
 
 	b, extB := build("pod-b")
 	ctxB, stopB := context.WithCancel(ctx)
@@ -141,9 +162,9 @@ func TestEnvtest_ASecondControllerForTheSameKindVersionIsRefused(t *testing.T) {
 	doneB := make(chan error, 1)
 	go func() { doneB <- b.Run(ctxB, 1) }()
 
-	// Refused: it lists (Ready), and reconciles nothing for longer than a full lease duration (15s).
+	// Refused: it lists (Ready), and reconciles nothing for longer than a full lease duration (8s).
 	waitFor(t, "the second controller to be Ready", 30*time.Second, func() bool { return b.ReadyzCheck(nil) == nil })
-	time.Sleep(17 * time.Second)
+	time.Sleep(10 * time.Second)
 	if n := extB.observes.Load(); n != 0 {
 		t.Fatalf("the second controller for %s reconciled %d times while pod-a held the Lease", gvr, n)
 	}
